@@ -48,9 +48,17 @@ jobs:
         run: |
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
 
+      - name: Create and push Git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "policy-engine-${{ inputs.version }}" -m "Release Policy Engine ${{ inputs.version }}"
+          git push origin "policy-engine-${{ inputs.version }}"
+
       - name: Image Summary
         run: |
           echo "### Policy Engine Image Released :rocket:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Version:** \`${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Git Tag:** \`policy-engine-${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** \`${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY

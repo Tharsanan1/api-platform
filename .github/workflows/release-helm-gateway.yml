@@ -59,6 +59,13 @@ jobs:
         run: |
           helm push ${{ env.CHART_NAME }}-${{ inputs.version }}.tgz oci://${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.REGISTRY_PATH }}
 
+      - name: Create and push Git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "helm-gateway-${{ inputs.version }}" -m "Release Gateway Helm Chart ${{ inputs.version }}"
+          git push origin "helm-gateway-${{ inputs.version }}"
+
       - name: Chart Summary
         run: |
           echo "### Gateway Helm Chart Released :rocket:" >> $GITHUB_STEP_SUMMARY
@@ -66,6 +73,7 @@ jobs:
           echo "**Chart Name:** \`${{ env.CHART_NAME }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Chart Version:** \`${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**App Version:** \`${{ inputs.appVersion }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Git Tag:** \`helm-gateway-${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Registry:** \`oci://${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.REGISTRY_PATH }}/${{ env.CHART_NAME }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "#### Install Command" >> $GITHUB_STEP_SUMMARY

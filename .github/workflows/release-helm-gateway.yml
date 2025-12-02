@@ -59,12 +59,18 @@ jobs:
         run: |
           helm push ${{ env.CHART_NAME }}-${{ inputs.version }}.tgz oci://${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.REGISTRY_PATH }}
 
-      - name: Create and push Git tag
+      - name: Commit version changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${{ env.CHART_PATH }}/Chart.yaml
+          git commit -m "chore: bump helm-gateway chart version to ${{ inputs.version }}"
+
+      - name: Create and push Git tag
+        run: |
           git tag -a "helm-gateway-${{ inputs.version }}" -m "Release Gateway Helm Chart ${{ inputs.version }}"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "helm-gateway-${{ inputs.version }}"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:main
 
       - name: Chart Summary
         run: |

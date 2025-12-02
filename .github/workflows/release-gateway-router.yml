@@ -25,6 +25,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Update VERSION file
+        working-directory: gateway/router
+        run: |
+          echo "${{ inputs.version }}" > VERSION
+          echo "Updated VERSION file:"
+          cat VERSION
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -48,12 +55,18 @@ jobs:
         run: |
           docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
 
-      - name: Create and push Git tag
+      - name: Commit version changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add gateway/router/VERSION
+          git commit -m "chore: bump gateway-router version to ${{ inputs.version }}"
+
+      - name: Create and push Git tag
+        run: |
           git tag -a "gateway-router-${{ inputs.version }}" -m "Release Gateway Router ${{ inputs.version }}"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "gateway-router-${{ inputs.version }}"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:main
 
       - name: Image Summary
         run: |

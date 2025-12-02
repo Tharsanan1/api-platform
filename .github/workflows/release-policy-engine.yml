@@ -18,7 +18,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -53,7 +53,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "policy-engine-${{ inputs.version }}" -m "Release Policy Engine ${{ inputs.version }}"
-          git push origin "policy-engine-${{ inputs.version }}"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "policy-engine-${{ inputs.version }}"
 
       - name: Image Summary
         run: |

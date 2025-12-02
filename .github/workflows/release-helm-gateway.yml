@@ -23,7 +23,7 @@ jobs:
   release-helm-chart:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -64,7 +64,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "helm-gateway-${{ inputs.version }}" -m "Release Gateway Helm Chart ${{ inputs.version }}"
-          git push origin "helm-gateway-${{ inputs.version }}"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "helm-gateway-${{ inputs.version }}"
 
       - name: Chart Summary
         run: |

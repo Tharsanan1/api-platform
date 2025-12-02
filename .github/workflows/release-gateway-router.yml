@@ -12,6 +12,7 @@ env:
   IMAGE_NAME: api-platform-gateway-router
   REGISTRY: ghcr.io
   REGISTRY_USERNAME: tharsanan1
+  REPO_NAME: api-platform
 
 jobs:
   build-and-push:
@@ -41,15 +42,15 @@ jobs:
 
       - name: Tag Docker image
         run: |
-          docker tag wso2/${{ env.IMAGE_NAME }}:${{ inputs.version }} ${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+          docker tag wso2/${{ env.IMAGE_NAME }}:${{ inputs.version }} ${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
 
       - name: Push Docker image
         run: |
-          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+          docker push ${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
 
       - name: Image Summary
         run: |
           echo "### Gateway Router Image Released :rocket:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Version:** \`${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY

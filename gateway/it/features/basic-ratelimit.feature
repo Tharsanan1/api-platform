@@ -258,11 +258,18 @@ Feature: Basic Rate Limiting
             version: v0.1.0
             params:
               limits:
-                - limit: 6
+                - limit: 5
                   duration: "1h"
         operations:
           - method: GET
             path: /health
+            policies:
+              - name: basic-ratelimit
+                version: v0.1.0
+                params:
+                  limits:
+                    - limit: 100
+                      duration: "1h"
           - method: GET
             path: /resource-a
           - method: GET

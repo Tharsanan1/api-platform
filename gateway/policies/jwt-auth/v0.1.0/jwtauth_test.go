@@ -319,7 +319,8 @@ func TestJWTAuthPolicy_CustomClaims(t *testing.T) {
 		},
 		"keyManagers": []interface{}{
 			map[string]interface{}{
-				"name": "test-issuer",
+				"name":   "test-issuer",
+				"issuer": "https://issuer.example.com",
 				"jwks": map[string]interface{}{
 					"remote": map[string]interface{}{"uri": jwksServer.URL + "/jwks.json"},
 				},
@@ -472,7 +473,8 @@ func TestJWTAuthPolicy_CustomHeaderPrefix(t *testing.T) {
 		"allowedAlgorithms": []interface{}{"RS256"},
 		"keyManagers": []interface{}{
 			map[string]interface{}{
-				"name": "test-issuer",
+				"name":   "test-issuer",
+				"issuer": "https://issuer.example.com",
 				"jwks": map[string]interface{}{
 					"remote": map[string]interface{}{"uri": jwksServer.URL + "/jwks.json"},
 				},

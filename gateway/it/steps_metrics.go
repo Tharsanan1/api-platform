@@ -29,6 +29,25 @@ import (
 	"github.com/wso2/api-platform/gateway/it/steps"
 )
 
+var (
+	// apiCountMetricRegex is the regex pattern for parsing API count metrics
+	apiCountMetricRegex = regexp.MustCompile(`gateway_controller_apis_total\{[^}]*\}\s+(\d+)`)
+)
+
+const (
+	// testAPIDefinition is a simple API definition used for testing metrics
+	testAPIDefinition = `
+name: test-metrics-api
+version: v1
+basePath: /test-metrics
+backend:
+  url: http://it-sample-backend:9080
+endpoints:
+  - path: /test
+    method: GET
+`
+)
+
 // RegisterMetricsSteps registers all metrics step definitions
 func RegisterMetricsSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) {
 	ctx.Step(`^I send a GET request to the gateway controller metrics endpoint$`, func() error {
@@ -114,14 +133,16 @@ func (s *TestState) getResponseBody() (string, error) {
 // parseAPICountFromMetrics parses the API count from prometheus metrics
 func parseAPICountFromMetrics(metricsBody string) int {
 	count := 0
-	re := regexp.MustCompile(`gateway_controller_apis_total\{[^}]*\}\s+(\d+)`)
-	matches := re.FindAllStringSubmatch(metricsBody, -1)
+	matches := apiCountMetricRegex.FindAllStringSubmatch(metricsBody, -1)
 	for _, match := range matches {
 		if len(match) > 1 {
 			val, err := strconv.Atoi(match[1])
-			if err == nil {
-				count += val
+			if err != nil {
+				// Log parsing error but continue processing other matches
+				fmt.Printf("Warning: failed to parse metric value '%s': %v\n", match[1], err)
+				continue
 			}
+			count += val
 		}
 	}
 	return count
@@ -162,18 +183,7 @@ func (s *TestState) iExtractCurrentAPICountFromMetrics() error {
 
 // iCreateTestAPIViaGatewayController creates a test API
 func (s *TestState) iCreateTestAPIViaGatewayController(httpSteps *steps.HTTPSteps) error {
-	// Create a simple test API
-	apiYAML := `
-name: test-metrics-api
-version: v1
-basePath: /test-metrics
-backend:
-  url: http://it-sample-backend:9080
-endpoints:
-  - path: /test
-    method: GET
-`
-	body := &godog.DocString{Content: apiYAML}
+	body := &godog.DocString{Content: testAPIDefinition}
 	httpSteps.SetHeader("Content-Type", "application/yaml")
 	if err := httpSteps.SendPOSTToService("gateway-controller", "/apis", body); err != nil {
 		return err

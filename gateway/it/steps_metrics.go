@@ -84,6 +84,7 @@ func (s *TestState) theResponseShouldContainPrometheusMetrics() error {
 }
 
 // getResponseBody is a helper to read and cache the response body
+// NOTE: This method assumes the caller already holds s.mutex lock
 func (s *TestState) getResponseBody() (string, error) {
 	// Check if body is already cached
 	bodyStr, ok := s.Context["last_response_body"].(string)
@@ -128,8 +129,8 @@ func parseAPICountFromMetrics(metricsBody string) int {
 
 // theMetricsShouldContain verifies the metrics contain a specific metric name
 func (s *TestState) theMetricsShouldContain(metricName string) error {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 
 	bodyStr, err := s.getResponseBody()
 	if err != nil {

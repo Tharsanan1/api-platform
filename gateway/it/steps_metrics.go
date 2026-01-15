@@ -69,25 +69,9 @@ func (s *TestState) theResponseShouldContainPrometheusMetrics() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.LastResponse == nil {
-		return fmt.Errorf("no response received")
-	}
-
-	// Read the body once and store it
-	if s.LastResponse.Body != nil {
-		body, err := io.ReadAll(s.LastResponse.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response body: %w", err)
-		}
-		s.LastResponse.Body.Close()
-		
-		// Store the body in context for later use
-		s.Context["last_response_body"] = string(body)
-	}
-
-	bodyStr, ok := s.Context["last_response_body"].(string)
-	if !ok {
-		return fmt.Errorf("response body not available")
+	bodyStr, err := s.getResponseBody()
+	if err != nil {
+		return err
 	}
 
 	// Check for prometheus format indicators
@@ -194,9 +178,9 @@ endpoints:
 		return err
 	}
 
-	// Store the last response in our state as well
+	// Clear the cached response body since we'll be reading metrics again
 	s.mutex.Lock()
-	s.LastResponse = httpSteps.LastResponse()
+	delete(s.Context, "last_response_body")
 	s.mutex.Unlock()
 
 	return nil

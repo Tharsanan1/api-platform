@@ -99,18 +99,57 @@ func (s *TestState) theResponseShouldContainPrometheusMetrics() error {
 	return nil
 }
 
+// getResponseBody is a helper to read and cache the response body
+func (s *TestState) getResponseBody() (string, error) {
+	// Check if body is already cached
+	bodyStr, ok := s.Context["last_response_body"].(string)
+	if ok {
+		return bodyStr, nil
+	}
+
+	// Read body if not already read
+	if s.LastResponse == nil {
+		return "", fmt.Errorf("no response received")
+	}
+
+	if s.LastResponse.Body != nil {
+		body, err := io.ReadAll(s.LastResponse.Body)
+		if err != nil {
+			return "", fmt.Errorf("failed to read response body: %w", err)
+		}
+		s.LastResponse.Body.Close()
+		bodyStr = string(body)
+		s.Context["last_response_body"] = bodyStr
+		return bodyStr, nil
+	}
+
+	return "", fmt.Errorf("response body not available")
+}
+
+// parseAPICountFromMetrics parses the API count from prometheus metrics
+func parseAPICountFromMetrics(metricsBody string) int {
+	count := 0
+	re := regexp.MustCompile(`gateway_controller_apis_total\{[^}]*\}\s+(\d+)`)
+	matches := re.FindAllStringSubmatch(metricsBody, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			val, err := strconv.Atoi(match[1])
+			if err == nil {
+				count += val
+			}
+		}
+	}
+	return count
+}
+
 // theMetricsShouldContain verifies the metrics contain a specific metric name
 func (s *TestState) theMetricsShouldContain(metricName string) error {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	if s.LastResponse == nil {
-		return fmt.Errorf("no response received")
-	}
-
-	bodyStr, ok := s.Context["last_response_body"].(string)
-	if !ok {
-		return fmt.Errorf("response body not available")
+	bodyStr, err := s.getResponseBody()
+	if err != nil {
+		return err
 	}
 
 	if !strings.Contains(bodyStr, metricName) {
@@ -125,40 +164,13 @@ func (s *TestState) iExtractCurrentAPICountFromMetrics() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.LastResponse == nil {
-		return fmt.Errorf("no response received")
-	}
-
-	// Read body if not already read
-	bodyStr, ok := s.Context["last_response_body"].(string)
-	if !ok {
-		if s.LastResponse.Body != nil {
-			body, err := io.ReadAll(s.LastResponse.Body)
-			if err != nil {
-				return fmt.Errorf("failed to read response body: %w", err)
-			}
-			s.LastResponse.Body.Close()
-			bodyStr = string(body)
-			s.Context["last_response_body"] = bodyStr
-		} else {
-			return fmt.Errorf("response body not available")
-		}
+	bodyStr, err := s.getResponseBody()
+	if err != nil {
+		return err
 	}
 
 	// Parse the API count from metrics
-	// Looking for lines like: gateway_controller_apis_total{api_type="rest",status="deployed"} 1
-	count := 0
-	re := regexp.MustCompile(`gateway_controller_apis_total\{[^}]*\}\s+(\d+)`)
-	matches := re.FindAllStringSubmatch(bodyStr, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			val, err := strconv.Atoi(match[1])
-			if err == nil {
-				count += val
-			}
-		}
-	}
-
+	count := parseAPICountFromMetrics(bodyStr)
 	s.SetContextValue("initial_api_count", count)
 	return nil
 }
@@ -200,38 +212,13 @@ func (s *TestState) theAPICountMetricShouldHaveIncreased() error {
 		return fmt.Errorf("initial API count not found in context")
 	}
 
-	if s.LastResponse == nil {
-		return fmt.Errorf("no response received")
-	}
-
-	// Read body if not already read
-	bodyStr, ok := s.Context["last_response_body"].(string)
-	if !ok {
-		if s.LastResponse.Body != nil {
-			body, err := io.ReadAll(s.LastResponse.Body)
-			if err != nil {
-				return fmt.Errorf("failed to read response body: %w", err)
-			}
-			s.LastResponse.Body.Close()
-			bodyStr = string(body)
-			s.Context["last_response_body"] = bodyStr
-		} else {
-			return fmt.Errorf("response body not available")
-		}
+	bodyStr, err := s.getResponseBody()
+	if err != nil {
+		return err
 	}
 
 	// Parse the current API count from metrics
-	currentCount := 0
-	re := regexp.MustCompile(`gateway_controller_apis_total\{[^}]*\}\s+(\d+)`)
-	matches := re.FindAllStringSubmatch(bodyStr, -1)
-	for _, match := range matches {
-		if len(match) > 1 {
-			val, err := strconv.Atoi(match[1])
-			if err == nil {
-				currentCount += val
-			}
-		}
-	}
+	currentCount := parseAPICountFromMetrics(bodyStr)
 
 	if currentCount <= initialCount {
 		return fmt.Errorf("API count did not increase: initial=%d, current=%d", initialCount, currentCount)

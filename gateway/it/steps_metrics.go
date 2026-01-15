@@ -66,19 +66,29 @@ func (s *TestState) iSendGETRequestToPolicyEngineMetrics() error {
 
 // theResponseShouldContainPrometheusMetrics verifies the response contains prometheus format metrics
 func (s *TestState) theResponseShouldContainPrometheusMetrics() error {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 
 	if s.LastResponse == nil {
 		return fmt.Errorf("no response received")
 	}
 
-	body, err := io.ReadAll(s.LastResponse.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+	// Read the body once and store it
+	if s.LastResponse.Body != nil {
+		body, err := io.ReadAll(s.LastResponse.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response body: %w", err)
+		}
+		s.LastResponse.Body.Close()
+		
+		// Store the body in context for later use
+		s.Context["last_response_body"] = string(body)
 	}
 
-	bodyStr := string(body)
+	bodyStr, ok := s.Context["last_response_body"].(string)
+	if !ok {
+		return fmt.Errorf("response body not available")
+	}
 
 	// Check for prometheus format indicators
 	// Prometheus metrics typically start with # HELP or # TYPE comments
@@ -98,12 +108,10 @@ func (s *TestState) theMetricsShouldContain(metricName string) error {
 		return fmt.Errorf("no response received")
 	}
 
-	body, err := io.ReadAll(s.LastResponse.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+	bodyStr, ok := s.Context["last_response_body"].(string)
+	if !ok {
+		return fmt.Errorf("response body not available")
 	}
-
-	bodyStr := string(body)
 
 	if !strings.Contains(bodyStr, metricName) {
 		return fmt.Errorf("metrics do not contain '%s'", metricName)
@@ -121,12 +129,21 @@ func (s *TestState) iExtractCurrentAPICountFromMetrics() error {
 		return fmt.Errorf("no response received")
 	}
 
-	body, err := io.ReadAll(s.LastResponse.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+	// Read body if not already read
+	bodyStr, ok := s.Context["last_response_body"].(string)
+	if !ok {
+		if s.LastResponse.Body != nil {
+			body, err := io.ReadAll(s.LastResponse.Body)
+			if err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+			s.LastResponse.Body.Close()
+			bodyStr = string(body)
+			s.Context["last_response_body"] = bodyStr
+		} else {
+			return fmt.Errorf("response body not available")
+		}
 	}
-
-	bodyStr := string(body)
 
 	// Parse the API count from metrics
 	// Looking for lines like: gateway_controller_apis_total{api_type="rest",status="deployed"} 1
@@ -187,12 +204,21 @@ func (s *TestState) theAPICountMetricShouldHaveIncreased() error {
 		return fmt.Errorf("no response received")
 	}
 
-	body, err := io.ReadAll(s.LastResponse.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+	// Read body if not already read
+	bodyStr, ok := s.Context["last_response_body"].(string)
+	if !ok {
+		if s.LastResponse.Body != nil {
+			body, err := io.ReadAll(s.LastResponse.Body)
+			if err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+			s.LastResponse.Body.Close()
+			bodyStr = string(body)
+			s.Context["last_response_body"] = bodyStr
+		} else {
+			return fmt.Errorf("response body not available")
+		}
 	}
-
-	bodyStr := string(body)
 
 	// Parse the current API count from metrics
 	currentCount := 0

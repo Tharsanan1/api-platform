@@ -22,7 +22,7 @@
 services:
   gateway-controller:
     container_name: it-gateway-controller
-    image: ghcr.io/wso2/api-platform/gateway-controller-coverage:0.3.0-SNAPSHOT
+    image: ghcr.io/wso2/api-platform/gateway-controller:0.3.0-SNAPSHOT
     mem_limit: 128m
     mem_reservation: 128m
     cpus: 0.1
@@ -30,6 +30,7 @@ services:
       - "9010:9090"   # REST API
       - "18000:18000" # xDS gRPC
       - "18001:18001"
+      - "9091:9091"   # Metrics
     environment:
       - GATEWAY_STORAGE_TYPE=sqlite
       - GATEWAY_STORAGE_SQLITE_PATH=./data/gateway.db
@@ -59,6 +60,7 @@ services:
     command: ["-xds-server", "it-gateway-controller:18001"]
     ports:
       - "9002:9002"   # Admin API
+      - "9003:9003"   # Metrics
     volumes:
       - ./test-config.yaml:/app/configs/config.yaml:ro
     depends_on:

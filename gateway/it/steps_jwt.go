@@ -29,6 +29,11 @@ import (
 	"github.com/wso2/api-platform/gateway/it/steps"
 )
 
+const (
+	// tokenPlaceholder is used in step definitions to indicate where the JWT token should be inserted
+	tokenPlaceholder = "{token}"
+)
+
 // RegisterJWTSteps registers all JWT authentication step definitions
 func RegisterJWTSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) {
 	ctx.Step(`^the mock JWKS server is ready$`, func() error {
@@ -106,8 +111,8 @@ func RegisterJWTSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 
 	ctx.Step(`^I send a GET request to "([^"]*)" with header "([^"]*)" value "([^"]*)"$`, func(url, headerName, headerValue string) error {
 		// Replace {token} placeholder if present
-		if strings.Contains(headerValue, "{token}") && state.JWTToken != "" {
-			headerValue = strings.ReplaceAll(headerValue, "{token}", state.JWTToken)
+		if strings.Contains(headerValue, tokenPlaceholder) && state.JWTToken != "" {
+			headerValue = strings.ReplaceAll(headerValue, tokenPlaceholder, state.JWTToken)
 		}
 		httpSteps.SetHeader(headerName, headerValue)
 		return httpSteps.SendGETRequest(url)

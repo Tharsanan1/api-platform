@@ -339,27 +339,27 @@ policy_configurations:
   # JWT Authentication Policy Configuration
   jwtauth_v010:
     # Key managers configuration - defines JWKS providers for token validation
-    keyManagers:
+    keymanagers:
       - name: test-jwks
-        issuer: http://mock-jwks:8080/token
+        issuer: http://mock-jwks.default.svc.cluster.local:8080/token
         jwks:
           remote:
             uri: http://mock-jwks:8080/jwks
     
     # JWKS cache TTL
-    jwksCacheTtl: "5m"
+    jwkscachettl: "5m"
     
     # JWKS fetch timeout
-    jwksFetchTimeout: "5s"
+    jwksfetchtimeout: "5s"
     
     # Number of retries for JWKS fetch
-    jwksFetchRetryCount: 3
+    jwksfetchretrycount: 3
     
     # Interval between JWKS fetch retries
-    jwksFetchRetryInterval: "2s"
+    jwksfetchretryinterval: "2s"
     
     # Allowed JWT signing algorithms
-    allowedAlgorithms:
+    allowedalgorithms:
       - RS256
       - ES256
     
@@ -367,22 +367,22 @@ policy_configurations:
     leeway: "30s"
     
     # Expected scheme prefix in authorization header
-    authHeaderScheme: "Bearer"
+    authheaderscheme: "Bearer"
     
     # Header name to extract token from
-    headerName: "Authorization"
+    headername: "Authorization"
     
     # HTTP status code on authentication failure
-    onFailureStatusCode: 401
+    onfailurestatuscode: 401
     
     # Error message format: json, plain, or minimal
-    errorMessageFormat: "json"
+    errormessageformat: "json"
     
     # Custom error message (empty string for default)
-    errorMessage: ""
+    errormessage: ""
     
     # Whether to validate issuer claim
-    validateIssuer: true
+    validateissuer: true
 
 analytics:
   enabled: true

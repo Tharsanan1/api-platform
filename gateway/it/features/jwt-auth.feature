@@ -46,13 +46,6 @@ Feature: JWT Authentication Policy
             policies:
               - name: jwt-auth
                 version: v0.1.0
-                params:
-                  keyManagers:
-                    - name: test-jwks
-                      issuer: http://mock-jwks.default.svc.cluster.local:8080/token
-                      jwks:
-                        remote:
-                          uri: http://mock-jwks:8080/jwks
       """
     Then the response should be successful
     And I wait for the endpoint "http://localhost:8080/jwt-auth/v1.0/protected" to be ready with JWT auth
@@ -82,12 +75,6 @@ Feature: JWT Authentication Policy
             policies:
               - name: jwt-auth
                 version: v0.1.0
-                params:
-                  keyManagers:
-                    - name: test-jwks
-                      jwks:
-                        remote:
-                          uri: http://mock-jwks:8080/jwks
       """
     Then the response should be successful
     And I wait for 2 seconds
@@ -118,12 +105,6 @@ Feature: JWT Authentication Policy
             policies:
               - name: jwt-auth
                 version: v0.1.0
-                params:
-                  keyManagers:
-                    - name: test-jwks
-                      jwks:
-                        remote:
-                          uri: http://mock-jwks:8080/jwks
       """
     Then the response should be successful
     And I wait for 2 seconds
@@ -153,11 +134,6 @@ Feature: JWT Authentication Policy
               - name: jwt-auth
                 version: v0.1.0
                 params:
-                  keyManagers:
-                    - name: test-jwks
-                      jwks:
-                        remote:
-                          uri: http://mock-jwks:8080/jwks
                   audiences:
                     - test-audience
       """
@@ -190,11 +166,6 @@ Feature: JWT Authentication Policy
               - name: jwt-auth
                 version: v0.1.0
                 params:
-                  keyManagers:
-                    - name: test-jwks
-                      jwks:
-                        remote:
-                          uri: http://mock-jwks:8080/jwks
                   claimMappings:
                     sub: X-User-ID
                     iss: X-Issuer
@@ -231,11 +202,6 @@ Feature: JWT Authentication Policy
               - name: jwt-auth
                 version: v0.1.0
                 params:
-                  keyManagers:
-                    - name: test-jwks
-                      jwks:
-                        remote:
-                          uri: http://mock-jwks:8080/jwks
                   authHeaderPrefix: JWT
       """
     Then the response should be successful
@@ -267,11 +233,6 @@ Feature: JWT Authentication Policy
               - name: jwt-auth
                 version: v0.1.0
                 params:
-                  keyManagers:
-                    - name: test-jwks
-                      jwks:
-                        remote:
-                          uri: http://mock-jwks:8080/jwks
                   onFailureStatusCode: 403
                   errorMessage: "Access Denied: Invalid or missing token"
       """

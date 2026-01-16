@@ -74,7 +74,7 @@ func RegisterJWTSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 		}
 
 		httpSteps.SetHeader("Authorization", "Bearer "+state.JWTToken)
-		return httpSteps.SendGET(url)
+		return httpSteps.SendGETRequest(url)
 	})
 
 	ctx.Step(`^I wait for the endpoint "([^"]*)" to be ready with JWT auth$`, func(url string) error {
@@ -110,6 +110,6 @@ func RegisterJWTSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 			headerValue = strings.ReplaceAll(headerValue, "{token}", state.JWTToken)
 		}
 		httpSteps.SetHeader(headerName, headerValue)
-		return httpSteps.SendGET(url)
+		return httpSteps.SendGETRequest(url)
 	})
 }

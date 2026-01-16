@@ -378,6 +378,9 @@ policy_configurations:
     # Error message format: json, plain, or minimal
     errorMessageFormat: "json"
     
+    # Custom error message (empty string for default)
+    errorMessage: ""
+    
     # Whether to validate issuer claim
     validateIssuer: true
 

@@ -211,18 +211,18 @@ Feature: JWT Authentication Policy
     And I send a GET request to "http://localhost:8080/jwt-custom-prefix/v1.0/protected" with header "Authorization" value "JWT {token}"
     Then the response status code should be 200
 
-  Scenario: JWT authentication with custom error message
+  Scenario: JWT authentication with default error handling
     Given I authenticate using basic auth as "admin"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1alpha1
       kind: RestApi
       metadata:
-        name: jwt-custom-error-api
+        name: jwt-error-handling-api
       spec:
-        displayName: JWT Custom Error API
+        displayName: JWT Error Handling API
         version: v1.0
-        context: /jwt-custom-error/$version
+        context: /jwt-error-handling/$version
         upstream:
           main:
             url: http://sample-backend:9080/api/v1
@@ -232,13 +232,10 @@ Feature: JWT Authentication Policy
             policies:
               - name: jwt-auth
                 version: v0.1.0
-                params:
-                  onFailureStatusCode: 403
-                  errorMessage: "Access Denied: Invalid or missing token"
       """
     Then the response should be successful
     And I wait for 2 seconds
 
-    When I send a GET request to "http://localhost:8080/jwt-custom-error/v1.0/protected"
-    Then the response status code should be 403
-    And the response body should contain "Access Denied: Invalid or missing token"
+    When I send a GET request to "http://localhost:8080/jwt-error-handling/v1.0/protected"
+    Then the response status code should be 401
+    And the response should be valid JSON

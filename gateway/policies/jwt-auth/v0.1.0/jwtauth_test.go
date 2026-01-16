@@ -1378,3 +1378,272 @@ func writeCertificateToFile(t *testing.T, publicKey *rsa.PublicKey) string {
 
 	return tmpFile.Name()
 }
+
+// TestJWTAuthPolicy_StaleCacheFallback tests that stale cached data is used when JWKS fetch fails
+func TestJWTAuthPolicy_StaleCacheFallback(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+
+	// Create a JWKS server that initially works, then fails
+	var requestCount int
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if requestCount == 1 {
+			// First request succeeds - return valid JWKS
+			nBytes := publicKey.N.Bytes()
+			nB64 := base64.RawURLEncoding.EncodeToString(nBytes)
+
+			eBytes := make([]byte, 4)
+			eBytes[0] = byte((publicKey.E >> 24) & 0xFF)
+			eBytes[1] = byte((publicKey.E >> 16) & 0xFF)
+			eBytes[2] = byte((publicKey.E >> 8) & 0xFF)
+			eBytes[3] = byte(publicKey.E & 0xFF)
+			for len(eBytes) > 1 && eBytes[0] == 0 {
+				eBytes = eBytes[1:]
+			}
+			eB64 := base64.RawURLEncoding.EncodeToString(eBytes)
+
+			jwks := map[string]interface{}{
+				"keys": []map[string]interface{}{
+					{
+						"kty": "RSA",
+						"kid": "test-kid",
+						"use": "sig",
+						"alg": "RS256",
+						"n":   nB64,
+						"e":   eB64,
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(jwks)
+		} else {
+			// Subsequent requests fail with 500
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user123",
+		"iss": "https://issuer.example.com",
+	})
+
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":             "Authorization",
+		"authHeaderScheme":       "Bearer",
+		"allowedAlgorithms":      []interface{}{"RS256"},
+		"jwksCacheTtl":           "100ms", // Short TTL to test stale cache
+		"jwksFetchTimeout":       "1s",
+		"jwksFetchRetryCount":    1, // Minimal retries
+		"jwksFetchRetryInterval": "100ms",
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{
+						"uri": jwksServer.URL + "/jwks.json",
+					},
+				},
+			},
+		},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	// First request - should fetch and cache JWKS
+	action := p.OnRequest(ctx, params)
+	if ctx.Metadata["auth.success"] != true {
+		t.Errorf("Expected first request to succeed, got %v", ctx.Metadata["auth.success"])
+	}
+	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
+		t.Fatalf("Expected UpstreamRequestModifications for first request")
+	}
+
+	// Wait for cache to expire
+	time.Sleep(150 * time.Millisecond)
+
+	// Second request - cache expired, JWKS fetch will fail, but should use stale cache
+	ctx2 := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+	action2 := p.OnRequest(ctx2, params)
+
+	// Should succeed using stale cached data
+	if ctx2.Metadata["auth.success"] != true {
+		t.Errorf("Expected second request to succeed with stale cache, got %v", ctx2.Metadata["auth.success"])
+	}
+	if _, ok := action2.(policy.UpstreamRequestModifications); !ok {
+		t.Fatalf("Expected UpstreamRequestModifications for second request with stale cache")
+	}
+}
+
+// TestJWTAuthPolicy_RetryWithoutBlocking tests that retries don't block indefinitely
+func TestJWTAuthPolicy_RetryWithoutBlocking(t *testing.T) {
+	privateKey, _ := generateTestKeys(t)
+
+	// Create a JWKS server that always times out
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate slow response - longer than fetch timeout
+		time.Sleep(3 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user123",
+		"iss": "https://issuer.example.com",
+	})
+
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":             "Authorization",
+		"authHeaderScheme":       "Bearer",
+		"allowedAlgorithms":      []interface{}{"RS256"},
+		"jwksFetchTimeout":       "500ms", // Short timeout
+		"jwksFetchRetryCount":    2,       // 2 retries
+		"jwksFetchRetryInterval": "100ms", // Short retry interval
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{
+						"uri": jwksServer.URL + "/jwks.json",
+					},
+				},
+			},
+		},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	// Measure time taken for request processing
+	start := time.Now()
+	action := p.OnRequest(ctx, params)
+	elapsed := time.Since(start)
+
+	// Should fail (no cached data available)
+	if ctx.Metadata["auth.success"] != false {
+		t.Errorf("Expected auth to fail when JWKS unavailable")
+	}
+	if _, ok := action.(policy.ImmediateResponse); !ok {
+		t.Fatalf("Expected ImmediateResponse for unavailable JWKS")
+	}
+
+	// Should complete in reasonable time:
+	// 3 attempts × 500ms timeout + 2 × 100ms retry interval = ~1.7s
+	// Allow some margin for processing
+	maxExpected := 2500 * time.Millisecond
+	if elapsed > maxExpected {
+		t.Errorf("Request processing took too long: %v (expected < %v)", elapsed, maxExpected)
+	}
+
+	t.Logf("Request completed in %v (expected < %v)", elapsed, maxExpected)
+}
+
+// TestJWTAuthPolicy_FreshCachePreferred tests that fresh cache is used before attempting fetch
+func TestJWTAuthPolicy_FreshCachePreferred(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+
+	var fetchCount int
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount++
+		nBytes := publicKey.N.Bytes()
+		nB64 := base64.RawURLEncoding.EncodeToString(nBytes)
+
+		eBytes := make([]byte, 4)
+		eBytes[0] = byte((publicKey.E >> 24) & 0xFF)
+		eBytes[1] = byte((publicKey.E >> 16) & 0xFF)
+		eBytes[2] = byte((publicKey.E >> 8) & 0xFF)
+		eBytes[3] = byte(publicKey.E & 0xFF)
+		for len(eBytes) > 1 && eBytes[0] == 0 {
+			eBytes = eBytes[1:]
+		}
+		eB64 := base64.RawURLEncoding.EncodeToString(eBytes)
+
+		jwks := map[string]interface{}{
+			"keys": []map[string]interface{}{
+				{
+					"kty": "RSA",
+					"kid": "test-kid",
+					"use": "sig",
+					"alg": "RS256",
+					"n":   nB64,
+					"e":   eB64,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(jwks)
+	}))
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user123",
+		"iss": "https://issuer.example.com",
+	})
+
+	params := map[string]interface{}{
+		"headerName":        "Authorization",
+		"authHeaderScheme":  "Bearer",
+		"allowedAlgorithms": []interface{}{"RS256"},
+		"jwksCacheTtl":      "5s", // Long TTL
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{
+						"uri": jwksServer.URL + "/jwks.json",
+					},
+				},
+			},
+		},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	// First request - should fetch from server
+	ctx1 := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+	p.OnRequest(ctx1, params)
+
+	if fetchCount != 1 {
+		t.Errorf("Expected 1 JWKS fetch after first request, got %d", fetchCount)
+	}
+
+	// Second and third requests - should use cache (no additional fetches)
+	for i := 0; i < 2; i++ {
+		ctx := createMockRequestContext(map[string][]string{
+			"authorization": {fmt.Sprintf("Bearer %s", token)},
+		})
+		action := p.OnRequest(ctx, params)
+
+		if ctx.Metadata["auth.success"] != true {
+			t.Errorf("Request %d: Expected auth.success to be true", i+2)
+		}
+		if _, ok := action.(policy.UpstreamRequestModifications); !ok {
+			t.Fatalf("Request %d: Expected UpstreamRequestModifications", i+2)
+		}
+	}
+
+	// Should still be only 1 fetch (all subsequent requests used cache)
+	if fetchCount != 1 {
+		t.Errorf("Expected only 1 JWKS fetch total, got %d", fetchCount)
+	}
+}

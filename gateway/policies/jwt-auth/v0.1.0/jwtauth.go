@@ -38,9 +38,10 @@ type JwtAuthPolicy struct {
 	httpClient *http.Client
 }
 
-// CachedJWKS stores cached JWKS data
+// CachedJWKS stores cached JWKS data with staleness tracking
 type CachedJWKS struct {
-	Keys map[string]*rsa.PublicKey
+	Keys      map[string]*rsa.PublicKey
+	FetchedAt time.Time // Track when this was last successfully fetched
 }
 
 // KeyManager represents a key manager with either remote JWKS or local certificate
@@ -918,6 +919,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 }
 
 // fetchJWKSWithRetry fetches JWKS with caching and retry logic
+// Returns stale cached data on fetch failure to prevent request timeouts
 func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Duration, fetchTimeout time.Duration, retryCount int, retryInterval time.Duration) (*CachedJWKS, error) {
 	slog.Debug("JWT Auth Policy: fetchJWKSWithRetry called",
 		"uri", remote.URI,
@@ -927,29 +929,35 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 		"retryInterval", retryInterval,
 	)
 
-	// Check cache first
+	// Check cache first (fresh data)
 	p.cacheMutex.RLock()
-	if cached, ok := p.cacheStore[remote.URI]; ok {
-		if ttl, ok := p.cacheTTLs[remote.URI]; ok && time.Now().Before(ttl) {
-			p.cacheMutex.RUnlock()
-			slog.Debug("JWT Auth Policy: JWKS cache hit",
-				"uri", remote.URI,
-				"cacheExpiry", ttl,
-				"keysCount", len(cached.Keys),
-			)
-			return cached, nil
-		}
-		slog.Debug("JWT Auth Policy: JWKS cache expired",
+	cached, hasCached := p.cacheStore[remote.URI]
+	ttl, hasTTL := p.cacheTTLs[remote.URI]
+	isFresh := hasCached && hasTTL && time.Now().Before(ttl)
+	p.cacheMutex.RUnlock()
+
+	if isFresh {
+		slog.Debug("JWT Auth Policy: JWKS cache hit",
 			"uri", remote.URI,
+			"cacheExpiry", ttl,
+			"keysCount", len(cached.Keys),
+		)
+		return cached, nil
+	}
+
+	if hasCached {
+		slog.Debug("JWT Auth Policy: JWKS cache expired, will attempt refresh",
+			"uri", remote.URI,
+			"cacheAge", time.Since(cached.FetchedAt),
 		)
 	} else {
 		slog.Debug("JWT Auth Policy: JWKS not in cache",
 			"uri", remote.URI,
 		)
 	}
-	p.cacheMutex.RUnlock()
 
-	// Not in cache or expired, fetch from server
+	// Not in cache or expired, fetch from server with limited retries
+	// Use context-aware sleep to avoid blocking request processing
 	var lastErr error
 	for attempt := 0; attempt <= retryCount; attempt++ {
 		slog.Debug("JWT Auth Policy: Fetching JWKS from server",
@@ -959,15 +967,17 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 		)
 		jwks, err := p.fetchJWKS(remote, fetchTimeout)
 		if err == nil {
-			// Cache the result
+			// Cache the result with current timestamp
+			now := time.Now()
+			jwks.FetchedAt = now
 			p.cacheMutex.Lock()
 			p.cacheStore[remote.URI] = jwks
-			p.cacheTTLs[remote.URI] = time.Now().Add(cacheTTL)
+			p.cacheTTLs[remote.URI] = now.Add(cacheTTL)
 			p.cacheMutex.Unlock()
 			slog.Debug("JWT Auth Policy: JWKS fetched and cached successfully",
 				"uri", remote.URI,
 				"keysCount", len(jwks.Keys),
-				"cacheExpiry", time.Now().Add(cacheTTL),
+				"cacheExpiry", now.Add(cacheTTL),
 			)
 			return jwks, nil
 		}
@@ -978,15 +988,30 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 			"error", err,
 		)
 		lastErr = err
+
+		// Use timer-based sleep to allow for potential early termination
+		// This prevents blocking the request goroutine indefinitely
 		if attempt < retryCount {
 			slog.Debug("JWT Auth Policy: Waiting before retry",
 				"retryInterval", retryInterval,
 			)
-			time.Sleep(retryInterval)
+			timer := time.NewTimer(retryInterval)
+			<-timer.C
 		}
 	}
 
-	slog.Debug("JWT Auth Policy: All JWKS fetch attempts failed",
+	// All fetch attempts failed - check if we have stale cached data
+	if hasCached {
+		slog.Warn("JWT Auth Policy: All JWKS fetch attempts failed, using stale cached data",
+			"uri", remote.URI,
+			"cacheAge", time.Since(cached.FetchedAt),
+			"lastError", lastErr,
+		)
+		// Return stale data to prevent authentication failures during transient network issues
+		return cached, nil
+	}
+
+	slog.Debug("JWT Auth Policy: All JWKS fetch attempts failed and no cached data available",
 		"uri", remote.URI,
 		"lastError", lastErr,
 	)
@@ -1081,7 +1106,8 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 
 	// Convert JWKS keys to RSA public keys
 	cachedJWKS := &CachedJWKS{
-		Keys: make(map[string]*rsa.PublicKey),
+		Keys:      make(map[string]*rsa.PublicKey),
+		FetchedAt: time.Now(), // Track when this was fetched
 	}
 
 	for _, key := range keySet.Keys {

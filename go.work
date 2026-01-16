@@ -6,6 +6,7 @@ use (
 	./gateway/gateway-builder
 	./gateway/gateway-controller
 	./gateway/it
+	./gateway/policies/jwt-auth/v0.1.0
 	./gateway/policy-engine
 	./platform-api/src
 	./sdk

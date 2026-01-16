@@ -1,0 +1,125 @@
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                  GATEWAY POLICY UNIT TESTING INITIATIVE                      │
+│                         Documentation Structure                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+START HERE
+    │
+    ├─► SUMMARY.md (6.6KB)
+    │   └─ Executive overview
+    │      ├─ Numbers and metrics
+    │      ├─ Deliverables list
+    │      ├─ Role-based guides
+    │      └─ 8-week rollout plan
+    │
+    └─► POLICY_UNIT_TESTING_README.md (7.8KB)
+        └─ Complete initiative guide
+           ├─ Overview and quick start
+           ├─ Policies by category
+           ├─ Testing standards
+           └─ Links to all docs
+
+MAIN RESOURCES
+    │
+    ├─► UNIT_TEST_ISSUES.md (59KB) ⭐ KEY RESOURCE
+    │   └─ 22 GitHub issue templates
+    │      ├─ Issue 1: api-key-auth
+    │      ├─ Issue 2: basic-auth
+    │      ├─ Issue 3: basic-ratelimit
+    │      ├─ Issue 4: cors
+    │      ├─ Issue 5: modify-headers
+    │      ├─ Issue 6: respond
+    │      ├─ Issue 7-12: Guardrails (6 policies)
+    │      ├─ Issue 13: pii-masking-regex
+    │      ├─ Issue 14-17: AI Prompts & Safety (4 policies)
+    │      ├─ Issue 18-20: AI Infrastructure (3 policies)
+    │      └─ Issue 21-22: AI Security (2 policies)
+    │
+    ├─► HOW_TO_CREATE_ISSUES.md (4.7KB)
+    │   └─ Step-by-step guide
+    │      ├─ For issue creators
+    │      ├─ For developers
+    │      ├─ GitHub CLI examples
+    │      └─ Test patterns
+    │
+    └─► POLICY_TEST_STATUS.md (6KB)
+        └─ Coverage tracker
+           ├─ Status summary table
+           ├─ Detailed policy list
+           ├─ Priority rankings
+           └─ Progress framework
+
+WORKFLOW
+    │
+    ├─► PROJECT MANAGER
+    │   1. Read SUMMARY.md
+    │   2. Review priorities in POLICY_TEST_STATUS.md
+    │   3. Plan team assignments
+    │
+    ├─► ISSUE CREATOR
+    │   1. Read HOW_TO_CREATE_ISSUES.md
+    │   2. Copy template from UNIT_TEST_ISSUES.md
+    │   3. Create GitHub issue
+    │   4. Add labels and assign
+    │
+    └─► DEVELOPER
+        1. Get assigned issue
+        2. Review reference tests:
+           - gateway/policies/jwt-auth/v0.1.0/jwtauth_test.go
+           - gateway/policies/mcp-auth/v0.1.0/mcp-auth_test.go
+        3. Implement tests per template
+        4. Run: go test -v -cover ./...
+        5. Submit PR with coverage >80%
+
+STATISTICS
+    │
+    ├─ Total Documentation:    5 files, 2,770 lines, 84KB
+    ├─ Issue Templates:        22 complete templates
+    ├─ Policies Analyzed:      25 total
+    ├─ Current Coverage:       3/25 (12%)
+    ├─ Target Coverage:        25/25 (100%)
+    ├─ Policies Need Tests:    22
+    └─ Estimated Timeline:     8 weeks (phased approach)
+
+PRIORITY PHASES
+    │
+    ├─► Phase 1 (Weeks 1-2): Core Security
+    │   └─ api-key-auth, basic-auth, cors, pii-masking-regex
+    │
+    ├─► Phase 2 (Week 3): Rate Limiting
+    │   └─ basic-ratelimit, advanced-ratelimit
+    │
+    ├─► Phase 3 (Week 4): Basic Features
+    │   └─ modify-headers, respond
+    │
+    ├─► Phase 4 (Weeks 5-6): Guardrails
+    │   └─ 6 content guardrail policies
+    │
+    └─► Phase 5 (Weeks 7-8): AI Features
+        └─ 8 AI/ML policies
+
+QUICK COMMANDS
+    │
+    ├─ Run tests:              go test -v ./...
+    ├─ Check coverage:         go test -v -cover ./...
+    ├─ Generate report:        go test -coverprofile=coverage.out ./...
+    └─ View HTML report:       go tool cover -html=coverage.out
+
+EXTERNAL REFERENCES
+    │
+    ├─ Policy Directory:       gateway/policies/
+    ├─ Example Test 1:         gateway/policies/jwt-auth/v0.1.0/jwtauth_test.go
+    ├─ Example Test 2:         gateway/policies/mcp-auth/v0.1.0/mcp-auth_test.go
+    └─ Policy SDK:             github.com/wso2/api-platform/sdk/gateway/policy/v1alpha
+
+SUCCESS CRITERIA
+    │
+    ├─ All 22 issues created
+    ├─ All tests implemented
+    ├─ Each policy >80% coverage
+    ├─ All PRs merged
+    └─ 100% policy coverage achieved
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  NEXT ACTION: Review SUMMARY.md or POLICY_UNIT_TESTING_README.md to begin  │
+└─────────────────────────────────────────────────────────────────────────────┘

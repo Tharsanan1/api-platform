@@ -989,7 +989,7 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 		)
 		lastErr = err
 
-		// Context-aware sleep using timer + select to allow early exit
+		// Use timer-based sleep to allow for potential early termination
 		// This prevents blocking the request goroutine indefinitely
 		if attempt < retryCount {
 			slog.Debug("JWT Auth Policy: Waiting before retry",
@@ -997,7 +997,6 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 			)
 			timer := time.NewTimer(retryInterval)
 			<-timer.C
-			timer.Stop()
 		}
 	}
 

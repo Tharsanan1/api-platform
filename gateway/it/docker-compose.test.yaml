@@ -122,6 +122,15 @@ services:
     networks:
       - it-gateway-network
 
+  # Mock JWKS server for JWT authentication testing
+  mock-jwks:
+    container_name: it-mock-jwks
+    image: mock-jwks:test
+    ports:
+      - "9082:8080"
+    networks:
+      - it-gateway-network
+
 volumes:
   controller-data-tests:
     driver: local

@@ -75,6 +75,7 @@ func TestFeatures(t *testing.T) {
 				"features/mcp_deploy.feature",
 				"features/ratelimit.feature",
 				"features/basic-ratelimit.feature",
+				"features/jwt-auth.feature",
 			},
 			TestingT: t,
 		},
@@ -223,6 +224,7 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 		RegisterAuthSteps(ctx, testState, httpSteps)
 		RegisterAPISteps(ctx, testState, httpSteps)
 		RegisterMCPSteps(ctx, testState, httpSteps)
+		RegisterJWTSteps(ctx, testState, httpSteps)
 	}
 
 	// Register common HTTP and assertion steps

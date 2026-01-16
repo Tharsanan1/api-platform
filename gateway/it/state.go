@@ -77,6 +77,9 @@ type TestState struct {
 	// Context stores arbitrary key-value data for steps
 	Context map[string]interface{}
 
+	// JWTToken stores the current JWT token for authentication tests
+	JWTToken string
+
 	// mutex protects concurrent access to state
 	mutex sync.RWMutex
 }
@@ -106,6 +109,7 @@ func (s *TestState) Reset() {
 	s.LastRequest = nil
 	s.LastResponse = nil
 	s.LastError = nil
+	s.JWTToken = ""
 	s.Context = make(map[string]interface{})
 }
 

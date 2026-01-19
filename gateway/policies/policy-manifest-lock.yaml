@@ -19,6 +19,9 @@ policies:
   - name: basic-ratelimit
     version: v0.1.0
     filePath: ./basic-ratelimit/v0.1.0
+  - name: budget-ratelimit
+    version: v0.1.0
+    filePath: ./budget-ratelimit/v0.1.0
   - name: content-length-guardrail
     version: v0.1.0
     filePath: ./content-length-guardrail/v0.1.0
@@ -67,6 +70,9 @@ policies:
   - name: sentence-count-guardrail
     version: v0.1.0
     filePath: ./sentence-count-guardrail/v0.1.0
+  - name: token-ratelimit
+    version: v0.1.0
+    filePath: ./token-ratelimit/v0.1.0
   - name: url-guardrail
     version: v0.1.0
     filePath: ./url-guardrail/v0.1.0

@@ -1,0 +1,256 @@
+name: token-ratelimit
+version: v0.1.0
+description: |
+  Token-based rate limiting policy that limits API usage based on LLM token consumption
+  (prompt tokens, completion tokens, total tokens). This policy provides a simplified
+  configuration for token-based rate limiting while internally delegating to the
+  advanced-ratelimit policy.
+
+  Key features:
+  - Separate limits for prompt tokens, completion tokens, and total tokens
+  - Automatic extraction from JSON response body using configurable JSON paths
+  - Computed total tokens (sum of prompt + completion) when no explicit JSON path provided
+  - Multiple concurrent limits per token type (e.g., 1000/min AND 50000/hour)
+  - Configurable behavior when token extraction fails
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    promptTokens:
+      type: object
+      description: Rate limit based on prompt/input tokens
+      additionalProperties: false
+      properties:
+        limits:
+          type: array
+          description: Array of rate limits for prompt tokens
+          minItems: 1
+          maxItems: 10
+          items:
+            type: object
+            additionalProperties: false
+            required: ["limit", "duration"]
+            properties:
+              limit:
+                type: integer
+                description: Maximum number of prompt tokens allowed in the duration
+                minimum: 1
+                maximum: 1000000000
+              duration:
+                type: string
+                description: |
+                  Time window for the limit (Go duration string format).
+                  Examples: "1s", "1m", "1h", "24h"
+                pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+        jsonPath:
+          type: string
+          description: JSON path to extract prompt token count from response body
+          minLength: 1
+          maxLength: 512
+
+    completionTokens:
+      type: object
+      description: Rate limit based on completion/output tokens
+      additionalProperties: false
+      properties:
+        limits:
+          type: array
+          description: Array of rate limits for completion tokens
+          minItems: 1
+          maxItems: 10
+          items:
+            type: object
+            additionalProperties: false
+            required: ["limit", "duration"]
+            properties:
+              limit:
+                type: integer
+                description: Maximum number of completion tokens allowed in the duration
+                minimum: 1
+                maximum: 1000000000
+              duration:
+                type: string
+                description: |
+                  Time window for the limit (Go duration string format).
+                  Examples: "1s", "1m", "1h", "24h"
+                pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+        jsonPath:
+          type: string
+          description: JSON path to extract completion token count from response body
+          minLength: 1
+          maxLength: 512
+
+    totalTokens:
+      type: object
+      description: |
+        Rate limit based on total tokens. If jsonPath is provided, extracts total directly.
+        If jsonPath is omitted and both promptTokens and completionTokens are configured
+        with jsonPath, total is computed as prompt + completion.
+      additionalProperties: false
+      properties:
+        limits:
+          type: array
+          description: Array of rate limits for total tokens
+          minItems: 1
+          maxItems: 10
+          items:
+            type: object
+            additionalProperties: false
+            required: ["limit", "duration"]
+            properties:
+              limit:
+                type: integer
+                description: Maximum number of total tokens allowed in the duration
+                minimum: 1
+                maximum: 1000000000
+              duration:
+                type: string
+                description: |
+                  Time window for the limit (Go duration string format).
+                  Examples: "1s", "1m", "1h", "24h"
+                pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+        jsonPath:
+          type: string
+          description: |
+            JSON path to extract total token count. If omitted and both
+            promptTokens and completionTokens are configured with jsonPath,
+            total is computed as prompt + completion.
+          minLength: 1
+          maxLength: 512
+
+    onExtractionFailure:
+      type: object
+      description: Behavior when token count cannot be extracted from response
+      additionalProperties: false
+      properties:
+        action:
+          type: string
+          description: |
+            Action to take when extraction fails:
+            - skip: Don't count this request (fail-open, cost=0)
+            - default: Use defaultValue as the token count
+          enum: ["skip", "default"]
+          default: "skip"
+        defaultValue:
+          type: integer
+          description: Token count to use when action=default
+          minimum: 0
+          default: 0
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    algorithm:
+      type: string
+      description: |
+        Rate limiting algorithm to use:
+        - gcra: Generic Cell Rate Algorithm (default). Provides smooth rate limiting
+          with burst support and token bucket semantics.
+        - fixed-window: Simple fixed time window counter.
+      enum: ["gcra", "fixed-window"]
+      default: "gcra"
+      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.algorithm}"
+
+    backend:
+      type: string
+      description: |
+        Rate limit storage backend. 'memory' for in-memory storage (single-instance),
+        'redis' for distributed rate limiting across multiple gateway instances.
+      enum: ["memory", "redis"]
+      default: "memory"
+      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.backend}"
+
+    redis:
+      type: object
+      description: Redis configuration (only used when backend=redis)
+      additionalProperties: false
+      properties:
+        host:
+          type: string
+          description: Redis server hostname or IP address
+          default: "localhost"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.host}"
+
+        port:
+          type: integer
+          description: Redis server port
+          minimum: 1
+          maximum: 65535
+          default: 6379
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.port}"
+
+        password:
+          type: string
+          description: Redis authentication password (optional)
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.password}"
+
+        username:
+          type: string
+          description: Redis ACL username (optional, Redis 6+)
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.username}"
+
+        db:
+          type: integer
+          description: Redis database number
+          minimum: 0
+          maximum: 15
+          default: 0
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.db}"
+
+        keyPrefix:
+          type: string
+          description: Prefix for all Redis keys to avoid conflicts
+          default: "ratelimit:v1:"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.keyprefix}"
+
+        failureMode:
+          type: string
+          description: |
+            Behavior when Redis is unavailable. 'open' allows requests through,
+            'closed' denies requests. Recommended: 'open' for availability.
+          enum: ["open", "closed"]
+          default: "open"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.failuremode}"
+
+        connectionTimeout:
+          type: string
+          description: Redis connection timeout (Go duration string)
+          default: "5s"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.connectiontimeout}"
+
+        readTimeout:
+          type: string
+          description: Redis read timeout (Go duration string)
+          default: "3s"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.readtimeout}"
+
+        writeTimeout:
+          type: string
+          description: Redis write timeout (Go duration string)
+          default: "3s"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.writetimeout}"
+
+    memory:
+      type: object
+      description: In-memory storage configuration (only used when backend=memory)
+      additionalProperties: false
+      properties:
+        maxEntries:
+          type: integer
+          description: |
+            Maximum number of rate limit entries to store in memory.
+            Oldest entries are evicted when limit is reached.
+          minimum: 100
+          maximum: 10000000
+          default: 10000
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.memory.maxentries}"
+
+        cleanupInterval:
+          type: string
+          description: |
+            Interval for cleaning up expired entries (Go duration string).
+            Use "0" to disable periodic cleanup.
+          default: "5m"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.memory.cleanupinterval}"

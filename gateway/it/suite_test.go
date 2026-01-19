@@ -75,6 +75,8 @@ func TestFeatures(t *testing.T) {
 				"features/mcp_deploy.feature",
 				"features/ratelimit.feature",
 				"features/basic-ratelimit.feature",
+				"features/token-ratelimit.feature",
+				"features/budget-ratelimit.feature",
 			},
 			TestingT: t,
 		},

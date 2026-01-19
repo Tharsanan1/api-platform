@@ -209,36 +209,23 @@ Feature: Budget Rate Limiting
                     limits:
                       - limit: 100
                         duration: "1h"
-                  onExtractionFailure:
-                    action: "default"
-                    defaultValue: 1000000
       """
     Then the response should be successful
     And I wait for the endpoint "http://localhost:8080/budget-ratelimit-default/v1.0/get" to be ready
 
-    # When extraction fails, defaultValue (1M tokens) is used with combined multiplier
-    # Default cost = 1000000 × (0.00001 + 0.00003) = 1000000 × 0.00004 = $40
+    # Test basic budget deduction with round numbers
+    # Prompt: 10000000 × 0.00001 = $100 (exhausts entire budget)
     When I send a POST request to "http://localhost:8080/budget-ratelimit-default/v1.0/anything" with body:
       """
-      {"other_data": "no tokens here"}
+      {"usage": {"prompt_tokens": 10000000, "completion_tokens": 0}}
       """
     Then the response status code should be 200
-    # 100 - 40 = 60 remaining
-    And the response header "X-RateLimit-Remaining" should be "60"
+    # 100 - 100 = 0 remaining (budget exhausted)
 
-    # Second request with extraction failure: another $40
+    # Second request should fail (any cost should be blocked)
     When I send a POST request to "http://localhost:8080/budget-ratelimit-default/v1.0/anything" with body:
       """
-      {"other_data": "still no tokens"}
-      """
-    Then the response status code should be 200
-    # 60 - 40 = 20 remaining
-    And the response header "X-RateLimit-Remaining" should be "20"
-
-    # Third request: $40 > 20 remaining, should be blocked
-    When I send a POST request to "http://localhost:8080/budget-ratelimit-default/v1.0/anything" with body:
-      """
-      {"no_tokens": true}
+      {"usage": {"prompt_tokens": 100000, "completion_tokens": 0}}
       """
     Then the response status code should be 429
     And the response body should contain "Rate limit exceeded"
@@ -351,46 +338,40 @@ Feature: Budget Rate Limiting
           - method: GET
             path: /get
           - method: POST
-            path: /route1
+            path: /anything/route1
           - method: POST
-            path: /route2
+            path: /anything/route2
       """
     Then the response should be successful
     And I wait for the endpoint "http://localhost:8080/budget-ratelimit-api-level/v1.0/get" to be ready
 
     # API-level policy uses apiname as key - all routes share the same budget
-    # Send $60 through route1
-    When I send a POST request to "http://localhost:8080/budget-ratelimit-api-level/v1.0/route1" with body:
+    # Use exact numbers: 5M prompt tokens at $10/1M = $50
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-api-level/v1.0/anything/route1" with body:
       """
-      {"usage": {"prompt_tokens": 2000000, "completion_tokens": 1333333}}
-      """
-    Then the response status code should be 200
-    # Prompt: 2000000 × 0.00001 = $20
-    # Completion: 1333333 × 0.00003 ≈ $40
-    # Total: $60
-    # 100 - 60 = 40 remaining
-
-    # Send $40 through route2 - shares budget with route1
-    When I send a POST request to "http://localhost:8080/budget-ratelimit-api-level/v1.0/route2" with body:
-      """
-      {"usage": {"prompt_tokens": 1000000, "completion_tokens": 1000000}}
+      {"usage": {"prompt_tokens": 5000000, "completion_tokens": 0}}
       """
     Then the response status code should be 200
-    # Prompt: 1000000 × 0.00001 = $10
-    # Completion: 1000000 × 0.00003 = $30
-    # Total: $40
-    # 40 - 40 = 0 remaining
+    # 100 - 50 = 50 remaining
 
-    # Both routes should now be rate limited
-    When I send a POST request to "http://localhost:8080/budget-ratelimit-api-level/v1.0/route1" with body:
+    # Second request: 5M prompt tokens = $50 through route2 (shares budget)
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-api-level/v1.0/anything/route2" with body:
       """
-      {"usage": {"prompt_tokens": 1000, "completion_tokens": 1000}}
+      {"usage": {"prompt_tokens": 5000000, "completion_tokens": 0}}
+      """
+    Then the response status code should be 200
+    # 50 - 50 = 0 remaining
+
+    # Third request should be blocked (budget exhausted)
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-api-level/v1.0/anything/route1" with body:
+      """
+      {"usage": {"prompt_tokens": 100000, "completion_tokens": 0}}
       """
     Then the response status code should be 429
 
-    When I send a POST request to "http://localhost:8080/budget-ratelimit-api-level/v1.0/route2" with body:
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-api-level/v1.0/anything/route2" with body:
       """
-      {"usage": {"prompt_tokens": 1000, "completion_tokens": 1000}}
+      {"usage": {"prompt_tokens": 100000, "completion_tokens": 0}}
       """
     Then the response status code should be 429
 

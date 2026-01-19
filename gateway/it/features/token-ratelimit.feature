@@ -437,16 +437,16 @@ Feature: Token Rate Limiting
           - method: GET
             path: /get
           - method: POST
-            path: /route1
+            path: /anything/route1
           - method: POST
-            path: /route2
+            path: /anything/route2
       """
     Then the response should be successful
     And I wait for the endpoint "http://localhost:8080/token-ratelimit-api-level/v1.0/get" to be ready
 
     # API-level policy uses apiname as key - all routes share the same budget
     # Send 60 tokens through route1
-    When I send a POST request to "http://localhost:8080/token-ratelimit-api-level/v1.0/route1" with body:
+    When I send a POST request to "http://localhost:8080/token-ratelimit-api-level/v1.0/anything/route1" with body:
       """
       {"usage": {"total_tokens": 60}}
       """
@@ -454,7 +454,7 @@ Feature: Token Rate Limiting
     # 100 - 60 = 40 remaining (API-level)
 
     # Send 40 tokens through route2 - shares budget with route1
-    When I send a POST request to "http://localhost:8080/token-ratelimit-api-level/v1.0/route2" with body:
+    When I send a POST request to "http://localhost:8080/token-ratelimit-api-level/v1.0/anything/route2" with body:
       """
       {"usage": {"total_tokens": 40}}
       """
@@ -462,13 +462,13 @@ Feature: Token Rate Limiting
     # 40 - 40 = 0 remaining (API-level exhausted)
 
     # Both routes should now be rate limited
-    When I send a POST request to "http://localhost:8080/token-ratelimit-api-level/v1.0/route1" with body:
+    When I send a POST request to "http://localhost:8080/token-ratelimit-api-level/v1.0/anything/route1" with body:
       """
       {"usage": {"total_tokens": 10}}
       """
     Then the response status code should be 429
 
-    When I send a POST request to "http://localhost:8080/token-ratelimit-api-level/v1.0/route2" with body:
+    When I send a POST request to "http://localhost:8080/token-ratelimit-api-level/v1.0/anything/route2" with body:
       """
       {"usage": {"total_tokens": 10}}
       """

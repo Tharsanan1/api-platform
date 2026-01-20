@@ -28,7 +28,7 @@ parameters:
           type: object
           description: Pricing for prompt/input tokens
           additionalProperties: false
-          required: ["costPer1MTokens"]
+          required: ["costPer1MTokens", "tokenSource"]
           properties:
             costPer1MTokens:
               type: number
@@ -38,9 +38,9 @@ parameters:
               type: object
               description: |
                 Configuration for extracting token count. Supports extraction from response body
-                (via JSON path), response headers, or response metadata. If not specified but
-                jsonPath is provided, defaults to response_body extraction.
+                (via JSON path), response headers, or response metadata.
               additionalProperties: false
+              required: ["type"]
               properties:
                 type:
                   type: string
@@ -50,7 +50,6 @@ parameters:
                     - response_header: Extract from response header using key
                     - response_metadata: Extract from response metadata using key
                   enum: ["response_body", "response_header", "response_metadata"]
-                  default: "response_body"
                 key:
                   type: string
                   description: |
@@ -66,19 +65,11 @@ parameters:
                     Example: "$.usage.prompt_tokens"
                   minLength: 1
                   maxLength: 512
-            jsonPath:
-              type: string
-              description: |
-                JSON path to extract prompt token count from response body.
-                Deprecated: Use tokenSource.jsonPath instead. This field is kept for
-                backward compatibility and is used when tokenSource is not specified.
-              minLength: 1
-              maxLength: 512
         completionTokens:
           type: object
           description: Pricing for completion/output tokens
           additionalProperties: false
-          required: ["costPer1MTokens"]
+          required: ["costPer1MTokens", "tokenSource"]
           properties:
             costPer1MTokens:
               type: number
@@ -88,9 +79,9 @@ parameters:
               type: object
               description: |
                 Configuration for extracting token count. Supports extraction from response body
-                (via JSON path), response headers, or response metadata. If not specified but
-                jsonPath is provided, defaults to response_body extraction.
+                (via JSON path), response headers, or response metadata.
               additionalProperties: false
+              required: ["type"]
               properties:
                 type:
                   type: string
@@ -100,7 +91,6 @@ parameters:
                     - response_header: Extract from response header using key
                     - response_metadata: Extract from response metadata using key
                   enum: ["response_body", "response_header", "response_metadata"]
-                  default: "response_body"
                 key:
                   type: string
                   description: |
@@ -116,14 +106,6 @@ parameters:
                     Example: "$.usage.completion_tokens"
                   minLength: 1
                   maxLength: 512
-            jsonPath:
-              type: string
-              description: |
-                JSON path to extract completion token count from response body.
-                Deprecated: Use tokenSource.jsonPath instead. This field is kept for
-                backward compatibility and is used when tokenSource is not specified.
-              minLength: 1
-              maxLength: 512
 
     promptBudget:
       type: object

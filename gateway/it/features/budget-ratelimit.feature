@@ -52,10 +52,14 @@ Feature: Budget Rate Limiting
                   pricing:
                     promptTokens:
                       costPer1MTokens: 10.00
-                      jsonPath: "$.json.usage.prompt_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.prompt_tokens"
                     completionTokens:
                       costPer1MTokens: 30.00
-                      jsonPath: "$.json.usage.completion_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.completion_tokens"
                   totalBudget:
                     limits:
                       - limit: 100
@@ -139,10 +143,14 @@ Feature: Budget Rate Limiting
                   pricing:
                     promptTokens:
                       costPer1MTokens: 10.00
-                      jsonPath: "$.json.usage.prompt_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.prompt_tokens"
                     completionTokens:
                       costPer1MTokens: 30.00
-                      jsonPath: "$.json.usage.completion_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.completion_tokens"
                   promptBudget:
                     limits:
                       - limit: 50
@@ -201,10 +209,14 @@ Feature: Budget Rate Limiting
                   pricing:
                     promptTokens:
                       costPer1MTokens: 10.00
-                      jsonPath: "$.json.usage.prompt_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.prompt_tokens"
                     completionTokens:
                       costPer1MTokens: 30.00
-                      jsonPath: "$.json.usage.completion_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.completion_tokens"
                   totalBudget:
                     limits:
                       - limit: 100
@@ -257,10 +269,14 @@ Feature: Budget Rate Limiting
                   pricing:
                     promptTokens:
                       costPer1MTokens: 10.00
-                      jsonPath: "$.json.usage.prompt_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.prompt_tokens"
                     completionTokens:
                       costPer1MTokens: 30.00
-                      jsonPath: "$.json.usage.completion_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.completion_tokens"
                   totalBudget:
                     limits:
                       - limit: 100
@@ -326,10 +342,14 @@ Feature: Budget Rate Limiting
               pricing:
                 promptTokens:
                   costPer1MTokens: 10.00
-                  jsonPath: "$.json.usage.prompt_tokens"
+                  tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.prompt_tokens"
                 completionTokens:
                   costPer1MTokens: 30.00
-                  jsonPath: "$.json.usage.completion_tokens"
+                  tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.completion_tokens"
               totalBudget:
                 limits:
                   - limit: 100
@@ -402,10 +422,14 @@ Feature: Budget Rate Limiting
                   pricing:
                     promptTokens:
                       costPer1MTokens: 10.00
-                      jsonPath: "$.json.usage.prompt_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.prompt_tokens"
                     completionTokens:
                       costPer1MTokens: 30.00
-                      jsonPath: "$.json.usage.completion_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.completion_tokens"
                   promptBudget:
                     limits:
                       - limit: 100
@@ -461,10 +485,14 @@ Feature: Budget Rate Limiting
                   pricing:
                     promptTokens:
                       costPer1MTokens: 10.00
-                      jsonPath: "$.json.usage.prompt_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.prompt_tokens"
                     completionTokens:
                       costPer1MTokens: 30.00
-                      jsonPath: "$.json.usage.completion_tokens"
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.completion_tokens"
                   totalBudget:
                     limits:
                       - limit: 50

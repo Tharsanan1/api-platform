@@ -8,8 +8,8 @@ description: |
 
   Key features:
   - Separate limits for prompt tokens, completion tokens, and total tokens
-  - Automatic extraction from JSON response body using configurable JSON paths
-  - Computed total tokens (sum of prompt + completion) when no explicit JSON path provided
+  - Flexible token extraction from response body (JSON path), headers, or metadata
+  - Computed total tokens (sum of prompt + completion) when no explicit tokenSource provided
   - Multiple concurrent limits per token type (e.g., 1000/min AND 50000/hour)
   - Configurable behavior when token extraction fails
 
@@ -47,9 +47,9 @@ parameters:
           type: object
           description: |
             Configuration for extracting token count. Supports extraction from response body
-            (via JSON path), response headers, or response metadata. If not specified but
-            jsonPath is provided, defaults to response_body extraction.
+            (via JSON path), response headers, or response metadata.
           additionalProperties: false
+          required: ["type"]
           properties:
             type:
               type: string
@@ -59,7 +59,6 @@ parameters:
                 - response_header: Extract from response header using key
                 - response_metadata: Extract from response metadata using key
               enum: ["response_body", "response_header", "response_metadata"]
-              default: "response_body"
             key:
               type: string
               description: |
@@ -75,14 +74,6 @@ parameters:
                 Example: "$.usage.prompt_tokens"
               minLength: 1
               maxLength: 512
-        jsonPath:
-          type: string
-          description: |
-            JSON path to extract prompt token count from response body.
-            Deprecated: Use tokenSource.jsonPath instead. This field is kept for
-            backward compatibility and is used when tokenSource is not specified.
-          minLength: 1
-          maxLength: 512
 
     completionTokens:
       type: object
@@ -114,9 +105,9 @@ parameters:
           type: object
           description: |
             Configuration for extracting token count. Supports extraction from response body
-            (via JSON path), response headers, or response metadata. If not specified but
-            jsonPath is provided, defaults to response_body extraction.
+            (via JSON path), response headers, or response metadata.
           additionalProperties: false
+          required: ["type"]
           properties:
             type:
               type: string
@@ -126,7 +117,6 @@ parameters:
                 - response_header: Extract from response header using key
                 - response_metadata: Extract from response metadata using key
               enum: ["response_body", "response_header", "response_metadata"]
-              default: "response_body"
             key:
               type: string
               description: |
@@ -142,21 +132,13 @@ parameters:
                 Example: "$.usage.completion_tokens"
               minLength: 1
               maxLength: 512
-        jsonPath:
-          type: string
-          description: |
-            JSON path to extract completion token count from response body.
-            Deprecated: Use tokenSource.jsonPath instead. This field is kept for
-            backward compatibility and is used when tokenSource is not specified.
-          minLength: 1
-          maxLength: 512
 
     totalTokens:
       type: object
       description: |
-        Rate limit based on total tokens. If tokenSource or jsonPath is provided, extracts total directly.
-        If neither is specified and both promptTokens and completionTokens are configured
-        with token extraction, total is computed as prompt + completion.
+        Rate limit based on total tokens. If tokenSource is provided, extracts total directly.
+        If tokenSource is not specified and both promptTokens and completionTokens are configured
+        with tokenSource, total is computed as prompt + completion.
       additionalProperties: false
       properties:
         limits:
@@ -184,9 +166,11 @@ parameters:
           type: object
           description: |
             Configuration for extracting token count. Supports extraction from response body
-            (via JSON path), response headers, or response metadata. If not specified but
-            jsonPath is provided, defaults to response_body extraction.
+            (via JSON path), response headers, or response metadata. If not specified and both
+            promptTokens and completionTokens have tokenSource configured, total is computed
+            as prompt + completion.
           additionalProperties: false
+          required: ["type"]
           properties:
             type:
               type: string
@@ -196,7 +180,6 @@ parameters:
                 - response_header: Extract from response header using key
                 - response_metadata: Extract from response metadata using key
               enum: ["response_body", "response_header", "response_metadata"]
-              default: "response_body"
             key:
               type: string
               description: |
@@ -212,16 +195,6 @@ parameters:
                 Example: "$.usage.total_tokens"
               minLength: 1
               maxLength: 512
-        jsonPath:
-          type: string
-          description: |
-            JSON path to extract total token count. If omitted and both
-            promptTokens and completionTokens are configured with token extraction,
-            total is computed as prompt + completion.
-            Deprecated: Use tokenSource.jsonPath instead. This field is kept for
-            backward compatibility.
-          minLength: 1
-          maxLength: 512
 
     onExtractionFailure:
       type: object

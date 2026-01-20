@@ -114,50 +114,41 @@ func hasBudgetConfig(params map[string]interface{}, budgetType string) bool {
 }
 
 // getTokenSourceFromPricing extracts the token source configuration from a pricing config.
-// It supports the new tokenSource object as well as the legacy jsonPath field.
 // Returns nil if no valid source configuration is found.
 func getTokenSourceFromPricing(pricingConfig map[string]interface{}) *tokenSourceConfig {
-	// Check for new tokenSource configuration first
-	if tokenSourceMap, ok := pricingConfig["tokenSource"].(map[string]interface{}); ok {
-		sourceType, _ := tokenSourceMap["type"].(string)
-		if sourceType == "" {
-			sourceType = "response_body" // default
-		}
-
-		config := &tokenSourceConfig{
-			sourceType: sourceType,
-		}
-
-		switch sourceType {
-		case "response_header", "response_metadata":
-			key, _ := tokenSourceMap["key"].(string)
-			if key == "" {
-				return nil // key is required for header/metadata
-			}
-			config.key = key
-		case "response_body":
-			jsonPath, _ := tokenSourceMap["jsonPath"].(string)
-			if jsonPath == "" {
-				return nil // jsonPath is required for body
-			}
-			config.jsonPath = jsonPath
-		default:
-			return nil // unsupported type
-		}
-
-		return config
-	}
-
-	// Fall back to legacy jsonPath field
-	jsonPath, ok := pricingConfig["jsonPath"].(string)
-	if !ok || jsonPath == "" {
+	// Get tokenSource configuration
+	tokenSourceMap, ok := pricingConfig["tokenSource"].(map[string]interface{})
+	if !ok {
 		return nil
 	}
 
-	return &tokenSourceConfig{
-		sourceType: "response_body",
-		jsonPath:   jsonPath,
+	sourceType, _ := tokenSourceMap["type"].(string)
+	if sourceType == "" {
+		return nil // type is required
 	}
+
+	config := &tokenSourceConfig{
+		sourceType: sourceType,
+	}
+
+	switch sourceType {
+	case "response_header", "response_metadata":
+		key, _ := tokenSourceMap["key"].(string)
+		if key == "" {
+			return nil // key is required for header/metadata
+		}
+		config.key = key
+	case "response_body":
+		jsonPath, _ := tokenSourceMap["jsonPath"].(string)
+		if jsonPath == "" {
+			return nil // jsonPath is required for body
+		}
+		config.jsonPath = jsonPath
+	default:
+		return nil // unsupported type
+	}
+
+	return config
 }
 
 // getDefaultCost returns the default cost based on onExtractionFailure configuration

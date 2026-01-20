@@ -53,7 +53,9 @@ Feature: Token Rate Limiting
                     limits:
                       - limit: 100
                         duration: "1h"
-                    jsonPath: "$.json.usage.total_tokens"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.total_tokens"
       """
     Then the response should be successful
     And I wait for the endpoint "http://localhost:8080/token-ratelimit-total/v1.0/get" to be ready
@@ -112,12 +114,16 @@ Feature: Token Rate Limiting
                     limits:
                       - limit: 100
                         duration: "1h"
-                    jsonPath: "$.json.usage.prompt_tokens"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.prompt_tokens"
                   completionTokens:
                     limits:
                       - limit: 50
                         duration: "1h"
-                    jsonPath: "$.json.usage.completion_tokens"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.completion_tokens"
       """
     Then the response should be successful
     And I wait for the endpoint "http://localhost:8080/token-ratelimit-separate/v1.0/get" to be ready
@@ -177,12 +183,16 @@ Feature: Token Rate Limiting
                     limits:
                       - limit: 1000
                         duration: "1h"
-                    jsonPath: "$.json.usage.prompt_tokens"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.prompt_tokens"
                   completionTokens:
                     limits:
                       - limit: 1000
                         duration: "1h"
-                    jsonPath: "$.json.usage.completion_tokens"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.completion_tokens"
                   totalTokens:
                     limits:
                       - limit: 100
@@ -244,7 +254,9 @@ Feature: Token Rate Limiting
                     limits:
                       - limit: 50
                         duration: "1h"
-                    jsonPath: "$.json.usage.nonexistent_field"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.nonexistent_field"
                   onExtractionFailure:
                     action: "default"
                     defaultValue: 25
@@ -307,7 +319,9 @@ Feature: Token Rate Limiting
                     limits:
                       - limit: 50
                         duration: "1h"
-                    jsonPath: "$.json.usage.total_tokens"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.total_tokens"
                   onExtractionFailure:
                     action: "skip"
       """
@@ -377,7 +391,9 @@ Feature: Token Rate Limiting
                         duration: "1m"
                       - limit: 50
                         duration: "24h"
-                    jsonPath: "$.json.usage.total_tokens"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.total_tokens"
       """
     Then the response should be successful
     And I wait for the endpoint "http://localhost:8080/token-ratelimit-multilimits/v1.0/get" to be ready
@@ -432,7 +448,9 @@ Feature: Token Rate Limiting
                 limits:
                   - limit: 100
                     duration: "1h"
-                jsonPath: "$.json.usage.total_tokens"
+                tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.total_tokens"
         operations:
           - method: GET
             path: /get
@@ -502,12 +520,16 @@ Feature: Token Rate Limiting
                     limits:
                       - limit: 100
                         duration: "1h"
-                    jsonPath: "$.json.usage.prompt_tokens"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.prompt_tokens"
                   completionTokens:
                     limits:
                       - limit: 100
                         duration: "1h"
-                    jsonPath: "$.json.usage.completion_tokens"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.completion_tokens"
       """
     Then the response should be successful
     And I wait for the endpoint "http://localhost:8080/token-ratelimit-headers/v1.0/get" to be ready

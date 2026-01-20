@@ -64,7 +64,7 @@ func GetPolicy(
 			promptSource := getTokenSource(params, "promptTokens")
 			completionSource := getTokenSource(params, "completionTokens")
 			if promptSource == nil || completionSource == nil {
-				return nil, fmt.Errorf("totalTokens without tokenSource/jsonPath requires both promptTokens and completionTokens to have token extraction configured for computed total")
+				return nil, fmt.Errorf("totalTokens without tokenSource requires both promptTokens and completionTokens to have tokenSource configured for computed total")
 			}
 		}
 	}
@@ -92,7 +92,6 @@ func hasTokenConfig(params map[string]interface{}, tokenType string) bool {
 }
 
 // getTokenSource extracts the token source configuration from a token type.
-// It supports the new tokenSource object as well as the legacy jsonPath field.
 // Returns nil if no valid source configuration is found.
 func getTokenSource(params map[string]interface{}, tokenType string) *tokenSourceConfig {
 	tokenConfig, ok := params[tokenType].(map[string]interface{})
@@ -100,47 +99,39 @@ func getTokenSource(params map[string]interface{}, tokenType string) *tokenSourc
 		return nil
 	}
 
-	// Check for new tokenSource configuration first
-	if tokenSourceMap, ok := tokenConfig["tokenSource"].(map[string]interface{}); ok {
-		sourceType, _ := tokenSourceMap["type"].(string)
-		if sourceType == "" {
-			sourceType = "response_body" // default
-		}
-
-		config := &tokenSourceConfig{
-			sourceType: sourceType,
-		}
-
-		switch sourceType {
-		case "response_header", "response_metadata":
-			key, _ := tokenSourceMap["key"].(string)
-			if key == "" {
-				return nil // key is required for header/metadata
-			}
-			config.key = key
-		case "response_body":
-			jsonPath, _ := tokenSourceMap["jsonPath"].(string)
-			if jsonPath == "" {
-				return nil // jsonPath is required for body
-			}
-			config.jsonPath = jsonPath
-		default:
-			return nil // unsupported type
-		}
-
-		return config
-	}
-
-	// Fall back to legacy jsonPath field
-	jsonPath, ok := tokenConfig["jsonPath"].(string)
-	if !ok || jsonPath == "" {
+	// Get tokenSource configuration
+	tokenSourceMap, ok := tokenConfig["tokenSource"].(map[string]interface{})
+	if !ok {
 		return nil
 	}
 
-	return &tokenSourceConfig{
-		sourceType: "response_body",
-		jsonPath:   jsonPath,
+	sourceType, _ := tokenSourceMap["type"].(string)
+	if sourceType == "" {
+		return nil // type is required
 	}
+
+	config := &tokenSourceConfig{
+		sourceType: sourceType,
+	}
+
+	switch sourceType {
+	case "response_header", "response_metadata":
+		key, _ := tokenSourceMap["key"].(string)
+		if key == "" {
+			return nil // key is required for header/metadata
+		}
+		config.key = key
+	case "response_body":
+		jsonPath, _ := tokenSourceMap["jsonPath"].(string)
+		if jsonPath == "" {
+			return nil // jsonPath is required for body
+		}
+		config.jsonPath = jsonPath
+	default:
+		return nil // unsupported type
+	}
+
+	return config
 }
 
 // getDefaultValue returns the default cost based on onExtractionFailure configuration

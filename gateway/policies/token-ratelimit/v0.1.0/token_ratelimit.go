@@ -25,9 +25,16 @@ import (
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
+// tokenSourceConfig represents the token extraction configuration
+type tokenSourceConfig struct {
+	sourceType string // "response_body", "response_header", "response_metadata"
+	key        string // header name or metadata key
+	jsonPath   string // JSON path for response_body
+}
+
 // TokenRateLimitPolicy provides token-based rate limiting that delegates
 // to the core ratelimit policy. It supports separate limits for prompt tokens,
-// completion tokens, and total tokens extracted from response body.
+// completion tokens, and total tokens extracted from response body, headers, or metadata.
 type TokenRateLimitPolicy struct {
 	delegate policy.Policy
 }
@@ -50,15 +57,14 @@ func GetPolicy(
 
 	// Validate totalTokens configuration
 	if hasTotal {
-		totalTokens := params["totalTokens"].(map[string]interface{})
-		totalJsonPath, hasTotalPath := totalTokens["jsonPath"].(string)
+		totalSource := getTokenSource(params, "totalTokens")
 
-		// If totalTokens has no jsonPath, we need both prompt and completion jsonPaths for computation
-		if !hasTotalPath || totalJsonPath == "" {
-			promptPath := getJsonPath(params, "promptTokens")
-			completionPath := getJsonPath(params, "completionTokens")
-			if promptPath == "" || completionPath == "" {
-				return nil, fmt.Errorf("totalTokens without jsonPath requires both promptTokens.jsonPath and completionTokens.jsonPath to be configured for computed total")
+		// If totalTokens has no direct token source, we need both prompt and completion sources for computation
+		if totalSource == nil {
+			promptSource := getTokenSource(params, "promptTokens")
+			completionSource := getTokenSource(params, "completionTokens")
+			if promptSource == nil || completionSource == nil {
+				return nil, fmt.Errorf("totalTokens without tokenSource requires both promptTokens and completionTokens to have tokenSource configured for computed total")
 			}
 		}
 	}
@@ -85,14 +91,47 @@ func hasTokenConfig(params map[string]interface{}, tokenType string) bool {
 	return ok && len(limits) > 0
 }
 
-// getJsonPath extracts jsonPath from a token type configuration
-func getJsonPath(params map[string]interface{}, tokenType string) string {
+// getTokenSource extracts the token source configuration from a token type.
+// Returns nil if no valid source configuration is found.
+func getTokenSource(params map[string]interface{}, tokenType string) *tokenSourceConfig {
 	tokenConfig, ok := params[tokenType].(map[string]interface{})
 	if !ok {
-		return ""
+		return nil
 	}
-	jsonPath, _ := tokenConfig["jsonPath"].(string)
-	return jsonPath
+
+	// Get tokenSource configuration
+	tokenSourceMap, ok := tokenConfig["tokenSource"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	sourceType, _ := tokenSourceMap["type"].(string)
+	if sourceType == "" {
+		return nil // type is required
+	}
+
+	config := &tokenSourceConfig{
+		sourceType: sourceType,
+	}
+
+	switch sourceType {
+	case "response_header", "response_metadata":
+		key, _ := tokenSourceMap["key"].(string)
+		if key == "" {
+			return nil // key is required for header/metadata
+		}
+		config.key = key
+	case "response_body":
+		jsonPath, _ := tokenSourceMap["jsonPath"].(string)
+		if jsonPath == "" {
+			return nil // jsonPath is required for body
+		}
+		config.jsonPath = jsonPath
+	default:
+		return nil // unsupported type
+	}
+
+	return config
 }
 
 // getDefaultValue returns the default cost based on onExtractionFailure configuration
@@ -115,8 +154,25 @@ func getDefaultValue(params map[string]interface{}) float64 {
 	return 0 // skip action = 0 cost
 }
 
+// buildCostExtractionSource creates a cost extraction source map from a tokenSourceConfig
+func buildCostExtractionSource(source *tokenSourceConfig, multiplier float64) map[string]interface{} {
+	result := map[string]interface{}{
+		"type":       source.sourceType,
+		"multiplier": multiplier,
+	}
+
+	switch source.sourceType {
+	case "response_header", "response_metadata":
+		result["key"] = source.key
+	case "response_body":
+		result["jsonPath"] = source.jsonPath
+	}
+
+	return result
+}
+
 // transformToRatelimitParams converts the token-based configuration to a full ratelimit
-// quota configuration with cost extraction from response body.
+// quota configuration with cost extraction from response body, headers, or metadata.
 func transformToRatelimitParams(params map[string]interface{}, metadata policy.PolicyMetadata) map[string]interface{} {
 	quotas := []interface{}{}
 
@@ -135,9 +191,9 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 	// Build quota for promptTokens if configured
 	if hasTokenConfig(params, "promptTokens") {
 		promptTokens := params["promptTokens"].(map[string]interface{})
-		jsonPath := getJsonPath(params, "promptTokens")
+		promptSource := getTokenSource(params, "promptTokens")
 
-		if jsonPath != "" {
+		if promptSource != nil {
 			quota := map[string]interface{}{
 				"name":          "prompt-tokens",
 				"limits":        promptTokens["limits"],
@@ -145,11 +201,7 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 				"costExtraction": map[string]interface{}{
 					"enabled": true,
 					"sources": []interface{}{
-						map[string]interface{}{
-							"type":       "response_body",
-							"jsonPath":   jsonPath,
-							"multiplier": 1.0,
-						},
+						buildCostExtractionSource(promptSource, 1.0),
 					},
 					"default": defaultCost,
 				},
@@ -161,9 +213,9 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 	// Build quota for completionTokens if configured
 	if hasTokenConfig(params, "completionTokens") {
 		completionTokens := params["completionTokens"].(map[string]interface{})
-		jsonPath := getJsonPath(params, "completionTokens")
+		completionSource := getTokenSource(params, "completionTokens")
 
-		if jsonPath != "" {
+		if completionSource != nil {
 			quota := map[string]interface{}{
 				"name":          "completion-tokens",
 				"limits":        completionTokens["limits"],
@@ -171,11 +223,7 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 				"costExtraction": map[string]interface{}{
 					"enabled": true,
 					"sources": []interface{}{
-						map[string]interface{}{
-							"type":       "response_body",
-							"jsonPath":   jsonPath,
-							"multiplier": 1.0,
-						},
+						buildCostExtractionSource(completionSource, 1.0),
 					},
 					"default": defaultCost,
 				},
@@ -187,41 +235,29 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 	// Build quota for totalTokens if configured
 	if hasTokenConfig(params, "totalTokens") {
 		totalTokens := params["totalTokens"].(map[string]interface{})
-		totalJsonPath := getJsonPath(params, "totalTokens")
+		totalSource := getTokenSource(params, "totalTokens")
 
 		var costExtraction map[string]interface{}
 
-		if totalJsonPath != "" {
-			// Direct extraction from response body
+		if totalSource != nil {
+			// Direct extraction from configured source
 			costExtraction = map[string]interface{}{
 				"enabled": true,
 				"sources": []interface{}{
-					map[string]interface{}{
-						"type":       "response_body",
-						"jsonPath":   totalJsonPath,
-						"multiplier": 1.0,
-					},
+					buildCostExtractionSource(totalSource, 1.0),
 				},
 				"default": defaultCost,
 			}
 		} else {
 			// Computed from prompt + completion (validation ensures both exist)
-			promptPath := getJsonPath(params, "promptTokens")
-			completionPath := getJsonPath(params, "completionTokens")
+			promptSource := getTokenSource(params, "promptTokens")
+			completionSource := getTokenSource(params, "completionTokens")
 
 			costExtraction = map[string]interface{}{
 				"enabled": true,
 				"sources": []interface{}{
-					map[string]interface{}{
-						"type":       "response_body",
-						"jsonPath":   promptPath,
-						"multiplier": 1.0,
-					},
-					map[string]interface{}{
-						"type":       "response_body",
-						"jsonPath":   completionPath,
-						"multiplier": 1.0,
-					},
+					buildCostExtractionSource(promptSource, 1.0),
+					buildCostExtractionSource(completionSource, 1.0),
 				},
 				"default": defaultCost,
 			}

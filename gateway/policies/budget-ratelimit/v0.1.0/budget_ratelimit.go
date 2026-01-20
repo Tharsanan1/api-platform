@@ -25,6 +25,13 @@ import (
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
+// tokenSourceConfig represents the token extraction configuration
+type tokenSourceConfig struct {
+	sourceType string // "response_body", "response_header", "response_metadata"
+	key        string // header name or metadata key
+	jsonPath   string // JSON path for response_body
+}
+
 // BudgetRateLimitPolicy provides budget-based rate limiting that delegates
 // to the core ratelimit policy. It converts token counts to costs using
 // configurable pricing (cost per 1M tokens) and enforces budget limits.
@@ -59,14 +66,20 @@ func GetPolicy(
 	if _, ok := promptPricing["costPer1MTokens"]; !ok {
 		return nil, fmt.Errorf("pricing.promptTokens.costPer1MTokens is required")
 	}
-	if _, ok := promptPricing["jsonPath"].(string); !ok {
-		return nil, fmt.Errorf("pricing.promptTokens.jsonPath is required")
-	}
 	if _, ok := completionPricing["costPer1MTokens"]; !ok {
 		return nil, fmt.Errorf("pricing.completionTokens.costPer1MTokens is required")
 	}
-	if _, ok := completionPricing["jsonPath"].(string); !ok {
-		return nil, fmt.Errorf("pricing.completionTokens.jsonPath is required")
+
+	// Validate token source configuration for prompt tokens
+	promptSource := getTokenSourceFromPricing(promptPricing)
+	if promptSource == nil {
+		return nil, fmt.Errorf("pricing.promptTokens requires tokenSource to be configured")
+	}
+
+	// Validate token source configuration for completion tokens
+	completionSource := getTokenSourceFromPricing(completionPricing)
+	if completionSource == nil {
+		return nil, fmt.Errorf("pricing.completionTokens requires tokenSource to be configured")
 	}
 
 	// Validate that at least one budget is configured
@@ -100,6 +113,44 @@ func hasBudgetConfig(params map[string]interface{}, budgetType string) bool {
 	return ok && len(limits) > 0
 }
 
+// getTokenSourceFromPricing extracts the token source configuration from a pricing config.
+// Returns nil if no valid source configuration is found.
+func getTokenSourceFromPricing(pricingConfig map[string]interface{}) *tokenSourceConfig {
+	// Get tokenSource configuration
+	tokenSourceMap, ok := pricingConfig["tokenSource"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	sourceType, _ := tokenSourceMap["type"].(string)
+	if sourceType == "" {
+		return nil // type is required
+	}
+
+	config := &tokenSourceConfig{
+		sourceType: sourceType,
+	}
+
+	switch sourceType {
+	case "response_header", "response_metadata":
+		key, _ := tokenSourceMap["key"].(string)
+		if key == "" {
+			return nil // key is required for header/metadata
+		}
+		config.key = key
+	case "response_body":
+		jsonPath, _ := tokenSourceMap["jsonPath"].(string)
+		if jsonPath == "" {
+			return nil // jsonPath is required for body
+		}
+		config.jsonPath = jsonPath
+	default:
+		return nil // unsupported type
+	}
+
+	return config
+}
+
 // getDefaultCost returns the default cost based on onExtractionFailure configuration
 // and applies the pricing multiplier
 func getDefaultCost(params map[string]interface{}, multiplier float64) float64 {
@@ -122,8 +173,25 @@ func getDefaultCost(params map[string]interface{}, multiplier float64) float64 {
 	return 0 // skip action = 0 cost
 }
 
+// buildCostExtractionSource creates a cost extraction source map from a tokenSourceConfig
+func buildCostExtractionSource(source *tokenSourceConfig, multiplier float64) map[string]interface{} {
+	result := map[string]interface{}{
+		"type":       source.sourceType,
+		"multiplier": multiplier,
+	}
+
+	switch source.sourceType {
+	case "response_header", "response_metadata":
+		result["key"] = source.key
+	case "response_body":
+		result["jsonPath"] = source.jsonPath
+	}
+
+	return result
+}
+
 // transformToRatelimitParams converts the budget-based configuration to a full ratelimit
-// quota configuration with cost extraction from response body using multipliers.
+// quota configuration with cost extraction from response body, headers, or metadata using multipliers.
 func transformToRatelimitParams(params map[string]interface{}, metadata policy.PolicyMetadata) map[string]interface{} {
 	quotas := []interface{}{}
 
@@ -148,8 +216,9 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 	promptMultiplier := promptCostPer1M / 1_000_000
 	completionMultiplier := completionCostPer1M / 1_000_000
 
-	promptJsonPath := promptPricing["jsonPath"].(string)
-	completionJsonPath := completionPricing["jsonPath"].(string)
+	// Get token sources
+	promptSource := getTokenSourceFromPricing(promptPricing)
+	completionSource := getTokenSourceFromPricing(completionPricing)
 
 	// Build quota for promptBudget if configured
 	if hasBudgetConfig(params, "promptBudget") {
@@ -163,11 +232,7 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 			"costExtraction": map[string]interface{}{
 				"enabled": true,
 				"sources": []interface{}{
-					map[string]interface{}{
-						"type":       "response_body",
-						"jsonPath":   promptJsonPath,
-						"multiplier": promptMultiplier,
-					},
+					buildCostExtractionSource(promptSource, promptMultiplier),
 				},
 				"default": defaultCost,
 			},
@@ -187,11 +252,7 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 			"costExtraction": map[string]interface{}{
 				"enabled": true,
 				"sources": []interface{}{
-					map[string]interface{}{
-						"type":       "response_body",
-						"jsonPath":   completionJsonPath,
-						"multiplier": completionMultiplier,
-					},
+					buildCostExtractionSource(completionSource, completionMultiplier),
 				},
 				"default": defaultCost,
 			},
@@ -213,16 +274,8 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 			"costExtraction": map[string]interface{}{
 				"enabled": true,
 				"sources": []interface{}{
-					map[string]interface{}{
-						"type":       "response_body",
-						"jsonPath":   promptJsonPath,
-						"multiplier": promptMultiplier,
-					},
-					map[string]interface{}{
-						"type":       "response_body",
-						"jsonPath":   completionJsonPath,
-						"multiplier": completionMultiplier,
-					},
+					buildCostExtractionSource(promptSource, promptMultiplier),
+					buildCostExtractionSource(completionSource, completionMultiplier),
 				},
 				"default": defaultCost,
 			},

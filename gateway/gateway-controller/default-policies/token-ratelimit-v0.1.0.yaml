@@ -43,9 +43,44 @@ parameters:
                   Time window for the limit (Go duration string format).
                   Examples: "1s", "1m", "1h", "24h"
                 pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+        tokenSource:
+          type: object
+          description: |
+            Configuration for extracting token count. Supports extraction from response body
+            (via JSON path), response headers, or response metadata. If not specified but
+            jsonPath is provided, defaults to response_body extraction.
+          additionalProperties: false
+          properties:
+            type:
+              type: string
+              description: |
+                Type of source to extract token count from:
+                - response_body: Extract from JSON response body using jsonPath
+                - response_header: Extract from response header using key
+                - response_metadata: Extract from response metadata using key
+              enum: ["response_body", "response_header", "response_metadata"]
+              default: "response_body"
+            key:
+              type: string
+              description: |
+                Header name (for response_header) or metadata key (for response_metadata).
+                Required when type is response_header or response_metadata.
+              minLength: 1
+              maxLength: 256
+            jsonPath:
+              type: string
+              description: |
+                JSON path expression for extracting token count from response body.
+                Required when type is response_body.
+                Example: "$.usage.prompt_tokens"
+              minLength: 1
+              maxLength: 512
         jsonPath:
           type: string
-          description: JSON path to extract prompt token count from response body
+          description: |
+            JSON path to extract prompt token count from response body.
+            Deprecated: Use tokenSource.jsonPath instead. This field is kept for
+            backward compatibility and is used when tokenSource is not specified.
           minLength: 1
           maxLength: 512
 
@@ -75,18 +110,53 @@ parameters:
                   Time window for the limit (Go duration string format).
                   Examples: "1s", "1m", "1h", "24h"
                 pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+        tokenSource:
+          type: object
+          description: |
+            Configuration for extracting token count. Supports extraction from response body
+            (via JSON path), response headers, or response metadata. If not specified but
+            jsonPath is provided, defaults to response_body extraction.
+          additionalProperties: false
+          properties:
+            type:
+              type: string
+              description: |
+                Type of source to extract token count from:
+                - response_body: Extract from JSON response body using jsonPath
+                - response_header: Extract from response header using key
+                - response_metadata: Extract from response metadata using key
+              enum: ["response_body", "response_header", "response_metadata"]
+              default: "response_body"
+            key:
+              type: string
+              description: |
+                Header name (for response_header) or metadata key (for response_metadata).
+                Required when type is response_header or response_metadata.
+              minLength: 1
+              maxLength: 256
+            jsonPath:
+              type: string
+              description: |
+                JSON path expression for extracting token count from response body.
+                Required when type is response_body.
+                Example: "$.usage.completion_tokens"
+              minLength: 1
+              maxLength: 512
         jsonPath:
           type: string
-          description: JSON path to extract completion token count from response body
+          description: |
+            JSON path to extract completion token count from response body.
+            Deprecated: Use tokenSource.jsonPath instead. This field is kept for
+            backward compatibility and is used when tokenSource is not specified.
           minLength: 1
           maxLength: 512
 
     totalTokens:
       type: object
       description: |
-        Rate limit based on total tokens. If jsonPath is provided, extracts total directly.
-        If jsonPath is omitted and both promptTokens and completionTokens are configured
-        with jsonPath, total is computed as prompt + completion.
+        Rate limit based on total tokens. If tokenSource or jsonPath is provided, extracts total directly.
+        If neither is specified and both promptTokens and completionTokens are configured
+        with token extraction, total is computed as prompt + completion.
       additionalProperties: false
       properties:
         limits:
@@ -110,12 +180,46 @@ parameters:
                   Time window for the limit (Go duration string format).
                   Examples: "1s", "1m", "1h", "24h"
                 pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+        tokenSource:
+          type: object
+          description: |
+            Configuration for extracting token count. Supports extraction from response body
+            (via JSON path), response headers, or response metadata. If not specified but
+            jsonPath is provided, defaults to response_body extraction.
+          additionalProperties: false
+          properties:
+            type:
+              type: string
+              description: |
+                Type of source to extract token count from:
+                - response_body: Extract from JSON response body using jsonPath
+                - response_header: Extract from response header using key
+                - response_metadata: Extract from response metadata using key
+              enum: ["response_body", "response_header", "response_metadata"]
+              default: "response_body"
+            key:
+              type: string
+              description: |
+                Header name (for response_header) or metadata key (for response_metadata).
+                Required when type is response_header or response_metadata.
+              minLength: 1
+              maxLength: 256
+            jsonPath:
+              type: string
+              description: |
+                JSON path expression for extracting token count from response body.
+                Required when type is response_body.
+                Example: "$.usage.total_tokens"
+              minLength: 1
+              maxLength: 512
         jsonPath:
           type: string
           description: |
             JSON path to extract total token count. If omitted and both
-            promptTokens and completionTokens are configured with jsonPath,
+            promptTokens and completionTokens are configured with token extraction,
             total is computed as prompt + completion.
+            Deprecated: Use tokenSource.jsonPath instead. This field is kept for
+            backward compatibility.
           minLength: 1
           maxLength: 512
 

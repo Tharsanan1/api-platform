@@ -527,3 +527,138 @@ Feature: Token Rate Limiting
     # Verify IETF headers contain quota names
     And the response header "RateLimit-Policy" should contain "prompt-tokens"
     And the response header "RateLimit-Policy" should contain "completion-tokens"
+
+  Scenario: Token extraction using new tokenSource syntax with response_body
+    # This test verifies that the new tokenSource configuration syntax works
+    # with response_body type, which is functionally equivalent to the legacy jsonPath
+    Given I authenticate using basic auth as "admin"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1alpha1
+      kind: RestApi
+      metadata:
+        name: token-ratelimit-tokensource-api
+      spec:
+        displayName: Token RateLimit TokenSource API
+        version: v1.0
+        context: /token-ratelimit-tokensource/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        operations:
+          - method: GET
+            path: /get
+          - method: POST
+            path: /anything
+            policies:
+              - name: token-ratelimit
+                version: v0.1.0
+                params:
+                  totalTokens:
+                    limits:
+                      - limit: 100
+                        duration: "1h"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.total_tokens"
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/token-ratelimit-tokensource/v1.0/get" to be ready
+
+    # Send a POST request with total_tokens=50
+    When I send a POST request to "http://localhost:8080/token-ratelimit-tokensource/v1.0/anything" with body:
+      """
+      {"usage": {"total_tokens": 50}}
+      """
+    Then the response status code should be 200
+    # After first request: 100 - 50 = 50 remaining
+    And the response header "X-RateLimit-Remaining" should be "50"
+
+    # Send another request with total_tokens=50
+    When I send a POST request to "http://localhost:8080/token-ratelimit-tokensource/v1.0/anything" with body:
+      """
+      {"usage": {"total_tokens": 50}}
+      """
+    Then the response status code should be 200
+    # After second request: 50 - 50 = 0 remaining
+    And the response header "X-RateLimit-Remaining" should be "0"
+
+    # Third request should be rate limited since quota is exhausted
+    When I send a POST request to "http://localhost:8080/token-ratelimit-tokensource/v1.0/anything" with body:
+      """
+      {"usage": {"total_tokens": 10}}
+      """
+    Then the response status code should be 429
+    And the response body should contain "Rate limit exceeded"
+
+  Scenario: Computed total tokens with tokenSource syntax
+    # Test that computed total tokens works with the new tokenSource syntax
+    Given I authenticate using basic auth as "admin"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1alpha1
+      kind: RestApi
+      metadata:
+        name: token-ratelimit-tokensource-computed-api
+      spec:
+        displayName: Token RateLimit TokenSource Computed API
+        version: v1.0
+        context: /token-ratelimit-tokensource-computed/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        operations:
+          - method: GET
+            path: /get
+          - method: POST
+            path: /anything
+            policies:
+              - name: token-ratelimit
+                version: v0.1.0
+                params:
+                  promptTokens:
+                    limits:
+                      - limit: 1000
+                        duration: "1h"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.prompt_tokens"
+                  completionTokens:
+                    limits:
+                      - limit: 1000
+                        duration: "1h"
+                    tokenSource:
+                      type: response_body
+                      jsonPath: "$.json.usage.completion_tokens"
+                  totalTokens:
+                    limits:
+                      - limit: 100
+                        duration: "1h"
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/token-ratelimit-tokensource-computed/v1.0/get" to be ready
+
+    # totalTokens has no tokenSource, so total = prompt + completion (computed)
+    # Send request with prompt=30, completion=20 -> total=50
+    When I send a POST request to "http://localhost:8080/token-ratelimit-tokensource-computed/v1.0/anything" with body:
+      """
+      {"usage": {"prompt_tokens": 30, "completion_tokens": 20}}
+      """
+    Then the response status code should be 200
+    # total-tokens: 100 - 50 = 50 remaining
+
+    # Send another request with prompt=25, completion=25 -> total=50
+    When I send a POST request to "http://localhost:8080/token-ratelimit-tokensource-computed/v1.0/anything" with body:
+      """
+      {"usage": {"prompt_tokens": 25, "completion_tokens": 25}}
+      """
+    Then the response status code should be 200
+    # total-tokens: 50 - 50 = 0 remaining
+
+    # Third request should be blocked by total-tokens quota (computed)
+    When I send a POST request to "http://localhost:8080/token-ratelimit-tokensource-computed/v1.0/anything" with body:
+      """
+      {"usage": {"prompt_tokens": 5, "completion_tokens": 5}}
+      """
+    Then the response status code should be 429
+    And the response body should contain "Rate limit exceeded"

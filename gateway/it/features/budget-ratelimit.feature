@@ -512,3 +512,154 @@ Feature: Budget Rate Limiting
       {"usage": {"prompt_tokens": 1000, "completion_tokens": 1000}}
       """
     Then the response status code should be 429
+
+  Scenario: Budget rate limiting using new tokenSource syntax with response_body
+    # This test verifies that the new tokenSource configuration syntax works
+    # with response_body type for budget-ratelimit policy
+    Given I authenticate using basic auth as "admin"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1alpha1
+      kind: RestApi
+      metadata:
+        name: budget-ratelimit-tokensource-api
+      spec:
+        displayName: Budget RateLimit TokenSource API
+        version: v1.0
+        context: /budget-ratelimit-tokensource/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        operations:
+          - method: GET
+            path: /get
+          - method: POST
+            path: /anything
+            policies:
+              - name: budget-ratelimit
+                version: v0.1.0
+                params:
+                  pricing:
+                    promptTokens:
+                      costPer1MTokens: 10.00
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.prompt_tokens"
+                    completionTokens:
+                      costPer1MTokens: 30.00
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.completion_tokens"
+                  totalBudget:
+                    limits:
+                      - limit: 100
+                        duration: "1h"
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/budget-ratelimit-tokensource/v1.0/get" to be ready
+
+    # Cost calculation:
+    # - Prompt: 500,000 tokens × ($10/1M) = $5
+    # - Completion: 500,000 tokens × ($30/1M) = $15
+    # - Total cost per request: $20
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-tokensource/v1.0/anything" with body:
+      """
+      {"usage": {"prompt_tokens": 500000, "completion_tokens": 500000}}
+      """
+    Then the response status code should be 200
+    # 100 - 20 = 80 remaining
+    And the response header "X-RateLimit-Remaining" should be "80"
+
+    # Second request: same cost ($20)
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-tokensource/v1.0/anything" with body:
+      """
+      {"usage": {"prompt_tokens": 500000, "completion_tokens": 500000}}
+      """
+    Then the response status code should be 200
+    # 80 - 20 = 60 remaining
+    And the response header "X-RateLimit-Remaining" should be "60"
+
+    # Third request: $60 cost (exhausts budget)
+    # Prompt: 1000000 × 0.00001 = $10
+    # Completion: 1666667 × 0.00003 ≈ $50
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-tokensource/v1.0/anything" with body:
+      """
+      {"usage": {"prompt_tokens": 1000000, "completion_tokens": 1666667}}
+      """
+    Then the response status code should be 200
+    # 60 - 60 = 0 remaining
+    And the response header "X-RateLimit-Remaining" should be "0"
+
+    # Fourth request should be rate limited
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-tokensource/v1.0/anything" with body:
+      """
+      {"usage": {"prompt_tokens": 1000, "completion_tokens": 1000}}
+      """
+    Then the response status code should be 429
+    And the response body should contain "Rate limit exceeded"
+
+  Scenario: Separate prompt and completion budgets with tokenSource syntax
+    Given I authenticate using basic auth as "admin"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1alpha1
+      kind: RestApi
+      metadata:
+        name: budget-ratelimit-tokensource-separate-api
+      spec:
+        displayName: Budget RateLimit TokenSource Separate API
+        version: v1.0
+        context: /budget-ratelimit-tokensource-separate/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        operations:
+          - method: GET
+            path: /get
+          - method: POST
+            path: /anything
+            policies:
+              - name: budget-ratelimit
+                version: v0.1.0
+                params:
+                  pricing:
+                    promptTokens:
+                      costPer1MTokens: 10.00
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.prompt_tokens"
+                    completionTokens:
+                      costPer1MTokens: 30.00
+                      tokenSource:
+                        type: response_body
+                        jsonPath: "$.json.usage.completion_tokens"
+                  promptBudget:
+                    limits:
+                      - limit: 50
+                        duration: "1h"
+                  completionBudget:
+                    limits:
+                      - limit: 30
+                        duration: "1h"
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/budget-ratelimit-tokensource-separate/v1.0/get" to be ready
+
+    # Test completion budget exhaustion (more restrictive in terms of cost)
+    # Prompt budget: $50 limit, Completion budget: $30 limit
+    # With 1M completion tokens at $30/1M = $30 cost
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-tokensource-separate/v1.0/anything" with body:
+      """
+      {"usage": {"prompt_tokens": 100000, "completion_tokens": 1000000}}
+      """
+    Then the response status code should be 200
+    # Prompt cost: 100000 × 0.00001 = $1 (50 - 1 = 49 remaining)
+    # Completion cost: 1000000 × 0.00003 = $30 (30 - 30 = 0 remaining, exhausted!)
+
+    # Next request should be blocked by completion budget
+    When I send a POST request to "http://localhost:8080/budget-ratelimit-tokensource-separate/v1.0/anything" with body:
+      """
+      {"usage": {"prompt_tokens": 10000, "completion_tokens": 10000}}
+      """
+    Then the response status code should be 429
+    And the response body should contain "Rate limit exceeded"

@@ -73,13 +73,13 @@ func GetPolicy(
 	// Validate token source configuration for prompt tokens
 	promptSource := getTokenSourceFromPricing(promptPricing)
 	if promptSource == nil {
-		return nil, fmt.Errorf("pricing.promptTokens requires either tokenSource or jsonPath to be configured")
+		return nil, fmt.Errorf("pricing.promptTokens requires tokenSource to be configured")
 	}
 
 	// Validate token source configuration for completion tokens
 	completionSource := getTokenSourceFromPricing(completionPricing)
 	if completionSource == nil {
-		return nil, fmt.Errorf("pricing.completionTokens requires either tokenSource or jsonPath to be configured")
+		return nil, fmt.Errorf("pricing.completionTokens requires tokenSource to be configured")
 	}
 
 	// Validate that at least one budget is configured

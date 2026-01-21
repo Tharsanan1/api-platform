@@ -9,7 +9,8 @@ The Advanced Rate Limiting policy provides a powerful, multi-dimensional token b
 - **Multi-dimensional Quotas**: Define multiple independent rate limit buckets (e.g., one per user, another per organization).
 - **Multiple Algorithms**: Choose between GCRA (Leaky Bucket variant for smooth shaping) and Fixed Window.
 - **Dynamic Cost Extraction**: Extract request costs from headers, metadata, or JSON bodies (e.g., for LLM token usage).
-- **Flexible Key Extraction**: Rate limit by Header, Metadata, IP, API Name, or Route Name.
+- **Flexible Key Extraction**: Rate limit by Header, Metadata, IP, API Name, Route Name, or CEL expressions.
+- **CEL-Based JSONPath Access**: Use CEL expressions with `jsonPath()`, `jsonPathInt()`, and `jsonPathDouble()` functions to extract values from JSON request/response bodies for both key and cost extraction.
 - **Distributed & Local**: Support for both In-Memory (local) and Redis (distributed) backends.
 - **Fail-Open Support**: Configurable behavior when Redis is unavailable.
 - **Comprehensive Headers**: Supports `X-RateLimit-*`, IETF `RateLimit`, and `Retry-After` headers.
@@ -68,10 +69,60 @@ Define how to identify the bucket (e.g., by User ID or IP).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `type` | string | **Yes** | One of: `header`, `metadata`, `ip`, `apiname`, `apiversion`, `routename`. |
+| `type` | string | **Yes** | One of: `header`, `metadata`, `ip`, `apiname`, `apiversion`, `routename`, `cel`. |
 | `key` | string | Conditional | Header name or metadata key. Required for `header`/`metadata`. |
+| `expression` | string | Conditional | CEL expression. Required for `cel` type. |
 
 **Note**: Multiple components are joined with `:` (e.g., `header:X-User-ID` + `ip` -> "user123:1.2.3.4").
+
+##### CEL-Based Key Extraction
+
+The `cel` type allows you to use CEL (Common Expression Language) expressions for flexible key extraction. CEL expressions have access to the following variables:
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `request.Headers` | `map[string]list[string]` | Request headers |
+| `request.Body` | `bytes` | Raw request body bytes |
+| `request.BodyString` | `string` | Request body as string |
+| `request.Path` | `string` | Request path |
+| `request.Method` | `string` | HTTP method |
+| `request.Metadata` | `map[string]dynamic` | Request metadata |
+| `api.Name` | `string` | API name |
+| `api.Version` | `string` | API version |
+| `api.Context` | `string` | API context |
+| `api.Id` | `string` | API ID |
+| `route.Name` | `string` | Route name |
+
+##### JSONPath Functions in CEL
+
+The following custom functions are available for extracting values from JSON bodies:
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `jsonPath` | `jsonPath(string, string) -> string` | Extract a value from JSON string and return as string |
+| `jsonPathInt` | `jsonPathInt(string, string) -> int` | Extract a value from JSON string and return as integer |
+| `jsonPathDouble` | `jsonPathDouble(string, string) -> double` | Extract a value from JSON string and return as double |
+
+**JSONPath Syntax**:
+- Use `$` as the root element
+- Use `.` to access nested properties (e.g., `$.user.id`)
+- Use `[n]` for array indexing (e.g., `$.items[0]`)
+- Use `[-n]` for negative array indexing (e.g., `$.items[-1]` for last element)
+
+**Example CEL expressions**:
+```
+# Extract user ID from header
+request.Headers["x-user-id"][0]
+
+# Combine API name with header
+api.Name + ":" + request.Headers["x-tenant-id"][0]
+
+# Extract user ID from JSON request body
+jsonPath(request.BodyString, "$.user.id")
+
+# Extract nested value for key extraction
+jsonPath(request.BodyString, "$.context.session_id")
+```
 
 #### Cost Extraction Configuration
 
@@ -86,6 +137,30 @@ Used for weighting requests dynamically (e.g. based on response body content).
 **Sources**:
 - `request_header`, `request_metadata`, `request_body` (JsonPath)
 - `response_header`, `response_metadata`, `response_body` (JsonPath)
+- `request_cel`, `response_cel` (CEL expression)
+
+##### CEL-Based Cost Extraction
+
+For `request_cel` and `response_cel` source types, use the `expression` field to specify a CEL expression that returns a numeric value. The same variables are available as in key extraction, plus:
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `response.Headers` | `map[string]list[string]` | Response headers |
+| `response.Body` | `bytes` | Raw response body bytes |
+| `response.BodyString` | `string` | Response body as string |
+| `response.Status` | `int` | Response status code |
+
+**Example CEL expressions for cost extraction**:
+```
+# Extract token cost from response body
+jsonPathInt(response.BodyString, "$.usage.total_tokens")
+
+# Extract cost with multiplier calculation
+jsonPathDouble(response.BodyString, "$.usage.prompt_tokens") + jsonPathDouble(response.BodyString, "$.usage.completion_tokens") * 2
+
+# Conditional cost based on status
+response.Status == 200 ? jsonPathInt(response.BodyString, "$.cost") : 0
+```
 
 ---
 
@@ -192,6 +267,91 @@ policies:
       onRateLimitExceeded:
         statusCode: 429
         body: '{"error": "Too Many Requests", "retry_after": "1m"}'
+```
+
+### Example 6: CEL-Based Key Extraction from Request Body
+
+Rate limit based on a user ID extracted from the JSON request body using JSONPath:
+
+```yaml
+policies:
+  - name: advanced-ratelimit
+    version: v0.1.0
+    params:
+      quotas:
+        - name: per-user
+          limits:
+            - limit: 100
+              duration: "1h"
+          keyExtraction:
+            - type: cel
+              expression: 'jsonPath(request.BodyString, "$.user.id")'
+```
+
+### Example 7: CEL-Based Key Extraction with Composite Key from Body
+
+Combine API name with a tenant ID from the request body for multi-tenant rate limiting:
+
+```yaml
+policies:
+  - name: advanced-ratelimit
+    version: v0.1.0
+    params:
+      quotas:
+        - name: per-tenant
+          limits:
+            - limit: 1000
+              duration: "1h"
+          keyExtraction:
+            - type: cel
+              expression: 'api.Name + ":" + jsonPath(request.BodyString, "$.context.tenant_id")'
+```
+
+### Example 8: CEL-Based Cost Extraction from Response Body
+
+Extract LLM token usage from response body using CEL and JSONPath:
+
+```yaml
+policies:
+  - name: advanced-ratelimit
+    version: v0.1.0
+    params:
+      quotas:
+        - name: token-quota
+          limits:
+            - limit: 100000
+              duration: "24h"
+          keyExtraction:
+            - type: header
+              key: X-User-ID
+          costExtraction:
+            enabled: true
+            sources:
+              - type: response_cel
+                expression: 'jsonPathInt(response.BodyString, "$.usage.total_tokens")'
+            default: 100
+```
+
+### Example 9: CEL-Based Cost with Weighted Token Calculation
+
+Calculate cost from multiple token fields with different weights:
+
+```yaml
+policies:
+  - name: advanced-ratelimit
+    version: v0.1.0
+    params:
+      quotas:
+        - name: weighted-token-quota
+          limits:
+            - limit: 50000
+              duration: "1h"
+          costExtraction:
+            enabled: true
+            sources:
+              - type: response_cel
+                expression: 'jsonPathDouble(response.BodyString, "$.usage.prompt_tokens") + jsonPathDouble(response.BodyString, "$.usage.completion_tokens") * 3.0'
+            default: 100
 ```
 
 ## Overview

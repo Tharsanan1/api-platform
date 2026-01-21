@@ -298,6 +298,14 @@ func (p *RateLimitPolicy) Mode() policy.ProcessingMode {
 				responseBodyMode = policy.BodyModeBuffer
 			}
 		}
+
+		// Check if any CEL key extraction expression might need request body
+		// Expressions containing "request.Body" or "jsonPath" need body access
+		for _, ke := range q.KeyExtraction {
+			if ke.Type == "cel" && requiresBodyAccess(ke.Expression) {
+				requestBodyMode = policy.BodyModeBuffer
+			}
+		}
 	}
 
 	return policy.ProcessingMode{
@@ -306,6 +314,26 @@ func (p *RateLimitPolicy) Mode() policy.ProcessingMode {
 		ResponseHeaderMode: policy.HeaderModeProcess, // Need to add rate limit headers to response
 		ResponseBodyMode:   responseBodyMode,         // Buffer if cost extraction from response body is configured
 	}
+}
+
+// requiresBodyAccess checks if a CEL expression requires body access
+func requiresBodyAccess(expression string) bool {
+	// Check for body-related variables and functions
+	bodyIndicators := []string{
+		"request.Body",
+		"request.BodyString",
+		"response.Body",
+		"response.BodyString",
+		"jsonPath(",
+		"jsonPathInt(",
+		"jsonPathDouble(",
+	}
+	for _, indicator := range bodyIndicators {
+		if strings.Contains(expression, indicator) {
+			return true
+		}
+	}
+	return false
 }
 
 // quotaResult stores the result of checking a single quota

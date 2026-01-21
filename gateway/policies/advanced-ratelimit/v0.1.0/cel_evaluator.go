@@ -1,13 +1,19 @@
 package ratelimit
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"strconv"
 	"sync"
 
 	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/common/types/ref"
 
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
+	utils "github.com/wso2/api-platform/sdk/utils"
 )
 
 // CELEvaluator provides CEL expression evaluation for rate limit key and cost extraction
@@ -73,6 +79,8 @@ func createKeyExtractionEnv() (*cel.Env, error) {
 	return cel.NewEnv(
 		// Request context variables
 		cel.Variable("request.Headers", cel.MapType(cel.StringType, cel.ListType(cel.StringType))),
+		cel.Variable("request.Body", cel.BytesType),
+		cel.Variable("request.BodyString", cel.StringType),
 		cel.Variable("request.Path", cel.StringType),
 		cel.Variable("request.Method", cel.StringType),
 		cel.Variable("request.Metadata", cel.MapType(cel.StringType, cel.DynType)),
@@ -83,6 +91,8 @@ func createKeyExtractionEnv() (*cel.Env, error) {
 		cel.Variable("api.Id", cel.StringType),
 		// Route info
 		cel.Variable("route.Name", cel.StringType),
+		// Custom jsonPath function for extracting values from JSON strings
+		jsonPathStringFunction(),
 	)
 }
 
@@ -107,6 +117,10 @@ func createCostExtractionEnv() (*cel.Env, error) {
 		cel.Variable("api.Version", cel.StringType),
 		cel.Variable("api.Context", cel.StringType),
 		cel.Variable("api.Id", cel.StringType),
+		// Custom jsonPath function for extracting values from JSON strings
+		jsonPathStringFunction(),
+		jsonPathIntFunction(),
+		jsonPathDoubleFunction(),
 	)
 }
 
@@ -199,16 +213,26 @@ func buildKeyEvalContext(ctx *policy.RequestContext, routeName string) map[strin
 		}
 	}
 
+	// Get body content for jsonPath functions
+	var bodyBytes []byte
+	var bodyString string
+	if ctx.Body != nil && ctx.Body.Present && ctx.Body.Content != nil {
+		bodyBytes = ctx.Body.Content
+		bodyString = string(bodyBytes)
+	}
+
 	return map[string]interface{}{
-		"request.Headers":  headers,
-		"request.Path":     ctx.Path,
-		"request.Method":   ctx.Method,
-		"request.Metadata": metadata,
-		"api.Name":         ctx.APIName,
-		"api.Version":      ctx.APIVersion,
-		"api.Context":      ctx.APIContext,
-		"api.Id":           ctx.APIId,
-		"route.Name":       routeName,
+		"request.Headers":    headers,
+		"request.Body":       bodyBytes,
+		"request.BodyString": bodyString,
+		"request.Path":       ctx.Path,
+		"request.Method":     ctx.Method,
+		"request.Metadata":   metadata,
+		"api.Name":           ctx.APIName,
+		"api.Version":        ctx.APIVersion,
+		"api.Context":        ctx.APIContext,
+		"api.Id":             ctx.APIId,
+		"route.Name":         routeName,
 	}
 }
 
@@ -332,6 +356,200 @@ func toFloat64(val interface{}) (float64, error) {
 		return float64(v), nil
 	default:
 		return 0, fmt.Errorf("CEL expression must return numeric value, got %T", val)
+	}
+}
+
+// jsonPathStringFunction creates a CEL function that extracts a string value from JSON using JSONPath
+// Usage: jsonPath(jsonString, "$.path.to.value") -> string
+// This function can be used with request.BodyString or response.BodyString to extract values
+func jsonPathStringFunction() cel.EnvOption {
+	return cel.Function("jsonPath",
+		cel.Overload("jsonPath_string_string",
+			[]*cel.Type{cel.StringType, cel.StringType},
+			cel.StringType,
+			cel.BinaryBinding(func(lhs, rhs ref.Val) ref.Val {
+				jsonStr, ok := lhs.Value().(string)
+				if !ok {
+					return types.NewErr("jsonPath: first argument must be a string")
+				}
+				path, ok := rhs.Value().(string)
+				if !ok {
+					return types.NewErr("jsonPath: second argument must be a string")
+				}
+
+				result, err := extractJSONPathValue([]byte(jsonStr), path)
+				if err != nil {
+					slog.Debug("jsonPath extraction failed", "path", path, "error", err)
+					return types.NewErr("jsonPath extraction failed: %v", err)
+				}
+
+				// Convert to string
+				switch v := result.(type) {
+				case string:
+					return types.String(v)
+				case float64:
+					return types.String(strconv.FormatFloat(v, 'f', -1, 64))
+				case int:
+					return types.String(strconv.Itoa(v))
+				case int64:
+					return types.String(strconv.FormatInt(v, 10))
+				case bool:
+					return types.String(strconv.FormatBool(v))
+				default:
+					// Try to marshal as JSON for complex types
+					b, err := json.Marshal(v)
+					if err != nil {
+						return types.NewErr("jsonPath: cannot convert result to string: %T", v)
+					}
+					return types.String(string(b))
+				}
+			}),
+		),
+	)
+}
+
+// jsonPathIntFunction creates a CEL function that extracts an integer value from JSON using JSONPath
+// Usage: jsonPathInt(jsonString, "$.path.to.value") -> int
+// This function can be used to extract numeric values for cost extraction
+func jsonPathIntFunction() cel.EnvOption {
+	return cel.Function("jsonPathInt",
+		cel.Overload("jsonPathInt_string_string",
+			[]*cel.Type{cel.StringType, cel.StringType},
+			cel.IntType,
+			cel.BinaryBinding(func(lhs, rhs ref.Val) ref.Val {
+				jsonStr, ok := lhs.Value().(string)
+				if !ok {
+					return types.NewErr("jsonPathInt: first argument must be a string")
+				}
+				path, ok := rhs.Value().(string)
+				if !ok {
+					return types.NewErr("jsonPathInt: second argument must be a string")
+				}
+
+				result, err := extractJSONPathValue([]byte(jsonStr), path)
+				if err != nil {
+					slog.Debug("jsonPathInt extraction failed", "path", path, "error", err)
+					return types.NewErr("jsonPathInt extraction failed: %v", err)
+				}
+
+				// Convert to int64
+				switch v := result.(type) {
+				case float64:
+					return types.Int(int64(v))
+				case int:
+					return types.Int(int64(v))
+				case int64:
+					return types.Int(v)
+				case string:
+					i, err := strconv.ParseInt(v, 10, 64)
+					if err != nil {
+						return types.NewErr("jsonPathInt: cannot parse string as int: %s", v)
+					}
+					return types.Int(i)
+				default:
+					return types.NewErr("jsonPathInt: cannot convert result to int: %T", v)
+				}
+			}),
+		),
+	)
+}
+
+// jsonPathDoubleFunction creates a CEL function that extracts a double value from JSON using JSONPath
+// Usage: jsonPathDouble(jsonString, "$.path.to.value") -> double
+// This function can be used to extract numeric values for cost extraction
+func jsonPathDoubleFunction() cel.EnvOption {
+	return cel.Function("jsonPathDouble",
+		cel.Overload("jsonPathDouble_string_string",
+			[]*cel.Type{cel.StringType, cel.StringType},
+			cel.DoubleType,
+			cel.BinaryBinding(func(lhs, rhs ref.Val) ref.Val {
+				jsonStr, ok := lhs.Value().(string)
+				if !ok {
+					return types.NewErr("jsonPathDouble: first argument must be a string")
+				}
+				path, ok := rhs.Value().(string)
+				if !ok {
+					return types.NewErr("jsonPathDouble: second argument must be a string")
+				}
+
+				result, err := extractJSONPathValue([]byte(jsonStr), path)
+				if err != nil {
+					slog.Debug("jsonPathDouble extraction failed", "path", path, "error", err)
+					return types.NewErr("jsonPathDouble extraction failed: %v", err)
+				}
+
+				// Convert to float64
+				switch v := result.(type) {
+				case float64:
+					return types.Double(v)
+				case int:
+					return types.Double(float64(v))
+				case int64:
+					return types.Double(float64(v))
+				case string:
+					f, err := strconv.ParseFloat(v, 64)
+					if err != nil {
+						return types.NewErr("jsonPathDouble: cannot parse string as double: %s", v)
+					}
+					return types.Double(f)
+				default:
+					return types.NewErr("jsonPathDouble: cannot convert result to double: %T", v)
+				}
+			}),
+		),
+	)
+}
+
+// extractJSONPathValue extracts a value from JSON using JSONPath
+// It uses the SDK's utils.ExtractValueFromJsonpath for consistency
+func extractJSONPathValue(jsonData []byte, jsonPath string) (interface{}, error) {
+	if len(jsonData) == 0 {
+		return nil, fmt.Errorf("empty JSON data")
+	}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(jsonData, &data); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	value, err := utils.ExtractValueFromJsonpath(data, jsonPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle the case where the result is a slice with a single element
+	// This can happen with wildcard queries
+	if slice, ok := value.([]interface{}); ok && len(slice) == 1 {
+		return slice[0], nil
+	}
+
+	return value, nil
+}
+
+// toString converts various types to string for CEL
+func toString(val interface{}) string {
+	if val == nil {
+		return ""
+	}
+	rv := reflect.ValueOf(val)
+	switch rv.Kind() {
+	case reflect.String:
+		return rv.String()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(rv.Int(), 10)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return strconv.FormatUint(rv.Uint(), 10)
+	case reflect.Float32, reflect.Float64:
+		return strconv.FormatFloat(rv.Float(), 'f', -1, 64)
+	case reflect.Bool:
+		return strconv.FormatBool(rv.Bool())
+	default:
+		// For complex types, try JSON marshaling
+		b, err := json.Marshal(val)
+		if err != nil {
+			return fmt.Sprintf("%v", val)
+		}
+		return string(b)
 	}
 }
 

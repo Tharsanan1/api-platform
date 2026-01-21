@@ -1555,3 +1555,275 @@ Feature: Rate Limiting
       """
     Then the response status code should be 429
     And the response body should contain "Rate limit exceeded"
+
+  Scenario: CEL jsonPath function for key extraction from request body
+    Given I authenticate using basic auth as "admin"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1alpha1
+      kind: RestApi
+      metadata:
+        name: ratelimit-cel-jsonpath-key-api
+      spec:
+        displayName: RateLimit CEL JSONPath Key API
+        version: v1.0
+        context: /ratelimit-cel-jsonpath-key/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        operations:
+          - method: GET
+            path: /anything
+          - method: POST
+            path: /anything
+            policies:
+              - name: advanced-ratelimit
+                version: v0.1.0
+                params:
+                  quotas:
+                    - name: per-user-jsonpath
+                      limits:
+                        - limit: 3
+                          duration: "1h"
+                      keyExtraction:
+                        - type: cel
+                          expression: 'jsonPath(request.BodyString, "$.user_id")'
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/ratelimit-cel-jsonpath-key/v1.0/anything" to be ready
+
+    # User-A sends 3 requests with user_id in body
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-key/v1.0/anything" with body:
+      """
+      {"user_id": "jsonpath-user-A", "data": "test1"}
+      """
+    Then the response status code should be 200
+
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-key/v1.0/anything" with body:
+      """
+      {"user_id": "jsonpath-user-A", "data": "test2"}
+      """
+    Then the response status code should be 200
+
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-key/v1.0/anything" with body:
+      """
+      {"user_id": "jsonpath-user-A", "data": "test3"}
+      """
+    Then the response status code should be 200
+
+    # User-A's 4th request should be rate limited
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-key/v1.0/anything" with body:
+      """
+      {"user_id": "jsonpath-user-A", "data": "test4"}
+      """
+    Then the response status code should be 429
+
+    # User-B should have separate quota (different jsonPath-extracted key)
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-key/v1.0/anything" with body:
+      """
+      {"user_id": "jsonpath-user-B", "data": "test1"}
+      """
+    Then the response status code should be 200
+
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-key/v1.0/anything" with body:
+      """
+      {"user_id": "jsonpath-user-B", "data": "test2"}
+      """
+    Then the response status code should be 200
+
+  Scenario: CEL jsonPath function for nested key extraction from request body
+    Given I authenticate using basic auth as "admin"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1alpha1
+      kind: RestApi
+      metadata:
+        name: ratelimit-cel-jsonpath-nested-key-api
+      spec:
+        displayName: RateLimit CEL JSONPath Nested Key API
+        version: v1.0
+        context: /ratelimit-cel-jsonpath-nested-key/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        operations:
+          - method: GET
+            path: /anything
+          - method: POST
+            path: /anything
+            policies:
+              - name: advanced-ratelimit
+                version: v0.1.0
+                params:
+                  quotas:
+                    - name: per-tenant-jsonpath
+                      limits:
+                        - limit: 3
+                          duration: "1h"
+                      keyExtraction:
+                        - type: cel
+                          expression: 'jsonPath(request.BodyString, "$.context.tenant_id")'
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/ratelimit-cel-jsonpath-nested-key/v1.0/anything" to be ready
+
+    # Tenant-A sends 3 requests with nested tenant_id in body
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-nested-key/v1.0/anything" with body:
+      """
+      {"context": {"tenant_id": "tenant-A", "env": "prod"}, "data": "test1"}
+      """
+    Then the response status code should be 200
+
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-nested-key/v1.0/anything" with body:
+      """
+      {"context": {"tenant_id": "tenant-A", "env": "prod"}, "data": "test2"}
+      """
+    Then the response status code should be 200
+
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-nested-key/v1.0/anything" with body:
+      """
+      {"context": {"tenant_id": "tenant-A", "env": "prod"}, "data": "test3"}
+      """
+    Then the response status code should be 200
+
+    # Tenant-A's 4th request should be rate limited
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-nested-key/v1.0/anything" with body:
+      """
+      {"context": {"tenant_id": "tenant-A", "env": "prod"}, "data": "test4"}
+      """
+    Then the response status code should be 429
+
+    # Tenant-B should have separate quota
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-nested-key/v1.0/anything" with body:
+      """
+      {"context": {"tenant_id": "tenant-B", "env": "prod"}, "data": "test1"}
+      """
+    Then the response status code should be 200
+
+  Scenario: CEL jsonPathInt function for cost extraction from response body
+    Given I authenticate using basic auth as "admin"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1alpha1
+      kind: RestApi
+      metadata:
+        name: ratelimit-cel-jsonpath-cost-api
+      spec:
+        displayName: RateLimit CEL JSONPath Cost API
+        version: v1.0
+        context: /ratelimit-cel-jsonpath-cost/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        operations:
+          - method: GET
+            path: /anything
+          - method: POST
+            path: /anything
+            policies:
+              - name: advanced-ratelimit
+                version: v0.1.0
+                params:
+                  quotas:
+                    - name: token-quota-jsonpath
+                      limits:
+                        - limit: 100
+                          duration: "1h"
+                      costExtraction:
+                        enabled: true
+                        sources:
+                          - type: response_cel
+                            expression: 'jsonPathInt(response.BodyString, "$.json.token_cost")'
+                        default: 1
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/ratelimit-cel-jsonpath-cost/v1.0/anything" to be ready
+
+    # Send a request with token_cost=50 in the body
+    # The echo backend will echo back the JSON, and jsonPathInt will extract $.json.token_cost
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-cost/v1.0/anything" with body:
+      """
+      {"token_cost": 50}
+      """
+    Then the response status code should be 200
+    # After first request: 100 - 50 = 50 remaining
+    And the response header "X-RateLimit-Remaining" should be "50"
+
+    # Send another request with token_cost=50
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-cost/v1.0/anything" with body:
+      """
+      {"token_cost": 50}
+      """
+    Then the response status code should be 200
+    # After second request: 50 - 50 = 0 remaining
+    And the response header "X-RateLimit-Remaining" should be "0"
+
+    # Third request should be rate limited since quota is exhausted
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-cost/v1.0/anything" with body:
+      """
+      {"token_cost": 10}
+      """
+    Then the response status code should be 429
+
+  Scenario: CEL jsonPath composite key combining body field with API name
+    Given I authenticate using basic auth as "admin"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1alpha1
+      kind: RestApi
+      metadata:
+        name: ratelimit-cel-jsonpath-composite-key-api
+      spec:
+        displayName: RateLimit CEL JSONPath Composite Key API
+        version: v1.0
+        context: /ratelimit-cel-jsonpath-composite/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        operations:
+          - method: GET
+            path: /anything
+          - method: POST
+            path: /anything
+            policies:
+              - name: advanced-ratelimit
+                version: v0.1.0
+                params:
+                  quotas:
+                    - name: per-user-per-api-jsonpath
+                      limits:
+                        - limit: 2
+                          duration: "1h"
+                      keyExtraction:
+                        - type: cel
+                          expression: 'api.Name + ":" + jsonPath(request.BodyString, "$.user_id")'
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/ratelimit-cel-jsonpath-composite/v1.0/anything" to be ready
+
+    # User-A sends 2 requests - composite key is API name + user_id from body
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-composite/v1.0/anything" with body:
+      """
+      {"user_id": "composite-user-A", "data": "test1"}
+      """
+    Then the response status code should be 200
+
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-composite/v1.0/anything" with body:
+      """
+      {"user_id": "composite-user-A", "data": "test2"}
+      """
+    Then the response status code should be 200
+
+    # User-A's 3rd request should be rate limited
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-composite/v1.0/anything" with body:
+      """
+      {"user_id": "composite-user-A", "data": "test3"}
+      """
+    Then the response status code should be 429
+
+    # User-B should have separate composite key
+    When I send a POST request to "http://localhost:8080/ratelimit-cel-jsonpath-composite/v1.0/anything" with body:
+      """
+      {"user_id": "composite-user-B", "data": "test1"}
+      """
+    Then the response status code should be 200

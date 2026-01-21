@@ -91,7 +91,7 @@ func createKeyExtractionEnv() (*cel.Env, error) {
 		cel.Variable("api.Id", cel.StringType),
 		// Route info
 		cel.Variable("route.Name", cel.StringType),
-		// Custom jsonPath function for extracting values from JSON strings
+		// Custom jsonPath functions for extracting values from JSON strings
 		jsonPathStringFunction(),
 	)
 }
@@ -117,7 +117,10 @@ func createCostExtractionEnv() (*cel.Env, error) {
 		cel.Variable("api.Version", cel.StringType),
 		cel.Variable("api.Context", cel.StringType),
 		cel.Variable("api.Id", cel.StringType),
-		// Custom jsonPath function for extracting values from JSON strings
+		// Custom jsonPath functions for extracting values from JSON strings:
+		// - jsonPath(string, string) -> string
+		// - jsonPathInt(string, string) -> int
+		// - jsonPathDouble(string, string) -> double
 		jsonPathStringFunction(),
 		jsonPathIntFunction(),
 		jsonPathDoubleFunction(),

@@ -4,6 +4,27 @@ A complete API gateway system consisting of Gateway-Controller (xDS control plan
 
 For end-user documentation, see [docs/gateway/](../docs/gateway/).
 
+## Architecture Overview
+
+```text
+    [ Control Plane ]               [ Data Plane ]
+  +--------------------+         +-------------------+
+  | Gateway-Controller | <-----> |      Router       | (Envoy)
+  +--------------------+   xDS   +---------+---------+
+            ^                              |
+            | gRPC                         | ext_proc
+            v                              v
+  +--------------------+         +-------------------+
+  |   Policy Builder   |         |   Policy Engine   |
+  +--------------------+         +-------------------+
+```
+
+## Quick Start
+
+1. **Build everything:** `make build-local`
+2. **Start the stack:** `docker compose up -d`
+3. **Check health:** `curl http://localhost:9090/health`
+
 ## Components
 
 | Component | Technology | Ports |
@@ -15,9 +36,9 @@ For end-user documentation, see [docs/gateway/](../docs/gateway/).
 
 ## Prerequisites
 
-- Docker + Docker Compose
-- Go 1.25.1+
-- Make
+- **Docker + Docker Compose**
+- **Go 1.25.1+**
+- **Make**
 
 ## Development
 
@@ -37,10 +58,16 @@ make build-local-gateway-builder
 make build
 ```
 
-### Run
+### Run & Debug
 
 ```bash
+# Start all services
 docker compose up -d
+
+# View logs for a specific component
+docker compose logs -f gateway-controller
+
+# Check health
 curl http://localhost:9090/health
 ```
 

@@ -27,11 +27,27 @@ cert_file = "./certs/server.crt"
 key_file = "./certs/server.key"
 
 [gateway_controller.storage]
-# Storage type: "sqlite", "postgres" (future), or "memory"
+# Storage type: "sqlite", "postgres", or "memory"
 type = "sqlite"
 
 [gateway_controller.storage.sqlite]
 path = "./data/gateway.db"
+
+[gateway_controller.storage.postgres]
+# Optional DSN. If set, host/port/database/user/password are ignored.
+# dsn = "postgres://user:password@localhost:5432/gateway?sslmode=require"
+host = "localhost"
+port = 5432
+database = "gateway"
+user = "gateway"
+password = ""
+sslmode = "require" # disable, require, verify-ca, verify-full
+connect_timeout = "5s"
+max_open_conns = 25
+max_idle_conns = 5
+conn_max_lifetime = "30m"
+conn_max_idle_time = "5m"
+application_name = "gateway-controller"
 
 [gateway_controller.policies]
 # Directory containing policy definitions

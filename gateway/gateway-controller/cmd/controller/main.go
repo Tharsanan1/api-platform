@@ -103,8 +103,32 @@ func main() {
 			}
 			defer db.Close()
 		case "postgres":
-			log.Error("PostgreSQL storage not yet implemented")
-			os.Exit(1)
+			pg := cfg.GatewayController.Storage.Postgres
+			log.Info("Initializing PostgreSQL storage",
+				slog.String("host", pg.Host),
+				slog.Int("port", pg.Port),
+				slog.String("database", pg.Database),
+				slog.String("sslmode", pg.SSLMode))
+			db, err = storage.NewPostgresStorage(storage.PostgresConnectionConfig{
+				DSN:             pg.DSN,
+				Host:            pg.Host,
+				Port:            pg.Port,
+				Database:        pg.Database,
+				User:            pg.User,
+				Password:        pg.Password,
+				SSLMode:         pg.SSLMode,
+				ConnectTimeout:  pg.ConnectTimeout,
+				MaxOpenConns:    pg.MaxOpenConns,
+				MaxIdleConns:    pg.MaxIdleConns,
+				ConnMaxLifetime: pg.ConnMaxLifetime,
+				ConnMaxIdleTime: pg.ConnMaxIdleTime,
+				ApplicationName: pg.ApplicationName,
+			}, log)
+			if err != nil {
+				log.Error("Failed to initialize PostgreSQL database", slog.Any("error", err))
+				os.Exit(1)
+			}
+			defer db.Close()
 		default:
 			log.Error("Unknown storage type", slog.String("type", cfg.GatewayController.Storage.Type))
 			os.Exit(1)

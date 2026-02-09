@@ -92,9 +92,22 @@ server:
 
 # Storage configuration
 storage:
-  type: sqlite            # "sqlite", "postgres" (future), or "memory"
+  type: sqlite            # "sqlite", "postgres", or "memory"
   sqlite:
     path: ./data/gateway.db  # SQLite database file path
+  postgres:               # Used when type=postgres
+    host: localhost
+    port: 5432
+    database: gateway
+    user: gateway
+    password: ""
+    sslmode: require      # disable, require, verify-ca, verify-full
+    connect_timeout: 5s
+    max_open_conns: 25
+    max_idle_conns: 5
+    conn_max_lifetime: 30m
+    conn_max_idle_time: 5m
+    application_name: gateway-controller
 
 # Router (Envoy) configuration
 router:
@@ -130,6 +143,16 @@ export APIP_GW_GATEWAY__CONTROLLER_STORAGE_TYPE=memory
 # Override SQLite database path
 export APIP_GW_GATEWAY__CONTROLLER_STORAGE_SQLITE_PATH=/custom/path/gateway.db
 
+# Configure PostgreSQL storage
+export APIP_GW_GATEWAY__CONTROLLER_STORAGE_TYPE=postgres
+export APIP_GW_GATEWAY__CONTROLLER_STORAGE_POSTGRES_HOST=postgres.example.internal
+export APIP_GW_GATEWAY__CONTROLLER_STORAGE_POSTGRES_PORT=5432
+export APIP_GW_GATEWAY__CONTROLLER_STORAGE_POSTGRES_DATABASE=gateway
+export APIP_GW_GATEWAY__CONTROLLER_STORAGE_POSTGRES_USER=gateway
+export APIP_GW_GATEWAY__CONTROLLER_STORAGE_POSTGRES_PASSWORD=secret
+export APIP_GW_GATEWAY__CONTROLLER_STORAGE_POSTGRES_SSLMODE=require
+export APIP_GW_GATEWAY__CONTROLLER_STORAGE_POSTGRES_MAX__OPEN__CONNS=25
+
 # Disable access logs
 export APIP_GW_GATEWAY__CONTROLLER_ROUTER_ACCESS__LOGS_ENABLED=false
 
@@ -151,6 +174,27 @@ storage:
   type: sqlite
   sqlite:
     path: ./data/gateway.db
+```
+
+#### Persistent Mode with PostgreSQL
+Use an external PostgreSQL server for persistence:
+
+```yaml
+storage:
+  type: postgres
+  postgres:
+    host: postgres.example.internal
+    port: 5432
+    database: gateway
+    user: gateway
+    password: ${DB_PASSWORD}
+    sslmode: require
+    connect_timeout: 5s
+    max_open_conns: 25
+    max_idle_conns: 5
+    conn_max_lifetime: 30m
+    conn_max_idle_time: 5m
+    application_name: gateway-controller
 ```
 
 #### Memory-Only Mode

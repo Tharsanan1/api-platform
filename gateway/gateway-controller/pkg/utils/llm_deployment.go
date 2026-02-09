@@ -357,13 +357,11 @@ func (s *LLMDeploymentService) CreateLLMProviderTemplate(params LLMTemplateParam
 
 	// Persist to DB if available
 	if s.db != nil {
-		if sqlite, ok := s.db.(*storage.SQLiteStorage); ok {
-			if err := sqlite.SaveLLMProviderTemplate(stored); err != nil {
-				if storage.IsConflictError(err) || strings.Contains(err.Error(), "already exists") {
-					return nil, fmt.Errorf("template with handle '%s' already exists", tmpl.Metadata.Name)
-				}
-				return nil, fmt.Errorf("failed to save template to database: %w", err)
+		if err := s.db.SaveLLMProviderTemplate(stored); err != nil {
+			if storage.IsConflictError(err) || strings.Contains(err.Error(), "already exists") {
+				return nil, fmt.Errorf("template with handle '%s' already exists", tmpl.Metadata.Name)
 			}
+			return nil, fmt.Errorf("failed to save template to database: %w", err)
 		}
 	}
 
@@ -371,13 +369,11 @@ func (s *LLMDeploymentService) CreateLLMProviderTemplate(params LLMTemplateParam
 	if err := s.store.AddTemplate(stored); err != nil {
 		// Rollback: Remove from DB if memory store fails
 		if s.db != nil {
-			if sqlite, ok := s.db.(*storage.SQLiteStorage); ok {
-				if delErr := sqlite.DeleteLLMProviderTemplate(stored.ID); delErr != nil {
-					if params.Logger != nil {
-						params.Logger.Error("Failed to rollback template from database after memory store failure",
-							slog.String("template_handle", tmpl.Metadata.Name),
-							slog.Any("rollback_error", delErr))
-					}
+			if delErr := s.db.DeleteLLMProviderTemplate(stored.ID); delErr != nil {
+				if params.Logger != nil {
+					params.Logger.Error("Failed to rollback template from database after memory store failure",
+						slog.String("template_handle", tmpl.Metadata.Name),
+						slog.Any("rollback_error", delErr))
 				}
 			}
 		}
@@ -396,13 +392,11 @@ func (s *LLMDeploymentService) CreateLLMProviderTemplate(params LLMTemplateParam
 			}
 		}
 		if s.db != nil {
-			if sqlite, ok := s.db.(*storage.SQLiteStorage); ok {
-				if delErr := sqlite.DeleteLLMProviderTemplate(stored.ID); delErr != nil {
-					if params.Logger != nil {
-						params.Logger.Error("Failed to rollback template from database after xDS failure",
-							slog.String("template_handle", tmpl.Metadata.Name),
-							slog.Any("rollback_error", delErr))
-					}
+			if delErr := s.db.DeleteLLMProviderTemplate(stored.ID); delErr != nil {
+				if params.Logger != nil {
+					params.Logger.Error("Failed to rollback template from database after xDS failure",
+						slog.String("template_handle", tmpl.Metadata.Name),
+						slog.Any("rollback_error", delErr))
 				}
 			}
 		}
@@ -496,15 +490,13 @@ func (s *LLMDeploymentService) InitializeOOBTemplates(templateDefinitions map[st
 
 		// persist to DB if available
 		if s.db != nil {
-			if sqlite, ok := s.db.(*storage.SQLiteStorage); ok {
-				if err := sqlite.SaveLLMProviderTemplate(stored); err != nil {
-					if storage.IsConflictError(err) || strings.Contains(err.Error(), "already exists") {
-						continue
-					}
-					allErrors = append(allErrors, fmt.Sprintf("failed to save template '%s' to database: %v",
-						tmpl.Metadata.Name, err))
+			if err := s.db.SaveLLMProviderTemplate(stored); err != nil {
+				if storage.IsConflictError(err) || strings.Contains(err.Error(), "already exists") {
 					continue
 				}
+				allErrors = append(allErrors, fmt.Sprintf("failed to save template '%s' to database: %v",
+					tmpl.Metadata.Name, err))
+				continue
 			}
 		}
 
@@ -646,29 +638,25 @@ func (s *LLMDeploymentService) DeleteLLMProviderTemplate(handle string) (*models
 	}
 
 	if s.db != nil {
-		if sqlite, ok := s.db.(*storage.SQLiteStorage); ok {
-			if err := sqlite.DeleteLLMProviderTemplate(tmpl.ID); err != nil {
-				// Rollback: Re-add to lazy resource store if memory deletion fails
-				if s.lazyResourceManager != nil {
-					if rollbackErr := s.publishTemplateAsLazyResource(&tmpl.Configuration, ""); rollbackErr != nil {
-						slog.Error("Failed to rollback lazy resource after memory store deletion failure",
-							slog.String("template_handle", handle),
-							slog.Any("rollback_error", rollbackErr))
-					}
+		if err := s.db.DeleteLLMProviderTemplate(tmpl.ID); err != nil {
+			// Rollback: Re-add to lazy resource store if memory deletion fails
+			if s.lazyResourceManager != nil {
+				if rollbackErr := s.publishTemplateAsLazyResource(&tmpl.Configuration, ""); rollbackErr != nil {
+					slog.Error("Failed to rollback lazy resource after memory store deletion failure",
+						slog.String("template_handle", handle),
+						slog.Any("rollback_error", rollbackErr))
 				}
-				return nil, fmt.Errorf("failed to delete template from database: %w", err)
 			}
+			return nil, fmt.Errorf("failed to delete template from database: %w", err)
 		}
 	}
 	if err := s.store.DeleteTemplate(tmpl.ID); err != nil {
 		// Rollback: Re-add to DB and lazy resource if memory deletion fails
 		if s.db != nil {
-			if sqlite, ok := s.db.(*storage.SQLiteStorage); ok {
-				if rollbackErr := sqlite.SaveLLMProviderTemplate(tmpl); rollbackErr != nil {
-					slog.Error("Failed to rollback template to database after memory store deletion failure",
-						slog.String("template_handle", handle),
-						slog.Any("rollback_error", rollbackErr))
-				}
+			if rollbackErr := s.db.SaveLLMProviderTemplate(tmpl); rollbackErr != nil {
+				slog.Error("Failed to rollback template to database after memory store deletion failure",
+					slog.String("template_handle", handle),
+					slog.Any("rollback_error", rollbackErr))
 			}
 		}
 		if s.lazyResourceManager != nil {

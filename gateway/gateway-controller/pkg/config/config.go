@@ -184,7 +184,7 @@ type LLMConfig struct {
 type StorageConfig struct {
 	Type     string         `koanf:"type"`     // "sqlite", "postgres", or "memory"
 	SQLite   SQLiteConfig   `koanf:"sqlite"`   // SQLite-specific configuration
-	Postgres PostgresConfig `koanf:"postgres"` // PostgreSQL-specific configuration (future)
+	Postgres PostgresConfig `koanf:"postgres"` // PostgreSQL-specific configuration
 }
 
 // SQLiteConfig holds SQLite-specific configuration
@@ -192,32 +192,39 @@ type SQLiteConfig struct {
 	Path string `koanf:"path"` // Path to SQLite database file
 }
 
-// PostgresConfig holds PostgreSQL-specific configuration (future support)
+// PostgresConfig holds PostgreSQL-specific configuration.
 type PostgresConfig struct {
-	Host     string `koanf:"host"`
-	Port     int    `koanf:"port"`
-	Database string `koanf:"database"`
-	User     string `koanf:"user"`
-	Password string `koanf:"password"`
-	SSLMode  string `koanf:"sslmode"`
+	DSN             string        `koanf:"dsn"`
+	Host            string        `koanf:"host"`
+	Port            int           `koanf:"port"`
+	Database        string        `koanf:"database"`
+	User            string        `koanf:"user"`
+	Password        string        `koanf:"password"`
+	SSLMode         string        `koanf:"sslmode"`
+	ConnectTimeout  time.Duration `koanf:"connect_timeout"`
+	MaxOpenConns    int           `koanf:"max_open_conns"`
+	MaxIdleConns    int           `koanf:"max_idle_conns"`
+	ConnMaxLifetime time.Duration `koanf:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration `koanf:"conn_max_idle_time"`
+	ApplicationName string        `koanf:"application_name"`
 }
 
 // RouterConfig holds router (Envoy) related configuration
 type RouterConfig struct {
 	AccessLogs    AccessLogsConfig `koanf:"access_logs"`
-	ListenerPort  int             `koanf:"listener_port"`
-	HTTPSEnabled  bool            `koanf:"https_enabled"`
-	HTTPSPort     int             `koanf:"https_port"`
-	GatewayHost   string          `koanf:"gateway_host"`
-	Lua           RouterLuaConfig `koanf:"lua"`
-	LuaScriptPath string          `koanf:"lua_script_path"` // Deprecated: use router.lua.request_transformation.script_path
+	ListenerPort  int              `koanf:"listener_port"`
+	HTTPSEnabled  bool             `koanf:"https_enabled"`
+	HTTPSPort     int              `koanf:"https_port"`
+	GatewayHost   string           `koanf:"gateway_host"`
+	Lua           RouterLuaConfig  `koanf:"lua"`
+	LuaScriptPath string           `koanf:"lua_script_path"` // Deprecated: use router.lua.request_transformation.script_path
 	// Upstream holds upstream-side configuration (TLS and timeouts: route, idle, connect)
-	Upstream       RouterUpstream       `koanf:"upstream"`
-	PolicyEngine   PolicyEngineConfig   `koanf:"policy_engine"`
-	DownstreamTLS  DownstreamTLS        `koanf:"downstream_tls"`
-	EventGateway  EventGatewayConfig   `koanf:"event_gateway"`
-	VHosts        VHostsConfig         `koanf:"vhosts"`
-	TracingServiceName string `koanf:"tracing_service_name"`
+	Upstream           RouterUpstream     `koanf:"upstream"`
+	PolicyEngine       PolicyEngineConfig `koanf:"policy_engine"`
+	DownstreamTLS      DownstreamTLS      `koanf:"downstream_tls"`
+	EventGateway       EventGatewayConfig `koanf:"event_gateway"`
+	VHosts             VHostsConfig       `koanf:"vhosts"`
+	TracingServiceName string             `koanf:"tracing_service_name"`
 
 	// HTTPListener configuration
 	HTTPListener HTTPListenerConfig `koanf:"http_listener"`
@@ -275,7 +282,6 @@ type DownstreamTLS struct {
 	MaximumProtocolVersion string `koanf:"maximum_protocol_version"`
 	Ciphers                string `koanf:"ciphers"`
 }
-
 
 // VHostsConfig for vhosts configuration
 type VHostsConfig struct {
@@ -455,6 +461,16 @@ func defaultConfig() *Config {
 				SQLite: SQLiteConfig{
 					Path: "./data/gateway.db",
 				},
+				Postgres: PostgresConfig{
+					Port:            5432,
+					SSLMode:         "require",
+					ConnectTimeout:  5 * time.Second,
+					MaxOpenConns:    25,
+					MaxIdleConns:    5,
+					ConnMaxLifetime: 30 * time.Minute,
+					ConnMaxIdleTime: 5 * time.Minute,
+					ApplicationName: "gateway-controller",
+				},
 			},
 			Router: RouterConfig{
 				EventGateway: EventGatewayConfig{
@@ -522,7 +538,7 @@ func defaultConfig() *Config {
 					Timeouts: UpstreamTimeouts{
 						RouteTimeoutInMs:     60000,
 						RouteIdleTimeoutInMs: 300000,
-						ConnectTimeoutInMs:  5000,
+						ConnectTimeoutInMs:   5000,
 					},
 				},
 				PolicyEngine: PolicyEngineConfig{
@@ -643,13 +659,82 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("storage.sqlite.path is required when storage.type is 'sqlite'")
 	}
 
-	// Validate PostgreSQL configuration (future)
+	// Validate PostgreSQL configuration
 	if c.GatewayController.Storage.Type == "postgres" {
-		if c.GatewayController.Storage.Postgres.Host == "" {
-			return fmt.Errorf("storage.postgres.host is required when storage.type is 'postgres'")
+		pg := &c.GatewayController.Storage.Postgres
+
+		if pg.DSN == "" {
+			if pg.Host == "" {
+				return fmt.Errorf("storage.postgres.host is required when storage.type is 'postgres' and storage.postgres.dsn is empty")
+			}
+			if pg.Database == "" {
+				return fmt.Errorf("storage.postgres.database is required when storage.type is 'postgres' and storage.postgres.dsn is empty")
+			}
+			if pg.User == "" {
+				return fmt.Errorf("storage.postgres.user is required when storage.type is 'postgres' and storage.postgres.dsn is empty")
+			}
 		}
-		if c.GatewayController.Storage.Postgres.Database == "" {
-			return fmt.Errorf("storage.postgres.database is required when storage.type is 'postgres'")
+
+		if pg.Port <= 0 {
+			pg.Port = 5432
+		}
+		if pg.Port > 65535 {
+			return fmt.Errorf("storage.postgres.port must be between 1 and 65535, got: %d", pg.Port)
+		}
+
+		if pg.SSLMode == "" {
+			pg.SSLMode = "require"
+		}
+		validSSLModes := []string{"disable", "require", "verify-ca", "verify-full"}
+		isValidSSLMode := false
+		for _, mode := range validSSLModes {
+			if strings.EqualFold(pg.SSLMode, mode) {
+				pg.SSLMode = mode
+				isValidSSLMode = true
+				break
+			}
+		}
+		if !isValidSSLMode {
+			return fmt.Errorf("storage.postgres.sslmode must be one of: disable, require, verify-ca, verify-full, got: %s", pg.SSLMode)
+		}
+
+		if pg.ConnectTimeout <= 0 {
+			pg.ConnectTimeout = 5 * time.Second
+		}
+
+		if pg.MaxOpenConns == 0 {
+			pg.MaxOpenConns = 25
+		}
+		if pg.MaxOpenConns < 1 {
+			return fmt.Errorf("storage.postgres.max_open_conns must be >= 1, got: %d", pg.MaxOpenConns)
+		}
+
+		if pg.MaxIdleConns == 0 {
+			pg.MaxIdleConns = 5
+		}
+		if pg.MaxIdleConns < 0 {
+			return fmt.Errorf("storage.postgres.max_idle_conns must be >= 0, got: %d", pg.MaxIdleConns)
+		}
+		if pg.MaxIdleConns > pg.MaxOpenConns {
+			pg.MaxIdleConns = pg.MaxOpenConns
+		}
+
+		if pg.ConnMaxLifetime == 0 {
+			pg.ConnMaxLifetime = 30 * time.Minute
+		}
+		if pg.ConnMaxLifetime < 0 {
+			return fmt.Errorf("storage.postgres.conn_max_lifetime must be > 0 when provided, got: %s", pg.ConnMaxLifetime)
+		}
+
+		if pg.ConnMaxIdleTime == 0 {
+			pg.ConnMaxIdleTime = 5 * time.Minute
+		}
+		if pg.ConnMaxIdleTime < 0 {
+			return fmt.Errorf("storage.postgres.conn_max_idle_time must be > 0 when provided, got: %s", pg.ConnMaxIdleTime)
+		}
+
+		if pg.ApplicationName == "" {
+			pg.ApplicationName = "gateway-controller"
 		}
 	}
 

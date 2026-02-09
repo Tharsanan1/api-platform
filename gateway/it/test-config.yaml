@@ -376,20 +376,6 @@ policy_configurations:
     # Rate limiting algorithm: "gcra" (smooth rate limiting with burst support) or "fixed-window" (simple counter)
     algorithm: fixed-window
 
-    # Storage backend: "memory" for single-instance or "redis" for distributed rate limiting
-    backend: memory
-
-    # In-memory storage configuration (only used when backend=memory)
-    memory:
-      maxEntries: 10000
-      cleanupInterval: "5m"
-
-    # Control which rate limit headers are included in responses
-    headers:
-      includeXRateLimit: true
-      includeIETF: true
-      includeRetryAfter: true
-
   # Model Weighted Round-Robin Policy Configuration
   modelweightedroundrobin_v010:
     requestModel:

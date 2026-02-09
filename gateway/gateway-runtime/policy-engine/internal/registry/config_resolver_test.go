@@ -21,6 +21,8 @@ package registry
 import (
 	"reflect"
 	"testing"
+
+	policyv1alpha "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
 func TestConfigResolver_ResolveValue(t *testing.T) {
@@ -648,8 +650,8 @@ func TestConfigResolver_FallbackMarkers(t *testing.T) {
 
 		input := map[string]interface{}{
 			"algorithm": map[string]interface{}{
-				internalConfigRefKey:    "${config.policy.algorithm}",
-				internalDefaultValueKey: "gcra",
+				policyv1alpha.SystemParamConfigRefKey:    "${config.policy.algorithm}",
+				policyv1alpha.SystemParamDefaultValueKey: "gcra",
 			},
 		}
 
@@ -675,8 +677,8 @@ func TestConfigResolver_FallbackMarkers(t *testing.T) {
 
 		input := map[string]interface{}{
 			"algorithm": map[string]interface{}{
-				internalConfigRefKey:    "${config.policy.algorithm}",
-				internalDefaultValueKey: "gcra",
+				policyv1alpha.SystemParamConfigRefKey:    "${config.policy.algorithm}",
+				policyv1alpha.SystemParamDefaultValueKey: "gcra",
 			},
 		}
 
@@ -705,12 +707,12 @@ func TestConfigResolver_FallbackMarkers(t *testing.T) {
 		input := map[string]interface{}{
 			"redis": map[string]interface{}{
 				"host": map[string]interface{}{
-					internalConfigRefKey:    "${config.policy.redis.host}",
-					internalDefaultValueKey: "localhost",
+					policyv1alpha.SystemParamConfigRefKey:    "${config.policy.redis.host}",
+					policyv1alpha.SystemParamDefaultValueKey: "localhost",
 				},
 				"port": map[string]interface{}{
-					internalConfigRefKey:    "${config.policy.redis.port}",
-					internalDefaultValueKey: 6379,
+					policyv1alpha.SystemParamConfigRefKey:    "${config.policy.redis.port}",
+					policyv1alpha.SystemParamDefaultValueKey: 6379,
 				},
 			},
 		}
@@ -745,8 +747,8 @@ func TestConfigResolver_FallbackMarkers(t *testing.T) {
 
 		input := map[string]interface{}{
 			"timeout": map[string]interface{}{
-				internalConfigRefKey:    "${config.policy.timeout + }",
-				internalDefaultValueKey: 10,
+				policyv1alpha.SystemParamConfigRefKey:    "${config.policy.timeout + }",
+				policyv1alpha.SystemParamDefaultValueKey: 10,
 			},
 		}
 

@@ -236,16 +236,7 @@ uri = "http://mock-jwks:8080/jwks"
 
 [policy_configurations.ratelimit_v010]
 algorithm = "fixed-window"
-backend = "memory"
 
-[policy_configurations.ratelimit_v010.memory]
-max_entries = 10000
-cleanup_interval = "5m"
-
-[policy_configurations.ratelimit_v010.headers]
-include_x_rate_limit = true
-include_ietf = true
-include_retry_after = true
 
 # =============================================================================
 # ANALYTICS CONFIGURATION

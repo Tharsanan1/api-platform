@@ -18,15 +18,10 @@
 
 package discovery
 
-import "log/slog"
+import (
+	"log/slog"
 
-const (
-	// internalConfigRefKey and internalDefaultValueKey are internal marker keys used by
-	// policy-engine config resolution. When both wso2/defaultValue and default exist for
-	// a property, builder emits a marker map so runtime can fallback to schema default
-	// only when config lookup fails due to missing keys.
-	internalConfigRefKey    = "__wso2_internal_ref"
-	internalDefaultValueKey = "__wso2_internal_default"
+	policyv1alpha "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
 // ExtractDefaultValues extracts default values from a JSON schema structure.
@@ -51,8 +46,8 @@ const (
 // If both wso2/defaultValue and default are present for a property, a marker map is returned:
 //
 //	{
-//	  "__wso2_internal_ref": "${config.Path.To.Config}",
-//	  "__wso2_internal_default": "fallback-value"
+//	  policyv1alpha.SystemParamConfigRefKey: "${config.Path.To.Config}",
+//	  policyv1alpha.SystemParamDefaultValueKey: "fallback-value"
 //	}
 //
 // Nested object properties are traversed recursively.
@@ -124,8 +119,8 @@ func extractPropertyValue(propDefMap map[string]interface{}) (interface{}, bool)
 	switch {
 	case hasWso2Default && hasDefault:
 		return map[string]interface{}{
-			internalConfigRefKey:    wso2Default,
-			internalDefaultValueKey: defaultValue,
+			policyv1alpha.SystemParamConfigRefKey:    wso2Default,
+			policyv1alpha.SystemParamDefaultValueKey: defaultValue,
 		}, true
 	case hasWso2Default:
 		return wso2Default, true

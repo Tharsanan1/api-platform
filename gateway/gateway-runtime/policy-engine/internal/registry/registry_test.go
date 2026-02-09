@@ -506,13 +506,13 @@ func TestCreateInstance(t *testing.T) {
 			Version: "v1.0.0",
 			SystemParameters: map[string]interface{}{
 				"algorithm": map[string]interface{}{
-					internalConfigRefKey:    "${config.policy_configurations.ratelimit_v010.algorithm}",
-					internalDefaultValueKey: "gcra",
+					policy.SystemParamConfigRefKey:    "${config.policy_configurations.ratelimit_v010.algorithm}",
+					policy.SystemParamDefaultValueKey: "gcra",
 				},
 				"redis": map[string]interface{}{
 					"host": map[string]interface{}{
-						internalConfigRefKey:    "${config.policy_configurations.ratelimit_v010.redis.host}",
-						internalDefaultValueKey: "localhost",
+						policy.SystemParamConfigRefKey:    "${config.policy_configurations.ratelimit_v010.redis.host}",
+						policy.SystemParamDefaultValueKey: "localhost",
 					},
 				},
 			},

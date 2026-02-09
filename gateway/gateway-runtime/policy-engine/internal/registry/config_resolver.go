@@ -27,11 +27,7 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
-)
-
-const (
-	internalConfigRefKey    = "__wso2_internal_ref"
-	internalDefaultValueKey = "__wso2_internal_default"
+	policyv1alpha "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
 // ConfigResolver resolves ${...} CEL expressions from a configuration map
@@ -269,8 +265,8 @@ func parseFallbackMarker(value map[string]interface{}) (string, interface{}, boo
 		return "", nil, false
 	}
 
-	configRefRaw, hasConfigRef := value[internalConfigRefKey]
-	defaultValue, hasDefault := value[internalDefaultValueKey]
+	configRefRaw, hasConfigRef := value[policyv1alpha.SystemParamConfigRefKey]
+	defaultValue, hasDefault := value[policyv1alpha.SystemParamDefaultValueKey]
 	if !hasConfigRef || !hasDefault {
 		return "", nil, false
 	}

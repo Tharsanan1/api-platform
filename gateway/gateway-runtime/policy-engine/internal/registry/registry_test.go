@@ -495,6 +495,42 @@ func TestCreateInstance(t *testing.T) {
 		assert.NotNil(t, instance)
 		assert.Equal(t, "value", mergedParams["key"])
 	})
+
+	t.Run("fallback to schema default when config key missing", func(t *testing.T) {
+		reg := newTestRegistry()
+		err := reg.SetConfig(map[string]interface{}{})
+		require.NoError(t, err)
+
+		def := &policy.PolicyDefinition{
+			Name:    "advanced-ratelimit",
+			Version: "v1.0.0",
+			SystemParameters: map[string]interface{}{
+				"algorithm": map[string]interface{}{
+					internalConfigRefKey:    "${config.policy_configurations.ratelimit_v010.algorithm}",
+					internalDefaultValueKey: "gcra",
+				},
+				"redis": map[string]interface{}{
+					"host": map[string]interface{}{
+						internalConfigRefKey:    "${config.policy_configurations.ratelimit_v010.redis.host}",
+						internalDefaultValueKey: "localhost",
+					},
+				},
+			},
+		}
+
+		factory := testutils.NewMockPolicyFactory("advanced-ratelimit", "v1.0.0")
+		err = reg.Register(def, factory)
+		require.NoError(t, err)
+
+		instance, mergedParams, err := reg.CreateInstance("advanced-ratelimit", "v1.0.0", policy.PolicyMetadata{}, map[string]interface{}{})
+		require.NoError(t, err)
+		assert.NotNil(t, instance)
+		assert.Equal(t, "gcra", mergedParams["algorithm"])
+
+		redis, ok := mergedParams["redis"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "localhost", redis["host"])
+	})
 }
 
 // TestPolicyChain tests the PolicyChain struct

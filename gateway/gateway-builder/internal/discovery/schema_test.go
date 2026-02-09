@@ -85,7 +85,10 @@ func TestExtractDefaultValues_Precedence(t *testing.T) {
 				},
 			},
 			want: map[string]interface{}{
-				"prop1": "${config.Prop1}",
+				"prop1": map[string]interface{}{
+					internalConfigRefKey:    "${config.Prop1}",
+					internalDefaultValueKey: "default-value",
+				},
 			},
 		},
 		{
@@ -211,11 +214,20 @@ func TestExtractDefaultValues_JWTAuthRealWorld(t *testing.T) {
 
 	got := ExtractDefaultValues(schema)
 	want := map[string]interface{}{
-		"authHeaderScheme":    "${config.JWTAuth.AuthHeaderScheme}",
-		"headerName":          "${config.JWTAuth.HeaderName}",
-		"onFailureStatusCode": "${config.JWTAuth.OnFailureStatusCode}",
-		"jwksCacheTtl":        "${config.JWTAuth.JwksCacheTtl}",
-		"keyManagers":         "${config.JWTAuth.KeyManagers}",
+		"authHeaderScheme": map[string]interface{}{
+			internalConfigRefKey:    "${config.JWTAuth.AuthHeaderScheme}",
+			internalDefaultValueKey: "Bearer",
+		},
+		"headerName": map[string]interface{}{
+			internalConfigRefKey:    "${config.JWTAuth.HeaderName}",
+			internalDefaultValueKey: "Authorization",
+		},
+		"onFailureStatusCode": map[string]interface{}{
+			internalConfigRefKey:    "${config.JWTAuth.OnFailureStatusCode}",
+			internalDefaultValueKey: 401,
+		},
+		"jwksCacheTtl": "${config.JWTAuth.JwksCacheTtl}",
+		"keyManagers":  "${config.JWTAuth.KeyManagers}",
 	}
 
 	if !reflect.DeepEqual(got, want) {
@@ -251,7 +263,61 @@ func TestExtractDefaultValues_MixedProperties(t *testing.T) {
 	want := map[string]interface{}{
 		"withDefault":      "value1",
 		"withWso2Default":  "${config.Value2}",
-		"withBothDefaults": "${config.Value3}", // wso2/defaultValue takes precedence
+		"withBothDefaults": map[string]interface{}{
+			internalConfigRefKey:    "${config.Value3}",
+			internalDefaultValueKey: 100,
+		},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ExtractDefaultValues() = %v, want %v", got, want)
+	}
+}
+
+func TestExtractDefaultValues_NestedObjectProperties(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"algorithm": map[string]interface{}{
+				"type":              "string",
+				"default":           "gcra",
+				"wso2/defaultValue": "${config.policy.algorithm}",
+			},
+			"redis": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"host": map[string]interface{}{
+						"type":              "string",
+						"default":           "localhost",
+						"wso2/defaultValue": "${config.policy.redis.host}",
+					},
+					"port": map[string]interface{}{
+						"type":    "integer",
+						"default": 6379,
+					},
+					"password": map[string]interface{}{
+						"type":              "string",
+						"wso2/defaultValue": "${config.policy.redis.password}",
+					},
+				},
+			},
+		},
+	}
+
+	got := ExtractDefaultValues(schema)
+	want := map[string]interface{}{
+		"algorithm": map[string]interface{}{
+			internalConfigRefKey:    "${config.policy.algorithm}",
+			internalDefaultValueKey: "gcra",
+		},
+		"redis": map[string]interface{}{
+			"host": map[string]interface{}{
+				internalConfigRefKey:    "${config.policy.redis.host}",
+				internalDefaultValueKey: "localhost",
+			},
+			"port":     6379,
+			"password": "${config.policy.redis.password}",
+		},
 	}
 
 	if !reflect.DeepEqual(got, want) {

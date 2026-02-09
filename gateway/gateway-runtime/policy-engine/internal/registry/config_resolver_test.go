@@ -638,3 +638,121 @@ func TestConfigResolver_TemplateWithErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigResolver_FallbackMarkers(t *testing.T) {
+	t.Run("uses schema default when config key is missing", func(t *testing.T) {
+		resolver, err := NewConfigResolver(map[string]interface{}{})
+		if err != nil {
+			t.Fatalf("NewConfigResolver() unexpected error: %v", err)
+		}
+
+		input := map[string]interface{}{
+			"algorithm": map[string]interface{}{
+				internalConfigRefKey:    "${config.policy.algorithm}",
+				internalDefaultValueKey: "gcra",
+			},
+		}
+
+		got, err := resolver.ResolveMap(input)
+		if err != nil {
+			t.Fatalf("ResolveMap() unexpected error: %v", err)
+		}
+
+		if got["algorithm"] != "gcra" {
+			t.Fatalf("ResolveMap() fallback mismatch: got %v, want %v", got["algorithm"], "gcra")
+		}
+	})
+
+	t.Run("uses config value when config key exists", func(t *testing.T) {
+		resolver, err := NewConfigResolver(map[string]interface{}{
+			"policy": map[string]interface{}{
+				"algorithm": "fixed-window",
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewConfigResolver() unexpected error: %v", err)
+		}
+
+		input := map[string]interface{}{
+			"algorithm": map[string]interface{}{
+				internalConfigRefKey:    "${config.policy.algorithm}",
+				internalDefaultValueKey: "gcra",
+			},
+		}
+
+		got, err := resolver.ResolveMap(input)
+		if err != nil {
+			t.Fatalf("ResolveMap() unexpected error: %v", err)
+		}
+
+		if got["algorithm"] != "fixed-window" {
+			t.Fatalf("ResolveMap() resolved value mismatch: got %v, want %v", got["algorithm"], "fixed-window")
+		}
+	})
+
+	t.Run("resolves nested fallback markers recursively", func(t *testing.T) {
+		resolver, err := NewConfigResolver(map[string]interface{}{
+			"policy": map[string]interface{}{
+				"redis": map[string]interface{}{
+					"port": 6380,
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewConfigResolver() unexpected error: %v", err)
+		}
+
+		input := map[string]interface{}{
+			"redis": map[string]interface{}{
+				"host": map[string]interface{}{
+					internalConfigRefKey:    "${config.policy.redis.host}",
+					internalDefaultValueKey: "localhost",
+				},
+				"port": map[string]interface{}{
+					internalConfigRefKey:    "${config.policy.redis.port}",
+					internalDefaultValueKey: 6379,
+				},
+			},
+		}
+
+		got, err := resolver.ResolveMap(input)
+		if err != nil {
+			t.Fatalf("ResolveMap() unexpected error: %v", err)
+		}
+
+		redis, ok := got["redis"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected redis map, got %T", got["redis"])
+		}
+
+		if redis["host"] != "localhost" {
+			t.Fatalf("redis.host mismatch: got %v, want %v", redis["host"], "localhost")
+		}
+		if redis["port"] != int64(6380) {
+			t.Fatalf("redis.port mismatch: got %v, want %v", redis["port"], int64(6380))
+		}
+	})
+
+	t.Run("does not fallback on non-missing-key errors", func(t *testing.T) {
+		resolver, err := NewConfigResolver(map[string]interface{}{
+			"policy": map[string]interface{}{
+				"timeout": 30,
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewConfigResolver() unexpected error: %v", err)
+		}
+
+		input := map[string]interface{}{
+			"timeout": map[string]interface{}{
+				internalConfigRefKey:    "${config.policy.timeout + }",
+				internalDefaultValueKey: 10,
+			},
+		}
+
+		_, err = resolver.ResolveMap(input)
+		if err == nil {
+			t.Fatalf("ResolveMap() expected error but got nil")
+		}
+	})
+}

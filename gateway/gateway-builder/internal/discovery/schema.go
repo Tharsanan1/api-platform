@@ -20,6 +20,15 @@ package discovery
 
 import "log/slog"
 
+const (
+	// internalConfigRefKey and internalDefaultValueKey are internal marker keys used by
+	// policy-engine config resolution. When both wso2/defaultValue and default exist for
+	// a property, builder emits a marker map so runtime can fallback to schema default
+	// only when config lookup fails due to missing keys.
+	internalConfigRefKey    = "__wso2_internal_ref"
+	internalDefaultValueKey = "__wso2_internal_default"
+)
+
 // ExtractDefaultValues extracts default values from a JSON schema structure.
 // It processes the "properties" object and extracts either "default" or "wso2/defaultValue"
 // with precedence given to "wso2/defaultValue" when both exist.
@@ -37,19 +46,28 @@ import "log/slog"
 //	  }
 //	}
 //
-// Returns: map[string]interface{} with only the default values
+// Returns: map[string]interface{} with extracted values.
 //
-//	{"propName": "${config.Path.To.Config}"}
+// If both wso2/defaultValue and default are present for a property, a marker map is returned:
 //
-// TODO: (renuka) handle nested objects
+//	{
+//	  "__wso2_internal_ref": "${config.Path.To.Config}",
+//	  "__wso2_internal_default": "fallback-value"
+//	}
+//
+// Nested object properties are traversed recursively.
 func ExtractDefaultValues(schema map[string]interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
-
 	// Handle nil or empty schema
 	if schema == nil {
 		slog.Debug("Schema is nil, returning empty map", "phase", "discovery")
-		return result
+		return map[string]interface{}{}
 	}
+
+	return extractDefaultsFromSchema(schema)
+}
+
+func extractDefaultsFromSchema(schema map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
 
 	// Extract properties object
 	properties, ok := schema["properties"].(map[string]interface{})
@@ -72,22 +90,22 @@ func ExtractDefaultValues(schema map[string]interface{}) map[string]interface{} 
 			continue
 		}
 
-		// Check for wso2/defaultValue first (higher precedence)
-		if wso2Default, exists := propDefMap["wso2/defaultValue"]; exists {
-			result[propName] = wso2Default
-			slog.Debug("Extracted wso2/defaultValue",
+		if extractedValue, hasValue := extractPropertyValue(propDefMap); hasValue {
+			result[propName] = extractedValue
+			slog.Debug("Extracted property value",
 				"property", propName,
-				"value", wso2Default,
+				"value", extractedValue,
 				"phase", "discovery")
 			continue
 		}
 
-		// Fallback to standard default
-		if defaultValue, exists := propDefMap["default"]; exists {
-			result[propName] = defaultValue
-			slog.Debug("Extracted default",
+		// No direct default values on this property, recurse if this is an object schema.
+		nested := extractDefaultsFromSchema(propDefMap)
+		if len(nested) > 0 {
+			result[propName] = nested
+			slog.Debug("Extracted nested defaults",
 				"property", propName,
-				"value", defaultValue,
+				"value", nested,
 				"phase", "discovery")
 		}
 	}
@@ -97,4 +115,23 @@ func ExtractDefaultValues(schema map[string]interface{}) map[string]interface{} 
 		"phase", "discovery")
 
 	return result
+}
+
+func extractPropertyValue(propDefMap map[string]interface{}) (interface{}, bool) {
+	wso2Default, hasWso2Default := propDefMap["wso2/defaultValue"]
+	defaultValue, hasDefault := propDefMap["default"]
+
+	switch {
+	case hasWso2Default && hasDefault:
+		return map[string]interface{}{
+			internalConfigRefKey:    wso2Default,
+			internalDefaultValueKey: defaultValue,
+		}, true
+	case hasWso2Default:
+		return wso2Default, true
+	case hasDefault:
+		return defaultValue, true
+	default:
+		return nil, false
+	}
 }

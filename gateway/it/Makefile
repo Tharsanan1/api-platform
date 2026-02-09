@@ -16,12 +16,14 @@
 # under the License.
 # --------------------------------------------------------------------
 
-.PHONY: test test-all test-verbose clean deps check-docker coverage-report build-coverage
+.PHONY: test test-postgres test-all test-verbose clean deps check-docker coverage-report build-coverage
+
+COMPOSE_FILE ?= docker-compose.test.yaml
 
 # Run integration tests (always with coverage)
 # Requires: make build-coverage-image (run once before tests)
 test:
-	go test -v -timeout 30m ./...
+	COMPOSE_FILE=$(COMPOSE_FILE) go test -v -timeout 30m ./...
 
 # Build all coverage-instrumented gateway components
 build-coverage:
@@ -30,14 +32,19 @@ build-coverage:
 # Build and run tests in one command
 test-all: build-coverage test
 
+# Run integration tests against Postgres-backed controller
+test-postgres:
+	COMPOSE_FILE=docker-compose.test.postgres.yaml $(MAKE) test
+
 # Run tests with verbose output
 test-verbose:
-	go test -v -count=1 -timeout 30m ./...
+	COMPOSE_FILE=$(COMPOSE_FILE) go test -v -count=1 -timeout 30m ./...
 
 # Clean up test artifacts
 clean:
 	docker rm -f $$(docker ps -aq --filter "name=it-") 2>/dev/null || true
 	docker compose -f docker-compose.test.yaml -p gateway-it down -v --remove-orphans 2>/dev/null || true
+	docker compose -f docker-compose.test.postgres.yaml -p gateway-it down -v --remove-orphans 2>/dev/null || true
 	rm -rf coverage/*.out coverage/*.txt coverage/*.html coverage/merged coverage/gateway-controller reports/*.json
 
 # Install dependencies

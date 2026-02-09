@@ -81,6 +81,7 @@ gateway/it/
 | Command | Description |
 |---------|-------------|
 | `make test` | Run integration tests |
+| `make test-postgres` | Run integration tests with Postgres backend |
 | `make test-all` | Build coverage images + run tests |
 | `make test-verbose` | Run tests with verbose output |
 | `make build-coverage` | Build coverage-instrumented images |
@@ -94,14 +95,21 @@ gateway/it/
 # Run all tests
 make test-all
 
+# Run tests with Postgres-backed gateway-controller
+make test-postgres
+
+# Run tests with an explicit compose file
+COMPOSE_FILE=docker-compose.test.postgres.yaml make test
+
 # Run with Go directly (with extended timeout for coverage builds)
-go test -v -timeout 30m ./...
+COMPOSE_FILE=docker-compose.test.yaml go test -v -timeout 30m ./...
 
 # Run specific scenario (use @tag)
-go test -v -timeout 30m ./... -godog.tags="@wip"
+COMPOSE_FILE=docker-compose.test.postgres.yaml go test -v -timeout 30m ./... -godog.tags="@wip"
 ```
 
 **Note:** The default Go test timeout is 10 minutes. The full integration test suite with coverage instrumentation typically takes longer to complete, so a 30-minute timeout is recommended.
+**Note:** The Postgres test compose keeps the database internal to the Docker network and does not expose a host port.
 
 ## Test Reports
 

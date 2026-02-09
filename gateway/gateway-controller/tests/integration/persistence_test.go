@@ -46,7 +46,7 @@ func TestDatabasePersistenceAcrossRestarts(t *testing.T) {
 	// Phase 1: Create database and save configurations
 	t.Log("Phase 1: Creating database and saving configurations")
 	{
-		db, err := storage.NewSQLiteStorage(dbPath, logger)
+		db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 		require.NoError(t, err, "Failed to create database")
 
 		// Save multiple configurations
@@ -71,7 +71,7 @@ func TestDatabasePersistenceAcrossRestarts(t *testing.T) {
 	// Phase 2: Reopen database and verify data persisted
 	t.Log("Phase 2: Reopening database and verifying persistence")
 	{
-		db, err := storage.NewSQLiteStorage(dbPath, logger)
+		db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 		require.NoError(t, err, "Failed to reopen database")
 		defer db.Close()
 
@@ -97,7 +97,7 @@ func TestDatabasePersistenceAcrossRestarts(t *testing.T) {
 	// Phase 3: Update a configuration and verify it persists
 	t.Log("Phase 3: Updating configuration and verifying update persistence")
 	{
-		db, err := storage.NewSQLiteStorage(dbPath, logger)
+		db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 		require.NoError(t, err, "Failed to reopen database")
 
 		// Get and update a configuration
@@ -114,7 +114,7 @@ func TestDatabasePersistenceAcrossRestarts(t *testing.T) {
 	// Phase 4: Reopen and verify update persisted
 	t.Log("Phase 4: Verifying update persisted")
 	{
-		db, err := storage.NewSQLiteStorage(dbPath, logger)
+		db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 		require.NoError(t, err, "Failed to reopen database")
 		defer db.Close()
 
@@ -127,7 +127,7 @@ func TestDatabasePersistenceAcrossRestarts(t *testing.T) {
 	// Phase 5: Delete a configuration and verify deletion persists
 	t.Log("Phase 5: Deleting configuration and verifying deletion persistence")
 	{
-		db, err := storage.NewSQLiteStorage(dbPath, logger)
+		db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 		require.NoError(t, err, "Failed to reopen database")
 
 		// Get the ID of PersistAPI2
@@ -143,7 +143,7 @@ func TestDatabasePersistenceAcrossRestarts(t *testing.T) {
 	// Phase 6: Reopen and verify deletion persisted
 	t.Log("Phase 6: Verifying deletion persisted")
 	{
-		db, err := storage.NewSQLiteStorage(dbPath, logger)
+		db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 		require.NoError(t, err, "Failed to reopen database")
 		defer db.Close()
 
@@ -168,7 +168,7 @@ func TestLoadFromDatabaseWithMultipleRestarts(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create and populate database
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 
 	cfg1 := createTestConfig("LoadTest1", "v1.0")
@@ -185,7 +185,7 @@ func TestLoadFromDatabaseWithMultipleRestarts(t *testing.T) {
 		t.Logf("Restart cycle %d", i)
 
 		// Reopen database
-		db, err := storage.NewSQLiteStorage(dbPath, logger)
+		db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 		require.NoError(t, err)
 
 		// Create fresh ConfigStore
@@ -220,7 +220,7 @@ func TestZeroDataLoss(t *testing.T) {
 
 	// Create 10 configurations
 	t.Log("Creating 10 configurations")
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 
 	for i := 1; i <= 10; i++ {
@@ -237,7 +237,7 @@ func TestZeroDataLoss(t *testing.T) {
 
 	// Restart and verify zero data loss
 	t.Log("Restarting and verifying zero data loss")
-	db, err = storage.NewSQLiteStorage(dbPath, logger)
+	db, err = storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 	defer db.Close()
 

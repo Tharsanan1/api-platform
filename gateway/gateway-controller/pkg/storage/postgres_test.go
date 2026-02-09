@@ -19,6 +19,7 @@
 package storage
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -28,7 +29,7 @@ import (
 	"gotest.tools/v3/assert"
 )
 
-func setupTestPostgresStorage(t *testing.T) *PostgresStorage {
+func setupTestPostgresStorage(t *testing.T) Storage {
 	t.Helper()
 
 	dsn := os.Getenv("POSTGRES_TEST_DSN")
@@ -40,7 +41,7 @@ func setupTestPostgresStorage(t *testing.T) *PostgresStorage {
 	metrics.Init()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pg, err := NewPostgresStorage(PostgresConnectionConfig{DSN: dsn}, logger)
+	pg, err := NewStorage(BackendConfig{Type: "postgres", Postgres: PostgresConnectionConfig{DSN: dsn}}, logger)
 	assert.NilError(t, err)
 	return pg
 }
@@ -101,4 +102,19 @@ func TestPostgresStorage_TemplateAndAPIKeyCRUD(t *testing.T) {
 	count, err := pg.CountActiveAPIKeysByUserAndAPI(apiKey.APIId, apiKey.CreatedBy)
 	assert.NilError(t, err)
 	assert.Assert(t, count >= 1)
+}
+
+func TestPostgresStorage_SaveLLMProviderTemplate_UniqueConstraintError(t *testing.T) {
+	pg := setupTestPostgresStorage(t)
+	defer pg.Close()
+
+	template := createTestLLMProviderTemplate()
+	assert.NilError(t, pg.SaveLLMProviderTemplate(template))
+	defer pg.DeleteLLMProviderTemplate(template.ID)
+
+	conflictingTemplate := createTestLLMProviderTemplate()
+	conflictingTemplate.Configuration.Metadata.Name = template.Configuration.Metadata.Name
+
+	err := pg.SaveLLMProviderTemplate(conflictingTemplate)
+	assert.Assert(t, errors.Is(err, ErrConflict))
 }

@@ -44,8 +44,9 @@ func TestNewSQLiteStorage_Success(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	storage, err := NewSQLiteStorage(dbPath, logger)
+	store, err := NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.NilError(t, err)
+	storage := store.(*sqlStore)
 	assert.Assert(t, storage != nil)
 	assert.Assert(t, storage.db != nil)
 	assert.Assert(t, storage.logger != nil)
@@ -57,7 +58,7 @@ func TestNewSQLiteStorage_InvalidPath(t *testing.T) {
 	// Try to create database in non-existent directory
 	dbPath := "/non/existent/path/test.db"
 
-	_, err := NewSQLiteStorage(dbPath, logger)
+	_, err := NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.Assert(t, err != nil)
 }
 
@@ -66,8 +67,9 @@ func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test_schema.db")
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	storage, err := NewSQLiteStorage(dbPath, logger)
+	store, err := NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.NilError(t, err)
+	storage := store.(*sqlStore)
 	defer storage.db.Close()
 
 	// Verify schema version is set correctly
@@ -102,8 +104,9 @@ func TestSQLiteStorage_SchemaVersionUpgrade(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	// Create storage with initial schema
-	storage, err := NewSQLiteStorage(dbPath, logger)
+	store, err := NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.NilError(t, err)
+	storage := store.(*sqlStore)
 
 	// Set schema version to 1 to test upgrade path
 	_, err = storage.db.Exec("PRAGMA user_version = 1")
@@ -111,8 +114,9 @@ func TestSQLiteStorage_SchemaVersionUpgrade(t *testing.T) {
 	storage.db.Close()
 
 	// Reopen to trigger migration
-	storage, err = NewSQLiteStorage(dbPath, logger)
+	store, err = NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.NilError(t, err)
+	storage = store.(*sqlStore)
 	defer storage.db.Close()
 
 	// Verify all migrations ran
@@ -395,8 +399,9 @@ func TestLoadLLMProviderTemplatesFromDatabase_GetAllError(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	storage, err := NewSQLiteStorage(dbPath, logger)
+	store, err := NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.NilError(t, err)
+	storage := store.(*sqlStore)
 	storage.db.Close() // Close to cause error
 
 	cache := NewConfigStore()
@@ -705,8 +710,9 @@ func TestLoadAPIKeysFromDatabase_GetAllError(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "test.db")
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	storage, err := NewSQLiteStorage(dbPath, logger)
+	store, err := NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.NilError(t, err)
+	storage := store.(*sqlStore)
 	storage.db.Close() // Close to cause error
 
 	configStore := NewConfigStore()
@@ -763,16 +769,16 @@ func TestSQLiteStorage_CountActiveAPIKeysByUserAndAPI_Success(t *testing.T) {
 
 // Helper functions
 
-func setupTestStorage(t *testing.T) *SQLiteStorage {
+func setupTestStorage(t *testing.T) *sqlStore {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	metrics.Init()
 
-	storage, err := NewSQLiteStorage(dbPath, logger)
+	store, err := NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.NilError(t, err)
 
-	return storage
+	return store.(*sqlStore)
 }
 
 func createTestStoredConfig() *models.StoredConfig {

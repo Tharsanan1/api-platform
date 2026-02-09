@@ -15,7 +15,7 @@ import (
 
 func TestDeployAPIConfigurationWebSubKindTopicRegistration(t *testing.T) {
 	configStore := storage.NewConfigStore()
-	db := &storage.SQLiteStorage{}
+	var db storage.Storage
 	snapshotManager := &xds.SnapshotManager{}
 	validator := config.NewAPIValidator()
 	service := NewAPIDeploymentService(configStore, db, snapshotManager, validator, nil)

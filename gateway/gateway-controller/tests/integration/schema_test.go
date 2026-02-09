@@ -45,7 +45,7 @@ func TestDatabaseFileCreation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create storage
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err, "Failed to create SQLite storage")
 	defer db.Close()
 
@@ -89,7 +89,7 @@ func TestSchemaInitialization(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create storage (should initialize schema)
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -272,7 +272,7 @@ func TestSchemaInitializationIdempotent(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// First initialization
-	db1, err := storage.NewSQLiteStorage(dbPath, logger)
+	db1, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 
 	// Add a configuration
@@ -282,7 +282,7 @@ func TestSchemaInitializationIdempotent(t *testing.T) {
 	db1.Close()
 
 	// Second initialization (should not recreate schema or lose data)
-	db2, err := storage.NewSQLiteStorage(dbPath, logger)
+	db2, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 	defer db2.Close()
 
@@ -310,7 +310,7 @@ func TestEmptyDatabaseInitialization(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create storage (should auto-create database and schema)
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.NoError(t, err, "Should successfully create database from scratch")
 	defer db.Close()
 
@@ -340,7 +340,7 @@ func TestDatabaseIntegrityCheck(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 
 	// Add multiple configurations

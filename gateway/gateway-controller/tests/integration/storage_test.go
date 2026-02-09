@@ -50,7 +50,7 @@ func setupTestDB(t *testing.T) (storage.Storage, string, func()) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create SQLite storage
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err, "Failed to create SQLite storage")
 
 	// Cleanup function
@@ -274,7 +274,7 @@ func TestSQLiteStorage_DatabaseFileCreation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create storage (should create database files)
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 	defer db.Close()
 

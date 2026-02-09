@@ -58,7 +58,7 @@ func UpdateGoMod(srcDir string, policies []*types.DiscoveredPolicy) error {
 			"policy", policy.Name,
 			"target", target)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		cmd := exec.CommandContext(ctx, "go", "get", target)
 		cmd.Dir = srcDir
 		var stderr bytes.Buffer

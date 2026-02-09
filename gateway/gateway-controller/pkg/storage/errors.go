@@ -36,6 +36,9 @@ var (
 
 	// ErrOperationNotAllowed is returned when an operation is not permitted
 	ErrOperationNotAllowed = errors.New("operation not allowed")
+
+	// ErrUnsupportedStorageType is returned when a storage backend type is unknown.
+	ErrUnsupportedStorageType = errors.New("unsupported storage type")
 )
 
 // IsConflictError checks if an error is a conflict error

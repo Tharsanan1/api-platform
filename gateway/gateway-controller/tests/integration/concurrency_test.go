@@ -45,7 +45,7 @@ func TestConcurrentWrites(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -97,7 +97,7 @@ func TestConcurrentReads(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -156,7 +156,7 @@ func TestConcurrentMixedOperations(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -247,7 +247,7 @@ func TestConcurrentUpdatesOnSameConfig(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -315,7 +315,7 @@ func TestConcurrentGetAllConfigs(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	db, err := storage.NewSQLiteStorage(dbPath, logger)
+	db, err := storage.NewStorage(storage.BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	require.NoError(t, err)
 	defer db.Close()
 

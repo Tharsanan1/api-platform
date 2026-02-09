@@ -17,7 +17,7 @@
 # --------------------------------------------------------------------
 
 # Integration test Docker Compose configuration
-# Uses coverage-enabled image (build with: make build-coverage-image)
+# Uses coverage-enabled image (build with: make build-image)
 
 services:
   postgres:
@@ -38,7 +38,7 @@ services:
 
   gateway-controller:
     container_name: it-gateway-controller
-    image: ghcr.io/wso2/api-platform/gateway-controller-coverage:0.7.0-SNAPSHOT
+    image: ghcr.io/wso2/api-platform/gateway-controller:0.7.0-SNAPSHOT
     mem_limit: 128m
     mem_reservation: 128m
     cpus: 0.1
@@ -78,7 +78,7 @@ services:
 
   policy-engine:
     container_name: it-policy-engine
-    image: ghcr.io/wso2/api-platform/policy-engine-coverage:0.7.0-SNAPSHOT
+    image: ghcr.io/wso2/api-platform/policy-engine:0.7.0-SNAPSHOT
     mem_limit: 128m
     mem_reservation: 128m
     cpus: 0.2

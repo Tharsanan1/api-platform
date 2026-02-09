@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -37,6 +38,29 @@ var (
 	GitCommit = "unknown"
 	BuildDate = "unknown"
 )
+
+func toBackendConfig(cfg *config.Config) storage.BackendConfig {
+	pg := cfg.GatewayController.Storage.Postgres
+	return storage.BackendConfig{
+		Type:       cfg.GatewayController.Storage.Type,
+		SQLitePath: cfg.GatewayController.Storage.SQLite.Path,
+		Postgres: storage.PostgresConnectionConfig{
+			DSN:             pg.DSN,
+			Host:            pg.Host,
+			Port:            pg.Port,
+			Database:        pg.Database,
+			User:            pg.User,
+			Password:        pg.Password,
+			SSLMode:         pg.SSLMode,
+			ConnectTimeout:  pg.ConnectTimeout,
+			MaxOpenConns:    pg.MaxOpenConns,
+			MaxIdleConns:    pg.MaxIdleConns,
+			ConnMaxLifetime: pg.ConnMaxLifetime,
+			ConnMaxIdleTime: pg.ConnMaxIdleTime,
+			ApplicationName: pg.ApplicationName,
+		},
+	}
+}
 
 func main() {
 	// Parse command-line flags
@@ -86,53 +110,20 @@ func main() {
 	// Initialize storage based on type
 	var db storage.Storage
 	if cfg.IsPersistentMode() {
-		switch cfg.GatewayController.Storage.Type {
-		case "sqlite":
-			log.Info("Initializing SQLite storage", slog.String("path", cfg.GatewayController.Storage.SQLite.Path))
-			db, err = storage.NewSQLiteStorage(cfg.GatewayController.Storage.SQLite.Path, log)
-			if err != nil {
-				// Check for database locked error and provide clear guidance
-				if err.Error() == "database is locked" || err.Error() == "failed to open database: database is locked" {
-					log.Error("Database is locked by another process",
-						slog.String("database_path", cfg.GatewayController.Storage.SQLite.Path),
-						slog.String("troubleshooting", "Check if another gateway-controller instance is running or remove stale WAL files"))
-					os.Exit(1)
-				}
-				log.Error("Failed to initialize SQLite database", slog.Any("error", err))
+		db, err = storage.NewStorage(toBackendConfig(cfg), log)
+		if err != nil {
+			if strings.EqualFold(cfg.GatewayController.Storage.Type, "sqlite") && errors.Is(err, storage.ErrDatabaseLocked) {
+				log.Error("Database is locked by another process",
+					slog.String("database_path", cfg.GatewayController.Storage.SQLite.Path),
+					slog.String("troubleshooting", "Check if another gateway-controller instance is running or remove stale WAL files"))
 				os.Exit(1)
 			}
-			defer db.Close()
-		case "postgres":
-			pg := cfg.GatewayController.Storage.Postgres
-			log.Info("Initializing PostgreSQL storage",
-				slog.String("host", pg.Host),
-				slog.Int("port", pg.Port),
-				slog.String("database", pg.Database),
-				slog.String("sslmode", pg.SSLMode))
-			db, err = storage.NewPostgresStorage(storage.PostgresConnectionConfig{
-				DSN:             pg.DSN,
-				Host:            pg.Host,
-				Port:            pg.Port,
-				Database:        pg.Database,
-				User:            pg.User,
-				Password:        pg.Password,
-				SSLMode:         pg.SSLMode,
-				ConnectTimeout:  pg.ConnectTimeout,
-				MaxOpenConns:    pg.MaxOpenConns,
-				MaxIdleConns:    pg.MaxIdleConns,
-				ConnMaxLifetime: pg.ConnMaxLifetime,
-				ConnMaxIdleTime: pg.ConnMaxIdleTime,
-				ApplicationName: pg.ApplicationName,
-			}, log)
-			if err != nil {
-				log.Error("Failed to initialize PostgreSQL database", slog.Any("error", err))
-				os.Exit(1)
-			}
-			defer db.Close()
-		default:
-			log.Error("Unknown storage type", slog.String("type", cfg.GatewayController.Storage.Type))
+			log.Error("Failed to initialize database storage",
+				slog.String("type", cfg.GatewayController.Storage.Type),
+				slog.Any("error", err))
 			os.Exit(1)
 		}
+		defer db.Close()
 	} else {
 		log.Info("Running in memory-only mode (no persistent storage)")
 	}

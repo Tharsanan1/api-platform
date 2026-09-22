@@ -1,6 +1,6 @@
 # Feature Spec: Mutual TLS (mTLS) for the API Platform Gateway
 
-**Status:** Ready for team review — all decisions recorded (D1–D10); one open question (Q-M, §10) with its own options paper
+**Status:** Ready for team review — all decisions recorded (D1–D11); one open question (Q-M, §10) with its own options paper
 **Branch:** `mtls`
 **Scope:** Data-plane mTLS in both directions — client → gateway (inbound) and gateway → backend (outbound)
 **Background:** [`research.md`](./research.md) holds the protocol and option analysis this spec draws on; it is not required reading.
@@ -69,8 +69,9 @@ Each decision states what was chosen and why.
 | D6 | Outbound shape | **Per-upstream keypair via SDS**, on a new `Upstream.tls` block | `upstream.auth.type: mtls`; a single gateway-wide identity |
 | D7 | Trust/key storage | **New tables**, not the frozen `certificates` table and not the `secrets` store | `usage` column on `certificates`; identities as `{{ secret }}` values |
 | D8 | Listener private key | **Move to SDS** as part of this work | Leave inlined in LDS |
-| D9 | Invalid client certificate | **Envoy validates and drops at the handshake** — the policy only ever sees "no certificate" or "valid certificate" (§3.1.1) | Forward the verdict to the policy via `ACCEPT_UNTRUSTED` + `connection.peer_certificate_valid` |
+| D9 | Invalid client certificate | **Envoy validates but never drops** — `trust_chain_verification: ACCEPT_UNTRUSTED`; the verdict reaches the policy as `connection.peer_certificate_valid` and the policy rejects with the uniform `401` (§3.1.1) | Dropping at the handshake (a TLS alert with no HTTP response, no analytics, no log line) |
 | D10 | Propagation of changes | **The policy re-evaluates `accept` and `notAfter` on every request**; pool changes reach new handshakes only. No connection-duration bound is added (§3.1.2) | A new `max_connection_duration` listener setting |
+| D11 | `X-Forwarded-Client-Cert` to backends | **Only on routes whose chain contains `mtls-auth`**: every other route strips it with route-level `request_headers_to_remove` (§3.1.6) | Forward whenever a certificate was presented |
 
 The rationale for each decision, including what was rejected and why, is in Appendix A.
 
@@ -104,7 +105,7 @@ is acceptable.
 | `connection.dns_san_peer_certificate` | string | **first DNS SAN only**, not a list |
 | `connection.tls_version` | string | |
 | `connection.requested_server_name` | string | |
-| `connection.peer_certificate_valid` | bool | v1.39+. Always `true` when a certificate is present under D9; requested as defence in depth only |
+| `connection.peer_certificate_valid` | bool | v1.39+. **The verdict** (D9): Envoy's chain validation result for the presented certificate. `false` is a deny, always |
 
 The SAN attributes are **singular** — Envoy documents them as "the first URI/DNS entry in the SAN
 field". Any logic needing the full SAN set must parse `connection.peer_certificate` instead.
@@ -113,24 +114,31 @@ The certificate therefore reaches the policy engine as an **Envoy-asserted attri
 connection**, not as a request header. A client cannot forge it, and there is no
 header-sanitization trust boundary to get wrong.
 
-**An invalid certificate never reaches the policy (D9).** Envoy verifies the chain at the handshake.
-A presented certificate that **fails** that verification — untrusted authority, expired, not yet valid, depth
-exceeded, wrong key usage — fails the handshake with a TLS alert and never reaches the policy. The
-policy therefore only ever sees "no certificate" or "valid certificate", and decides only whether
-that valid identity is acceptable to this API. `TrustChainVerification` stays at Envoy's default.
-Self-signed pooled leaves rely on `X509_V_FLAG_PARTIAL_CHAIN` — verify in M0.
+**Envoy validates; the policy decides — for every certificate (D9).** The validation context is
+built with `trust_chain_verification: ACCEPT_UNTRUSTED`. Envoy still runs the full X.509 verification
+of the presented certificate against the pool — chain, dates, depth, key usage — but it does **not**
+close the connection when that verification fails. The result reaches ext_proc as
+`connection.peer_certificate_valid`, next to the certificate itself. Consequences:
 
-Consequences, all deliberate:
+- **Every certificate outcome is an HTTP outcome.** An invalid certificate produces the same uniform
+  `401` as a certificate from the wrong authority (§3.1.7), with an analytics record and an
+  access-log line. Nothing about certificates is decided by a TLS alert.
+- **`false` is a deny, unconditionally.** The policy never overrides Envoy's verdict. What it adds is
+  the *reason* for its own telemetry (§3.3): Envoy hands over a boolean, so the policy inspects the
+  leaf's dates and re-runs the path check to distinguish `expired`, `not_yet_valid` and
+  `untrusted_chain`; anything it cannot classify is `invalid_certificate`.
+- **`true` is not acceptance.** The pool is the union across every API, so `true` means only "issued
+  by something *some* API trusts". Per-API trust is re-established below.
+- **Junk costs an ext_proc round trip.** A certificate that would otherwise have died in the handshake
+  now reaches the policy engine once. §8.10 measures it; it is bounded by connection rate, not
+  request rate.
+- **What still fails at the transport** is only what happens before a certificate can be evaluated:
+  no shared protocol version or cipher, a malformed `ClientHello`, a client alert. Those remain TLS
+  alerts with no HTTP response (S2b) and are the only residents of `GET /tls/handshake-failures`.
 
-- No X.509 chain code in a policy. Junk dies at the handshake at no downstream cost.
-- **Handshake-layer rejections produce no HTTP response, no analytics event and no access-log
-  entry.** This is inherent to the choice and is why S2a/S2b are separate requirements (§7), why
-  §8.15 distinguishes "TLS fail" from `401`, and why `GET /tls/handshake-failures` exists (§8.9).
-- Per-API trust is re-established in the policy after the handshake (below), because the listener's
-  trust bundle is the union of the pool.
-
-`connection.peer_certificate_valid` is still requested and carried (§3.1.3) as defence in depth: a
-policy denies on an explicit `false` even though, under this decision, it should never see one.
+`ACCEPT_UNTRUSTED` suppresses **every** verifier failure, not only unknown issuers: an expired
+certificate, an over-deep chain and a `serverAuth`-only leaf all arrive with `valid = false`. The
+policy therefore never treats a presented certificate as trusted on the strength of its presence.
 
 **Authority verification: the trust bundle is listener-wide.**
 
@@ -202,9 +210,9 @@ class). Comparison is against the SAN set parsed from `connection.peer_certifica
 Envoy's first-entry-only attributes. A list is the shape because the revocation lever is then "remove
 one value", exactly as for `thumbprints` (§8.4).
 
-**The leaf must chain to the pool — and a self-signed leaf is its own authority.** A validation
-context with a non-empty `trusted_ca` makes Envoy set `SSL_VERIFY_PEER`, so a presented certificate
-that fails chain verification fails the **handshake** and never reaches `mtls-auth`. Consequences:
+**The leaf must chain to the pool — and a self-signed leaf is its own authority.** Envoy validates
+every presented certificate against the pool and reports the verdict (D9); a certificate that does
+not chain to any pool entry arrives with `valid = false` and is denied. Consequences:
 
 - A self-signed client certificate goes into the pool as an authority entry and is named by `ca:`.
   Envoy validates it as a trust anchor (relying on `X509_V_FLAG_PARTIAL_CHAIN` — verify in M0), the
@@ -264,7 +272,8 @@ if clientValidationNeeded {
             },
         }
     ctx.RequireClientCertificate = wrapperspb.Bool(false)   // D2: request, never require
-    // D9: TrustChainVerification stays at its default — an invalid cert fails the handshake.
+    // D9: the SDS-delivered CertificateValidationContext (sds.go) carries
+    //     TrustChainVerification: ACCEPT_UNTRUSTED — Envoy validates, reports, never drops.
 }
 ```
 
@@ -287,6 +296,12 @@ Generalize it to "is this secret referenced by any accepted resource (cluster *o
 `ExtProcOverrides.request_attributes` is marked `[#not-implemented-hide:]` upstream, so this is
 filter-wide, not per-route — which is fine: we always send them, and the policy decides.
 
+**(4b) Controller — XFCC scoping per route (D11).** The translator already builds each route's policy
+chain (`transform/restapi.go` `buildPolicyChain`). For every route whose chain does **not** contain
+`mtls-auth`, the RDS route gains `request_headers_to_remove: ["x-forwarded-client-cert"]`. The router
+filter applies that when forwarding upstream, after ext_proc, so the policy engine still sees the
+header (§3.1.1 reads its `Chain` element) while a backend behind a public route never does.
+
 **(5) Policy engine + SDK + proto — carry the identity.** Additive only:
 
 ```go
@@ -304,10 +319,10 @@ type DownstreamTLS struct {
     FirstDNSSAN        string // connection.dns_san_peer_certificate — FIRST entry only (§3.1.1)
     PeerCertificatePEM string // connection.peer_certificate — parse this for the full SAN set
     TLSVersion         string
-    PeerCertValid      *bool  // connection.peer_certificate_valid — defence in depth (D9).
-                              // Envoy drops invalid certs at the handshake, so this is true
-                              // whenever MTLS is true; a policy still denies on explicit false.
-                              // nil means the attribute was not populated.
+    PeerCertValid      *bool  // connection.peer_certificate_valid — THE verdict (D9). Envoy
+                              // validates but never drops, so a presented certificate arrives
+                              // with true or false; false is always a deny. nil means the
+                              // attribute was not populated and is also a deny (fail closed).
 }
 ```
 
@@ -454,6 +469,20 @@ carry a client certificate and absent otherwise; the backend receives the same h
 measures it). Today the HCM uses Envoy's default (`SANITIZE`) and there are zero
 XFCC references repo-wide, so this is net-new and must ship with the forged-header test (§8.7).
 
+**The header leaves the gateway only where a policy vouched for it (D11).** Envoy writes XFCC whenever
+a certificate was *presented*, whether Envoy's verdict was `true` or `false` and whether any API cares.
+Left alone, a request carrying an untrusted or merely irrelevant certificate to a **public** API
+would reach that backend with an XFCC header describing an identity nobody accepted. So every route
+whose chain lacks `mtls-auth` strips the header at the router (§3.1.3 (4b)), and on an `mtls-auth`
+route a rejected certificate never reaches the backend at all:
+
+| Route | Certificate | Policy | XFCC at the backend |
+|---|---|---|---|
+| public | none | — | absent |
+| public | invalid or valid-but-irrelevant | — | **stripped by the route** |
+| `mtls-auth` | invalid, or valid but not in `accept` | `401` | never forwarded |
+| `mtls-auth` | valid and accepted | allow | forwarded, truthfully |
+
 #### 3.1.7 The `401` the policy returns
 
 **Identical to `jwt-auth` and `api-key-auth`.** The policy exposes the same three parameters those
@@ -478,8 +507,10 @@ authentication scheme for client certificates and the sibling policies set none.
 platform's existing wording rather than the literal example in `error-handling.md` d.4; the rule's
 requirement is uniformity across causes, which holds.
 
-A handshake-layer rejection (D9) produces **no HTTP response at all** — the client sees a TLS alert
-and a closed connection. That is not a body to specify; it is recorded here so nobody looks for one.
+An **invalid** certificate produces this same body (D9): Envoy reports `valid = false`, the policy
+denies. Only a failure that happens before a certificate can be evaluated — no shared protocol
+version or cipher, a malformed `ClientHello` — produces no HTTP response; the client sees a TLS alert
+and a closed connection, and the only record is `GET /tls/handshake-failures` (§5.2.3).
 
 ---
 
@@ -706,7 +737,7 @@ neighbours:
 |---|---|---|---|
 | `client_ca_certificates_total` | gauge | — | pool row count, on every write (mirrors `certificates_total`) |
 | `gateway_identities_total` | gauge | — | identity row count, on every write |
-| `tls_handshake_failures_total` | counter | `reason` (closed enum, §5.2.3) | the same listener-access-log stream that feeds the ring buffer (§5.2.3); incremented once per entry |
+| `tls_handshake_failures_total` | counter | `reason` (closed enum, §5.2.3) | the same listener-access-log stream that feeds the ring buffer (§5.2.3); incremented once per entry. Under D9 this counts only pre-certificate TLS failures; certificate rejections are `policy_executions_total{status="denied"}` |
 | `certificate_expiry_seconds` | gauge (exists, unset) | `cert_id`, `cert_name` | `notAfter` of every pooled authority, identity **and** existing `/certificates` entry (§5.2.2) |
 
 Envoy's own per-listener TLS counters (`ssl.handshake`, `ssl.fail_verify_error`,
@@ -728,7 +759,7 @@ certificate is present, and the decision always:
 | `tls.protocol.version` | from `connection.tls_version` |
 | `enduser.id` | `AuthContext.Subject` |
 | `mtls_auth.result` | `allow` or `deny` |
-| `mtls_auth.reason` | on deny, one of: `no_certificate`, `authority_not_accepted`, `san_mismatch`, `thumbprint_mismatch`, `expired`, `attribute_absent` |
+| `mtls_auth.reason` | on deny, one of: `no_certificate`, `attribute_absent`, `expired`, `not_yet_valid`, `untrusted_chain`, `invalid_certificate` (Envoy verdict `false`, no closer cause found), `authority_not_accepted`, `san_mismatch`, `thumbprint_mismatch` |
 | `mtls_auth.matched_entry` | index into `accept` on allow |
 
 The reason attribute is for operators; the caller's `401` body never varies (§3.1.7). No private
@@ -829,7 +860,7 @@ developer reads:
 | `PUT /gateway-identities/{id}` | `admin` | Rotate one |
 | `GET /gateway-identities` | `admin, developer` | List — **never returns `privateKey`, for any role** |
 | `DELETE /gateway-identities/{id}` | `admin` | Remove one |
-| `GET /tls/handshake-failures` | `admin` | Rejections that never became HTTP requests |
+| `GET /tls/handshake-failures` | `admin` | TLS failures that happened before a certificate could be evaluated and so never became HTTP requests |
 | `POST /rest-apis/{handle}/upstreams/{name}/tls-test` | `admin, developer` | Verify an upstream definition's TLS end to end. Scoped to the API because definition names are unique per API, not per gateway |
 
 Response bodies for every success, warning and failure are fixed in §5.2.
@@ -1013,49 +1044,47 @@ needs no gateway-side notification machinery.
 
 #### 5.2.3 Diagnostics — `GET /tls/handshake-failures`
 
-Handshake failures never become HTTP requests, so the source is Envoy's **listener access log**
-(`Listener.access_log`), emitted for connections that close before a filter chain completes,
-delivered over the ALS transport the collector already runs and kept by the controller in a bounded
-in-memory ring of the most recent 1,000 entries per gateway. Not persisted; a controller restart
-empties it. Format operators used: `%START_TIME%`, `%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%`,
-`%REQUESTED_SERVER_NAME%`, `%DOWNSTREAM_TLS_VERSION%`, `%DOWNSTREAM_TRANSPORT_FAILURE_REASON%`, and
-when a certificate was presented `%DOWNSTREAM_PEER_SUBJECT%`, `%DOWNSTREAM_PEER_ISSUER%`,
-`%DOWNSTREAM_PEER_FINGERPRINT_256%`, `%DOWNSTREAM_PEER_CERT_V_END%`.
+Under D9 a presented certificate never fails the handshake, so the only connections that die before
+HTTP are pre-certificate TLS failures: no shared protocol version or cipher, no shared ALPN, a
+malformed `ClientHello`, a client-sent alert, a reset mid-handshake. Those never become requests, so
+the source is Envoy's **listener access log** (`Listener.access_log`), emitted for connections that
+close before a filter chain completes, delivered over the ALS transport the collector already runs
+and kept by the controller in a bounded in-memory ring of the most recent 1,000 entries per gateway.
+Not persisted; a controller restart empties it. Format operators used: `%START_TIME%`,
+`%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%`, `%REQUESTED_SERVER_NAME%`, `%DOWNSTREAM_TLS_VERSION%`,
+`%DOWNSTREAM_TRANSPORT_FAILURE_REASON%`, `%CONNECTION_TERMINATION_DETAILS%`.
 
 Query: `?since=<duration|RFC3339>` (default `1h`), `?reason=<code>`. Role: `admin`.
 
 ```json
 {
   "since": "2026-09-21T13:22:00Z",
-  "totalCount": 2,
+  "totalCount": 1,
   "failures": [
     {
       "time": "2026-09-21T14:22:07Z",
       "remoteAddress": "203.0.113.7",
       "sni": "api.example.com",
-      "tlsVersion": "TLSv1.3",
-      "reason": "UNTRUSTED_CA",
-      "detail": "unable to get local issuer certificate",
-      "peer": { "subject": "CN=client-7,O=Partner", "issuer": "CN=Some Other CA",
-                "fingerprint": "3ba9…", "notAfter": "2027-01-01T00:00:00Z" }
+      "tlsVersion": "",
+      "reason": "TLS_ALERT",
+      "detail": "TLS_error:|268435703:SSL routines:OPENSSL_internal:UNSUPPORTED_PROTOCOL"
     }
   ]
 }
 ```
 
-`reason` is a closed enum mapped from the BoringSSL verify string, which is kept verbatim in `detail`
-— the only free text in the response. `peer` is absent when no certificate was presented.
+`reason` is a closed enum mapped from the transport failure string, which is kept verbatim in
+`detail` — the only free text in the response.
 
-| `reason` | BoringSSL text (`detail`) |
+| `reason` | Transport failure text (`detail`) |
 |---|---|
-| `UNTRUSTED_CA` | `unable to get local issuer certificate`, `self signed certificate`, `self-signed certificate in certificate chain` |
-| `EXPIRED` | `certificate has expired` |
-| `NOT_YET_VALID` | `certificate is not yet valid` |
-| `CHAIN_TOO_LONG` | `certificate chain too long` |
-| `BAD_KEY_USAGE` | `unsupported certificate purpose`, `key usage does not include certificate signing`, `invalid CA certificate` (issuer lacks `CA:TRUE`) |
-| `BAD_SIGNATURE` | `certificate signature failure` |
-| `TLS_ALERT` | any TLS-level failure before certificate verification (protocol version, cipher, malformed `ClientHello`) |
+| `TLS_ALERT` | protocol version, cipher or ALPN mismatch; malformed `ClientHello`; an alert sent by the client |
+| `CONNECTION_ERROR` | reset or timeout before the handshake completed |
 | `OTHER` | anything else; `detail` carries the string |
+
+Certificate outcomes — untrusted issuer, expired, wrong key usage, not accepted by the API — are
+**not** here. They are `401`s, visible in the access log, in analytics, and on the `mtls-auth` span
+as `mtls_auth.reason` (§3.3).
 
 #### 5.2.4 Diagnostics — `POST /rest-apis/{handle}/upstreams/{name}/tls-test`
 
@@ -1198,8 +1227,8 @@ each one.
 | # | Requirement | Rule |
 |---|---|---|
 | S1 | Absent/invalid certificate → **deny**. The nil accessor must never mean "not required". | GO-AUTH-001 |
-| S2a | **Policy-layer** rejections — not allowlisted, SAN/issuer mismatch, no certificate presented — return one uniform 401 body, fixed in §3.1.7. | error-handling d.4/d.5 |
-| S2b | **Handshake-layer** rejections — bad chain, expired, depth exceeded — are TLS alerts with **no HTTP response**. This is inherent, not a gap: CA membership is observable at the TLS layer regardless (the TLS 1.2 `CertificateRequest` advertises the accepted-CA list). Enable Envoy's suppress-client-CA-list option to reduce that disclosure. Do not write requirements or tests that assume a 401 here. | inherent |
+| S2a | **Every certificate rejection** — no certificate, Envoy verdict `false` (untrusted, expired, depth, key usage), authority not in `accept`, SAN or fingerprint mismatch — returns one uniform 401 body, fixed in §3.1.7. The response never varies by cause; the cause goes to telemetry only. | error-handling d.4/d.5 |
+| S2b | Only failures that occur **before a certificate can be evaluated** — protocol/cipher/ALPN mismatch, malformed `ClientHello` — are TLS alerts with no HTTP response. They are recorded by §5.2.3. Note that CA membership is observable at the TLS layer regardless (the TLS 1.2 `CertificateRequest` advertises the accepted-CA list); enable Envoy's suppress-client-CA-list option to reduce that disclosure. | inherent |
 | S3 | Identity comparison is **constant-time** (`subtle.ConstantTimeCompare`, as `basic-auth` does) and canonicalized. Never substring, never case-folded DN equality. | go-cors-validation d.1 (same class) |
 | S4 | A certificate widens *which pool entries an API accepts*, never which gateway's pool or which API. Identity is decided only from Envoy-asserted connection attributes, never from request headers or body. | GO-AUTH-005 (gateway scope) |
 | S5 | Whether a route requires a certificate is decided by **which policy chain the controller assigned to that route** — a structural match against the router/policy configuration — never by a request-shape heuristic. A route whose chain includes `mtls-auth` but cannot be resolved at request time is **denied**, not passed through. | GO-AUTH-017 |
@@ -1217,6 +1246,7 @@ each one.
 | S17 | A private key is never returned by any read operation **for any role**, including `admin`. Write-only, as `upstreamAuth.value` already is. | GO-AUTH-003 |
 | S18 | A dangling reference — `accept` naming an authority absent from the pool, or `tls.identity` naming a missing identity — is refused at deploy time. Silently denying one partner is worse than refusing the change. | GO-AUTH-017 |
 | S19 | Removing a pool authority or an identity that a deployed API **names** (`accept[].ca` or `tls.identity`) is **refused with `409`** listing the referencing APIs — the delete-time mirror of S18. APIs that merely inherit the pool are not references. No existing delete endpoint checks references; this one must. | GO-AUTH-001 |
+| S20 | `X-Forwarded-Client-Cert` reaches a backend **only** on a route whose chain contains `mtls-auth` and whose policy accepted the certificate (D11). Every other route removes it with route-level `request_headers_to_remove`; a presented-but-untrusted or valid-but-irrelevant certificate never reaches a public backend as an XFCC identity. | N1 / GO-AUTH-017 |
 
 ---
 
@@ -1368,8 +1398,12 @@ test states its blast radius and its propagation time.
 
 **`mtls-auth` policy**
 - Nil peer certificate → deny. *The most important unit test in the feature.*
-- `PeerCertValid == false` → deny, identical response to every other policy-layer failure (S2a);
-  defence in depth, since D9 means it should never be observed.
+- `PeerCertValid == false` → deny, identical response to every other failure (S2a); this is the
+  primary path for an invalid certificate under D9. `PeerCertValid == nil` → deny as well.
+- Reason derivation for telemetry: with `PeerCertValid == false`, an expired leaf yields `expired`, a
+  future `notBefore` yields `not_yet_valid`, a leaf that chains to no pool entry yields
+  `untrusted_chain`, anything else `invalid_certificate` — and the `401` body is byte-identical in
+  all four cases.
 - Signature verifies against the entry's authority + narrowings match → `AuthContext` populated per
   D5's table; **no `x-wso2-application-id` written**, asserted explicitly.
 - **Same CN under a different authority → deny**; **identical Subject DN under a different
@@ -1395,6 +1429,10 @@ The tests that would catch a regression into a vulnerability. Not optional.
   is a non-goal.
 - Forged XFCC **alongside** a valid but different certificate → the handshake identity wins.
 - Header injection into the backend-facing XFCC — a client-supplied value never survives.
+- **XFCC scoping (S20, D11):** a valid certificate presented to a **public** API → the backend
+  receives no `x-forwarded-client-cert`; an **invalid** certificate presented to a public API → `200`,
+  and the backend receives no XFCC; a valid, accepted certificate on an `mtls-auth` API → the backend
+  receives XFCC with the handshake identity. Assert on the echo backend's received headers.
 - **Authority DN collision (S15)**: `ca-b-same-dn` pooled alongside `ca-a`; a leaf it issued, presented to an
   API accepting only `ca-a` → `401`. This is the test that proves verification is cryptographic, not a
   DN compare.
@@ -1436,11 +1474,17 @@ The tests that would catch a regression into a vulnerability. Not optional.
 
 ### 8.9 Operability
 
-Under D9 the two-layer split (S2a/S2b, §7) means ordinary observability misses handshake-layer
-failures entirely; these tests exist to make them visible.
+Under D9 every certificate outcome is an HTTP outcome, so ordinary observability covers it; the one
+class that still dies before HTTP — pre-certificate TLS failures — has its own view. These tests prove
+both halves.
 
-- A handshake rejection appears in `GET /tls/handshake-failures` with a usable reason, and in **no**
-  access log or analytics record — assert both, because "absent from the logs" is the diagnosis.
+- An **invalid** certificate (untrusted, expired, wrong key usage) on an `mtls-auth` API appears in the
+  access log as a `401` with `peerSubj`/`peerFp` populated, in analytics with `authType: mtls`, and on
+  the policy span with the derived `mtls_auth.reason` — and does **not** appear in
+  `GET /tls/handshake-failures`.
+- A pre-certificate TLS failure (client offers only TLS 1.0, or no shared cipher) appears in
+  `GET /tls/handshake-failures` as `TLS_ALERT`, and in **no** access log or analytics record — assert
+  both, because for this class "absent from the logs" is the diagnosis.
 - A policy rejection appears in analytics with the correct API and `AuthType: mtls`; no application
   is attributed, because none is resolved (D5).
 - Expiry warnings fire 30 days ahead on all three channels of §5.2.2: `CERT_EXPIRES_SOON` in the
@@ -1612,7 +1656,7 @@ identity.
 | O2a | pool is **empty** | 1. developer deploys an API with `mtls-auth` and **`accept` omitted** → **`400`**, `field = spec.policies[0]`, "`mtls-auth` requires at least one client-CA authority; add one with `POST /client-ca-certificates`" 2. admin adds `ca-a` → `201` 3. developer redeploys → `201`; the API inherits `{ca-a}` and follows the pool from then on (O3) | S8: inheriting an empty pool would deploy an API that denies every caller. Together with O7 (the last authority cannot be removed while mTLS APIs exist) this makes "mTLS API on an empty pool" an unreachable state, so no request-time behaviour needs defining for it. |
 | O3 | pool = `{ca-a}` | 1. developer deploys with **`accept` omitted** → `201`, response echoes `accept: [ca-a]` 2. admin adds `ca-b` → `201` 3. a `ca-b` certificate calls the API → **`200`, no redeploy** 4. `GET /rest-apis/{handle}` → resolved `accept` shows `[ca-a, ca-b]`; the stored definition still has no `accept` key | Omitted `accept` is a standing instruction, re-resolved on every pool change and pushed in the next policy snapshot. The `GET` proves the read model tracks the pool, not the deploy-time echo. |
 | O4 | pool = `{ca-a}` | 1. developer deploys `accept: [ca-a]` → `201` 2. admin adds `ca-b` → `201` 3. a `ca-b` certificate calls the API → handshake **succeeds** (the pool trusts `ca-b`), policy returns **`401`** | S16: pool membership is not authorization. Contrast with O3 — the only difference is whether `accept` was written. |
-| O5 | pool = `{ca-a, ca-b}`, API deployed with `accept` omitted | 1. admin removes `ca-a` → `204` 2. a `ca-a` certificate opens a **new** connection → TLS fail 3. an **already-open** `ca-a` connection keeps working until it closes or idles out | D10: pool changes reach new handshakes only. Inheriting APIs are not references, so nothing is refused and nothing is surfaced — the documented default. |
+| O5 | pool = `{ca-a, ca-b}`, API deployed with `accept` omitted | 1. admin removes `ca-a` → `204` 2. a `ca-a` certificate on a **new** connection → `401` (`untrusted_chain`): Envoy reports `valid = false` 3. an **already-open** `ca-a` connection keeps working until it closes or idles out | D10: pool changes reach new handshakes only. Inheriting APIs are not references, so nothing is refused and nothing is surfaced — the documented default. |
 | O6 | pool = `{ca-a, ca-b}`, API deployed with `accept: [ca-a]` | 1. admin removes `ca-a` → **`409`**, `errors[]` lists the API and the referencing path 2. the API keeps working unchanged | S19: a named dependency cannot be deleted from under a running API. The admin edits the API's `accept` first. |
 | O7 | pool = `{ca-a}` only, one API attaches `mtls-auth` (with or without `accept`) | 1. admin removes `ca-a` → **`409`**, "cannot remove the last client-CA authority while 1 deployed API attaches `mtls-auth`" | S8: an empty pool with mTLS APIs would leave the listener referencing an empty bundle — a warming `https_port` or a silent deny-all. Applies even when no API names `ca-a`. |
 
@@ -1645,13 +1689,15 @@ identity.
 | O15a | mTLS APIs deployed, operator sets `router.https_enabled: false`, controller restarts | 1. startup **refused**, log names the APIs 2. nothing is served | GO-AUTH-011: the effective outcome (mTLS APIs with no TLS listener) is invalid; fail closed at startup rather than serve 401s forever (§3.1.4). |
 | O16 | Envoy reconnects to the controller (restart, network blip) | 1. snapshot re-sync 2. SDS secrets (`listener_cert`, `downstream_client_ca`, identities) arrive **before or with** the listener 3. the listener is never left **warming** | §3.2.4 / S8: a listener referencing a secret that has not arrived does not serve; the snapshot gate must include listener-referenced secrets. |
 | O18 | pool is empty | 1. admin's `POST /client-ca-certificates` for `ca-a` and developer's deploy with `accept: [ca-a]` arrive **near-simultaneously** 2. if the CA commit landed first, the deploy → `201`; otherwise → `400` 3. the deploy must read **committed** pool state, never a stale cache | A spurious S18 from a cache would look like a bug to the developer; correctness requires read-after-commit. |
-| O19 | pool = `{ca-a}`, `ca-a`'s `notAfter` passes while APIs name it | 1. new handshakes with `ca-a` certificates fail (Envoy validates the chain, including the authority's own dates) 2. `GET /client-ca-certificates` shows it expired; `CERT_EXPIRES_SOON` warned 30 days beforehand 3. a deploy naming it → `201` with a warning | Expiry is surfaced, never silent. Deploy is not refused because the admin may be mid-rotation. |
+| O19 | pool = `{ca-a}`, `ca-a`'s `notAfter` passes while APIs name it | 1. `ca-a` certificates on new connections → `401` (`untrusted_chain`): Envoy validates the chain including the authority's own dates and reports `valid = false` 2. `GET /client-ca-certificates` shows it expired; `CERT_EXPIRES_SOON` warned 30 days beforehand 3. a deploy naming it → `201` with a warning | Expiry is surfaced, never silent. Deploy is not refused because the admin may be mid-rotation. |
 | O20 | gateway A has `ca-a` in its pool, gateway B does not | 1. the same API YAML with `accept: [ca-a]` is deployed to both 2. A → `201`; B → **`400`** | Pools are per gateway (§3.1.1 scope). The same definition is not portable until each gateway's pool is prepared. |
 
 ### 8.15 Request-time matrix — client × API
 
 `API-M` has `mtls-auth` with `accept: [{ca: ca-a, match: {uriSANs: [U]}}]`. `API-P` is public. `API-T`
-has a thumbprint entry for `client-valid`. "TLS fail" is a handshake alert with no HTTP response (D9).
+has a thumbprint entry for `client-valid`. Under D9 an invalid certificate still completes the handshake:
+`mtls-auth` APIs answer `401` (with the derived reason in telemetry) and the public API answers `200`
+with the certificate ignored and XFCC stripped (D11).
 
 | Client presents | API-M | API-P | API-T |
 |---|---|---|---|
@@ -1666,12 +1712,12 @@ has a thumbprint entry for `client-valid`. "TLS fail" is a handshake alert with 
 | cert from `ca-b`, **same CN** as `client-valid` | `401` | `200` | `401` |
 | cert from `ca-b-same-dn` (DN collision) | `401` | `200` | `401` |
 | self-signed, pooled as authority, named in `accept` | `200` | `200` | n/a |
-| self-signed, **not** pooled | TLS fail | TLS fail | TLS fail |
-| expired / not-yet-valid | TLS fail | TLS fail | TLS fail |
-| untrusted authority | TLS fail | TLS fail | TLS fail |
-| chain depth > max | TLS fail | TLS fail | TLS fail |
-| `serverAuth`-only EKU | TLS fail | TLS fail | TLS fail |
-| leaf **without** intermediate; pool has root only | TLS fail | TLS fail | TLS fail |
+| self-signed, **not** pooled | `401` (`untrusted_chain`) | `200`, XFCC stripped | `401` (`untrusted_chain`) |
+| expired / not-yet-valid | `401` (`expired / not_yet_valid`) | `200`, XFCC stripped | `401` (`expired / not_yet_valid`) |
+| untrusted authority | `401` (`untrusted_chain`) | `200`, XFCC stripped | `401` (`untrusted_chain`) |
+| chain depth > max | `401` (`invalid_certificate`) | `200`, XFCC stripped | `401` (`invalid_certificate`) |
+| `serverAuth`-only EKU | `401` (`invalid_certificate`) | `200`, XFCC stripped | `401` (`invalid_certificate`) |
+| leaf **without** intermediate; pool has root only | `401` (`untrusted_chain`) | `200`, XFCC stripped | `401` (`untrusted_chain`) |
 | leaf without intermediate; pool has root+intermediate | `200` | `200` | per entry |
 | valid cert + **forged XFCC** for another identity | identity from handshake; header stripped | `200` | as handshake |
 | **no** cert + forged XFCC | `401` | `200`, header stripped | `401` |
@@ -1707,10 +1753,11 @@ key + no cert → `401`. **Every `401` body in this section is byte-identical** 
 The pool accepts four shapes of entry (§3.1.1, §3.1.2): a root alone, a root with its issuing
 intermediate, an issuing intermediate alone, and a self-signed leaf. Clients differ in what they
 send: the leaf alone, or the leaf with its intermediate(s). Every combination below is one
-integration scenario. The API under test names the entry in `accept` with no narrowing. "TLS fail"
-is a handshake alert recorded in `/tls/handshake-failures` with the reason shown; "200" means the
-handshake completed **and** `mtls-auth` built a path to the named entry. Expected results follow
-BoringSSL semantics with `X509_V_FLAG_PARTIAL_CHAIN` (the M0 item); a row marked ★ is the one that
+integration scenario. The API under test names the entry in `accept` with no narrowing. Under D9 the
+handshake always completes; "`401` (`reason`)" means Envoy reported `valid = false` **or** the policy
+found no path to the named entry, with the reason the policy derives for telemetry (§3.3); "200"
+means Envoy reported `valid = true` **and** `mtls-auth` built a path to the named entry. Expected
+results follow BoringSSL semantics with `X509_V_FLAG_PARTIAL_CHAIN` (the M0 item); a row marked ★
 depends on it.
 
 **Entry A — root only (`ca-a`)**
@@ -1718,11 +1765,11 @@ depends on it.
 | Client presents | Expected | Why |
 |---|---|---|
 | `client-valid` (signed by the root directly) | `200` | one-step path |
-| `client-via-intermediate`, **leaf only** | **TLS fail `UNTRUSTED_CA`** | nothing links leaf to root — the documented failure that "include intermediates" prevents |
+| `client-via-intermediate`, **leaf only** | **`401` (`untrusted_chain`)** | nothing links leaf to root — the documented failure that "include intermediates" prevents |
 | `client-via-intermediate` **+ `ca-a-intermediate`** | `200` | Envoy completes the path from the sent intermediate; the policy uses the XFCC chain |
 | `client-via-intermediate-2` + `ca-a-intermediate-2` (rotated) | `200` | zero-touch rotation: any intermediate under the root works if the client sends it |
 | `client-via-other-intermediate` + `ca-a-other-intermediate` (sibling) | `200` | **root-level trust is wide**: every intermediate the root signed is accepted — the reason intermediate-only exists |
-| `client-wrong-ca` (under `ca-b`) | TLS fail `UNTRUSTED_CA` | different root |
+| `client-wrong-ca` (under `ca-b`) | `401` (`untrusted_chain`) | different root |
 
 **Entry B — root + issuing intermediate in one entry (`ca-a` + `ca-a-intermediate`)**
 
@@ -1731,7 +1778,7 @@ depends on it.
 | `client-via-intermediate`, leaf only | `200` | the entry supplies the intermediate; path built from pool material |
 | `client-via-intermediate` + intermediate | `200` | same |
 | `client-via-intermediate-2` + `ca-a-intermediate-2` (rotated, sent) | `200` | chains to the root in the entry |
-| `client-via-intermediate-2`, leaf only (rotated, **not** sent) | **TLS fail `UNTRUSTED_CA`** | the entry holds the old intermediate; nothing links leaf to root — update the entry or have clients send the new intermediate |
+| `client-via-intermediate-2`, leaf only (rotated, **not** sent) | **`401` (`untrusted_chain`)** | the entry holds the old intermediate; nothing links leaf to root — update the entry or have clients send the new intermediate |
 | `client-via-other-intermediate` + sibling | `200` | root in the entry → wide trust, as Entry A |
 | `AuthContext.Issuer` for any `200` above | the **entry name** | not the issuing intermediate's DN |
 
@@ -1742,18 +1789,18 @@ depends on it.
 | `client-via-intermediate`, leaf only | `200` ★ | the intermediate is the anchor; one-step path via partial chain |
 | `client-via-intermediate` + intermediate | `200` ★ | the sent intermediate matches the anchor |
 | `client-via-intermediate` + intermediate + `ca-a` root | `200` ★ | extra certificates the client sends are ignored |
-| `client-via-intermediate-2` + `ca-a-intermediate-2` (rotated) | **TLS fail `UNTRUSTED_CA`** | the rotation cost of intermediate-only: the new intermediate is a new anchor and must be uploaded |
-| `client-via-other-intermediate` + sibling | **TLS fail `UNTRUSTED_CA`** | **the tightest trust**: a sibling intermediate under the same root is not accepted — the point of this shape |
-| `client-valid` (signed by the root directly) | TLS fail `UNTRUSTED_CA` | the root is not in the pool |
+| `client-via-intermediate-2` + `ca-a-intermediate-2` (rotated) | **`401` (`untrusted_chain`)** | the rotation cost of intermediate-only: the new intermediate is a new anchor and must be uploaded |
+| `client-via-other-intermediate` + sibling | **`401` (`untrusted_chain`)** | **the tightest trust**: a sibling intermediate under the same root is not accepted — the point of this shape |
+| `client-valid` (signed by the root directly) | `401` (`untrusted_chain`) | the root is not in the pool |
 
 **Entry D — self-signed leaf (`client-selfsigned`)**
 
 | Client presents | Expected | Why |
 |---|---|---|
 | `client-selfsigned` itself | `200` ★ | the presented certificate **is** the anchor; signature check against its own key |
-| `client-selfsigned-b` (another self-signed) | TLS fail `UNTRUSTED_CA` | never pooled |
-| `client-selfsigned-renewed` | TLS fail `UNTRUSTED_CA` until uploaded as a new entry | a renewed self-signed certificate is a new anchor (§3.1.2) |
-| `client-signed-by-leaf` (+ `client-selfsigned` as "intermediate") | **TLS fail `BAD_KEY_USAGE`** | a `CA:FALSE` certificate cannot act as an issuer; BoringSSL reports `invalid CA certificate` |
+| `client-selfsigned-b` (another self-signed) | `401` (`untrusted_chain`) | never pooled |
+| `client-selfsigned-renewed` | `401` (`untrusted_chain`) until uploaded as a new entry | a renewed self-signed certificate is a new anchor (§3.1.2) |
+| `client-signed-by-leaf` (+ `client-selfsigned` as "intermediate") | **`401` (`untrusted_chain`)** | a `CA:FALSE` certificate cannot act as an issuer: Envoy reports `valid = false` and the policy's own path check fails for the same reason |
 | upload of `client-selfsigned` | `201`, `isLeaf: true`, warning `CLIENT_CA_IS_LEAF` | §5.2.2 |
 
 **Cross-entry cases**
@@ -1781,11 +1828,14 @@ depends on it.
 
 ## 9. Phasing
 
-**M0 — Spike (blocking, ~days).** Confirm request-and-validate end to end on Envoy v1.39.0: a
-listener with `require_client_certificate: false` and a validation context accepts a connection with
-no certificate, drops one with an invalid certificate, and exposes the `connection.*` attributes to
-ext_proc for a valid one. Verify the `X509_V_FLAG_PARTIAL_CHAIN` reliance for self-signed pooled
-leaves (§3.1.2).
+**M0 — Spike (blocking, ~days).** One question decides the error contract: on Envoy v1.39.0 with
+`require_client_certificate: false` and `trust_chain_verification: ACCEPT_UNTRUSTED`, does Envoy
+**compute** the verdict and expose it as `connection.peer_certificate_valid` — `true` for a
+certificate that chains to the pool, `false` for an untrusted, expired or `serverAuth`-only one —
+rather than skipping validation? Confirm the connection completes in every case, that
+`connection.peer_certificate` and the digest are populated for invalid certificates too, and that
+`X509_V_FLAG_PARTIAL_CHAIN` lets an intermediate or self-signed leaf act as an anchor (§3.1.2). Also
+confirm route-level `request_headers_to_remove` runs after ext_proc (D11).
 
 **M1 — Foundations.** SDS `Secret_TlsCertificate` and a second validation context; generalize the
 snapshot-inclusion gate; move the listener key to SDS (D8); fix the cert-store fail-open (§3.2.5);
@@ -1854,8 +1904,8 @@ will show a certificate-selection prompt on APIs that don't use mTLS. D3 is the 
 
 Request-and-validate is confirmed from Envoy source (`default_validator.cc`: a non-empty
 `trusted_ca` sets `SSL_VERIFY_PEER`; `SSL_VERIFY_FAIL_IF_NO_PEER_CERT` is added only when
-`require_client_certificate: true`). An *invalid* presented certificate is dropped at the handshake
-(D9, §3.1.1).
+`require_client_certificate: true`). An *invalid* presented certificate completes the handshake and
+is reported to the policy as `valid = false` (D9, §3.1.1).
 
 ### A.3 D3 — Optional dedicated mTLS port
 
@@ -1956,13 +2006,20 @@ violation. This work adds `Secret_TlsCertificate` support to SDS regardless, so 
 place while extending the same function is not acceptable under directive 7. The blast radius and what
 M1 owes for it are in §3.2.4.
 
-### A.9 D9 — An invalid certificate is stopped at the handshake
+### A.9 D9 — Envoy validates but never drops; the policy rejects
 
-**Rejected:** `trust_chain_verification: ACCEPT_UNTRUSTED` with the verdict forwarded as
-`connection.peer_certificate_valid`, so every rejection becomes a uniform 401. It would unify the
-error contract, but every garbage certificate would cost an ext_proc round trip, the policy would
-receive a boolean without a reason, and the shape is unproven for us. Also rejected: accepting
-untrusted and rebuilding the chain inside the policy, which reimplements path validation.
+The alternative — Envoy's default, drop an invalid certificate at the handshake — is the proven shape
+and costs nothing downstream. It was rejected because it splits every certificate failure into two
+worlds: a handshake-layer rejection produces no HTTP response, no analytics event and no access-log
+line, so the operator's ordinary tools see nothing, a partner reports "connection reset", and the
+gateway needs a dedicated diagnostic just to prove the failure happened. With `ACCEPT_UNTRUSTED`
+Envoy still does all the X.509 work; the only change is that the verdict travels to the policy
+instead of ending the connection, and every rejection becomes the same uniform `401` with a record.
+The costs accepted: a junk certificate costs one ext_proc round trip; the policy receives a boolean
+and derives the reason itself for telemetry; and the shape depends on `connection.peer_certificate_valid`
+behaving as documented, which M0 confirms. Also rejected: accepting untrusted and rebuilding the
+chain inside the policy as the *trust* decision, which would reimplement path validation — the policy
+re-runs a path check only to classify a failure Envoy already reported.
 
 ### A.10 D10 — Per-request re-evaluation, no connection-duration bound
 
@@ -1970,3 +2027,21 @@ A `max_connection_duration` listener setting would bound how long a removed pool
 trusted on an open connection, but it is a new, gateway-wide behaviour change for a narrow gain: the
 fast lever for cutting a client off is editing `accept`, which is per request. Deferred; `idle_timeout`
 bounds the idle case today (§3.1.2).
+
+
+
+Notes:
+
+using Multipart form 
+envoy valdioates but do not break the connection let the policy engine decide
+lets use the param to determine which certificate endpoint. only use ./certificate
+
+### A.11 D11 — XFCC only where a policy vouched for it
+
+Envoy writes `X-Forwarded-Client-Cert` whenever a certificate was presented, and under D9 a presented
+certificate may be untrusted. Forwarding it to a public backend would hand that backend an identity
+nobody validated. Stripping in the policy engine was considered and rejected as new engine code with
+a coupling on the engine seeing every request; route-level `request_headers_to_remove` is
+Envoy-native, derived from the same per-route chain the controller already builds, and runs after
+ext_proc so the policy keeps its chain material. It also closes a gap that exists under any option: a
+valid certificate presented to a public API used to reach that backend as XFCC without anyone asking.

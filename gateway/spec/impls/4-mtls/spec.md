@@ -188,17 +188,19 @@ both, or neither:
 
 | Narrowing | Compares | Use when |
 |---|---|---|
-| `match.uriSAN` / `match.dnsSAN` | exact SAN, parsed from the leaf (not Envoy's first-entry attribute, §3.1.1) | the partner runs a PKI and issues many certificates |
+| `match.uriSANs` / `match.dnsSANs` | lists of exact SANs, parsed from the leaf (not Envoy's first-entry attribute, §3.1.1); any listed value matches | the partner runs a PKI and issues many certificates |
 | `thumbprints` | list of SHA-256 digests of the DER leaf, lowercase hex, against `connection.sha256_peer_certificate_digest`; any listed value matches | you want *these exact certificates* and nothing else |
 
 An entry with neither accepts any certificate the authority ever issues — a deliberate, documented
 choice, and the controller warns when the pool holds more than one authority (§3.1.4).
 
-**`match` semantics.** Exact string comparison only — no wildcards, patterns or prefixes (the
-CORS-rule failure class). `uriSAN` and `dnsSAN` in one entry are **AND**; two entries express OR.
-A certificate carrying several SANs of a type matches if **any** of them equals the configured
-value. Comparison is against the SAN set parsed from `connection.peer_certificate`, never against
-Envoy's first-entry-only attributes.
+**`match` semantics.** `uriSANs` and `dnsSANs` are lists of at least one value each; a list matches
+when **any** of the certificate's SANs of that type equals **any** listed value (OR within a list).
+Both lists in one entry are **AND** — the certificate must satisfy each list present; two entries
+express OR. Exact string comparison only — no wildcards, patterns or prefixes (the CORS-rule failure
+class). Comparison is against the SAN set parsed from `connection.peer_certificate`, never against
+Envoy's first-entry-only attributes. A list is the shape because the revocation lever is then "remove
+one value", exactly as for `thumbprints` (§8.4).
 
 **The leaf must chain to the pool — and a self-signed leaf is its own authority.** A validation
 context with a non-empty `trusted_ca` makes Envoy set `SSL_VERIFY_PEER`, so a presented certificate
@@ -237,7 +239,7 @@ like `jwt-auth`, nothing that any other policy consumes as a signal:
 |---|---|
 | `Authenticated` | `true` |
 | `AuthType` | `"mtls"` |
-| `Subject` | the matched URI SAN if the entry has `match.uriSAN`; else the matched DNS SAN; else first URI SAN; else first DNS SAN; else subject DN |
+| `Subject` | the matched URI SAN if the entry has `match.uriSANs`; else the matched DNS SAN; else first URI SAN; else first DNS SAN; else subject DN |
 | `Issuer` | the pool entry's name (`partner-bank-root`), not the issuer DN |
 | `CredentialID` | the leaf thumbprint, canonical lowercase hex |
 | `Properties` | subject DN, issuer DN, serial, `notAfter`, matched entry index |
@@ -378,7 +380,7 @@ of the entry says what it is:
 ```yaml
       accept:
         - ca: partner-bank-root                          # anyone this authority issues to,
-          match: { uriSAN: "urn:partner-bank:payments" } #   carrying this SAN
+          match: { uriSANs: ["urn:partner-bank:payments"] } # carrying one of these SANs
 
         - ca: partner-bank-root                          # these exact certificates from that
           thumbprints: ["9f86d081…"]                     #   authority, and nothing else
@@ -904,7 +906,7 @@ policy `i`", and the real response carries the actual numbers.
 | entry without `ca` | `spec.policies[i].params.accept[j].ca` | `ca` is required and must name an authority in this gateway's client-CA pool |
 | `ca` not in pool | `spec.policies[i].params.accept[j].ca` | no client-CA authority named `<name>` exists on this gateway |
 | pool empty | `spec.policies[i]` | `mtls-auth` requires at least one client-CA authority; add one with `POST /client-ca-certificates` |
-| `match.uriSAN: ""` or `dnsSAN: ""` | `spec.policies[i].params.accept[j].match.uriSAN` | `match` values must be non-empty; remove `match` to accept any certificate from this authority |
+| `match.uriSANs: []`, or an empty string in `uriSANs`/`dnsSANs` | `spec.policies[i].params.accept[j].match.uriSANs` (or `…[k]` for the empty element) | list at least one non-empty SAN, or remove `match` to accept any certificate from this authority |
 | `thumbprints: []` | `spec.policies[i].params.accept[j].thumbprints` | list at least one fingerprint, or remove `thumbprints` to accept any certificate from this authority |
 | malformed fingerprint | `spec.policies[i].params.accept[j].thumbprints[k]` | a fingerprint is the SHA-256 of the certificate as 64 hex characters (colons and a `sha256:` prefix are accepted) |
 | unknown param (`thumbprint`, `mode`, …) | `spec.policies[i].params.thumbprint` | unknown parameter `thumbprint`; the field is `thumbprints` |
@@ -1305,9 +1307,10 @@ test states its blast radius and its propagation time.
   agreed SAN → authenticates with no gateway action.
 - Renewal is invisible: `client-renewed` (same authority, same SAN, new thumbprint) authenticates
   without any change.
-- Revoke by narrowing `match`: `urn:partner:payments` → `urn:partner:payments:srv-1` → `srv-3` gets
-  `401` on the **next request**; `srv-1` unaffected. Test both the per-instance-SAN convention
-  followed and ignored, the latter showing narrowing is impossible when all instances share a SAN.
+- Revoke by removing a SAN from the list: `uriSANs: [srv-1, srv-2, srv-3]` → `[srv-1, srv-2]` → `srv-3`
+  gets `401` on the **next request**; `srv-1` and `srv-2` unaffected — the same lever as removing a
+  fingerprint. Test both the per-instance-SAN convention followed and ignored, the latter showing the
+  lever does not exist when all instances share a SAN.
 - Revoke by removing an entry: partner B's entry removed → `401` next request; partner A untouched.
 
 **Thumbprint entries (`ca` + `thumbprints`)**
@@ -1484,10 +1487,12 @@ means the `POST /rest-apis` response; **request-time** means what a caller sees.
 | `- ca: X` only, pool has >1 authority | `201` with warning (unnarrowed entry) | as above |
 | `- ca: X`, X **not** in pool | **`400`** naming X (S18) | — |
 | entry missing `ca` | **`400`** — `ca` required | — |
-| `match.uriSAN` | `201` | cert from X carrying that exact URI SAN |
-| `match.dnsSAN` | `201` | cert from X carrying that exact DNS SAN |
-| `match` with both | `201` | cert must carry **both** (AND) |
-| `match.uriSAN: ""` (or `dnsSAN: ""`) | **`400`** — empty matcher; "remove `match` to accept any certificate from this authority" | — |
+| `match.uriSANs: [A]` | `201` | cert from X carrying URI SAN A |
+| `match.uriSANs: [A, B]` | `201` | cert from X carrying A **or** B (OR within the list) |
+| `match.dnsSANs: [D]` | `201` | cert from X carrying DNS SAN D |
+| `match` with both lists | `201` | cert must satisfy **both** lists (AND across lists) |
+| `match.uriSANs: []`, or an empty string in either list | **`400`** — empty matcher; "list at least one non-empty SAN, or remove `match`" | — |
+| `match.uriSAN:` (singular) | **`400`** — unknown key; the field is `uriSANs` | — |
 | `match` with unknown key (`emailSAN`) | **`400`** — schema | — |
 | `thumbprints: ["9f86…"]` (lowercase hex) | `201` | exactly that leaf, issued by X |
 | `thumbprints: [a, b]` | `201` | either leaf |
@@ -1645,7 +1650,7 @@ identity.
 
 ### 8.15 Request-time matrix — client × API
 
-`API-M` has `mtls-auth` with `accept: [{ca: ca-a, match: {uriSAN: U}}]`. `API-P` is public. `API-T`
+`API-M` has `mtls-auth` with `accept: [{ca: ca-a, match: {uriSANs: [U]}}]`. `API-P` is public. `API-T`
 has a thumbprint entry for `client-valid`. "TLS fail" is a handshake alert with no HTTP response (D9).
 
 | Client presents | API-M | API-P | API-T |

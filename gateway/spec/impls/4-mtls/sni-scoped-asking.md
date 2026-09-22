@@ -98,7 +98,7 @@ spec:
       params:
         accept:
           - ca: partner-bank-root
-            match: { uriSAN: "urn:partner-bank:payments" }
+            match: { uriSANs: ["urn:partner-bank:payments"] }
 
   upstream:
     main:

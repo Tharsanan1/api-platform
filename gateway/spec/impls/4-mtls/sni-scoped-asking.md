@@ -202,7 +202,7 @@ listeners:
               "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
               stat_prefix: https
               rds: { route_config_name: shared_route_config, config_source: { ads: {}, resource_api_version: V3, initial_fetch_timeout: 0s } }
-              forward_client_cert_details: SANITIZE_SET  # spec §3.1.6
+              forward_client_cert_details: SANITIZE_SET  # spec §3.1.7
               set_current_client_cert_details: { subject: true, cert: true, chain: true, uri: true, dns: true }
               http_filters:
                 - name: envoy.filters.http.ext_proc

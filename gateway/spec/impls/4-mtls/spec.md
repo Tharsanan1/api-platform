@@ -1,6 +1,6 @@
 # Feature Spec: Mutual TLS (mTLS) for the API Platform Gateway
 
-**Status:** Ready for team review — all decisions recorded (D1–D11); one open question (Q-M, §10) with its own options paper
+**Status:** Ready for team review — all decisions recorded (D1–D12); one open question (Q-M, §10) with its own options paper
 **Branch:** `mtls`
 **Scope:** Data-plane mTLS in both directions — client → gateway (inbound) and gateway → backend (outbound)
 **Background:** [`research.md`](./research.md) holds the protocol and option analysis this spec draws on; it is not required reading.
@@ -34,14 +34,19 @@ This spec covers both directions. They are **not symmetric**:
 - G4. The gateway can present a **per-upstream** client certificate to a backend that requires one.
 - G5. Per-upstream backend **trust** (a private CA for one backend) ships with G4.
 - G6. Certificates and keys rotate without restarting the gateway or dropping in-flight requests.
+- G7. When a front proxy terminates the client's TLS, the client certificate it **relays in a header**
+  authenticates through the same policy and the same `accept` list, and only from a proxy the
+  gateway has been told to believe.
 
 ### 1.2 Non-goals (this increment)
 
-- N1. **Trusting a certificate forwarded in a header from an upstream proxy.** This is a real and
-  common topology (ALB/CDN terminates TLS), but a single code path that accepts "cert from
-  handshake OR from header" is the canonical way this feature becomes an auth bypass. It will be a
-  *separate policy* with its own hop-authentication design — a later increment — so that no code
-  path in `mtls-auth` can ever read a header. See §8.7 for the deny test that must exist from day one.
+- N1. ~~Trusting a certificate forwarded in a header from an upstream proxy.~~ **Withdrawn.**
+  Header-relayed client certificates are in scope as G7 / D12 (§3.1.3). The
+  identifier is retained so earlier references resolve; the concern that motivated it — a header
+  believed without knowing who set it — is now S21.
+- N5. **Trusting a relayed header by source IP range.** Kong's `trusted_ips` rung. Deferred: the two
+  shipped ways to believe a header (D12) cover the proof case and the trusted-network case; an
+  address allowlist sits between them and can be added without changing either.
 - N2. **CRL (Certificate Revocation List) based revocation.** Envoy accepts a CRL as supplied data but will not fetch or refresh
   it; making that work is control-plane machinery (fetch, validate `nextUpdate`, push via SDS).
   Revocation in v1 is allowlist-removal plus short certificate lifetimes. Reassess in v2.
@@ -67,11 +72,12 @@ Each decision states what was chosen and why.
 | D4 | Client identity | An `accept` entry: **issuing authority** (cryptographically verified), optionally narrowed by **SAN** and/or **SHA-256 thumbprint**. Both narrowings ship in v1 | Subject DN or CN as primary; `(issuer, serial)` |
 | D5 | Cert → what? | **An `AuthContext`, nothing else.** No application, no subscription, no metadata another policy consumes | Binding to an application |
 | D6 | Outbound shape | **Per-upstream keypair via SDS**, on a new `Upstream.tls` block | `upstream.auth.type: mtls`; a single gateway-wide identity |
-| D7 | Trust/key storage | **New tables**, not the frozen `certificates` table and not the `secrets` store | `usage` column on `certificates`; identities as `{{ secret }}` values |
+| D7 | Trust/key storage | **Client authorities reuse the existing `/certificates` endpoint and table**, distinguished by a new `usage` field (`upstream` default, `client`) plus `role`; both are additive defaulted columns, permitted on a shipped table. Gateway identities get a **new table** | A separate `/client-ca-certificates` endpoint and table; identities as `{{ secret }}` values |
 | D8 | Listener private key | **Move to SDS** as part of this work | Leave inlined in LDS |
 | D9 | Invalid client certificate | **Envoy validates but never drops** — `trust_chain_verification: ACCEPT_UNTRUSTED`; the verdict reaches the policy as `connection.peer_certificate_valid` and the policy rejects with the uniform `401` (§3.1.1) | Dropping at the handshake (a TLS alert with no HTTP response, no analytics, no log line) |
 | D10 | Propagation of changes | **The policy re-evaluates `accept` and `notAfter` on every request**; pool changes reach new handshakes only. No connection-duration bound is added (§3.1.2) | A new `max_connection_duration` listener setting |
-| D11 | `X-Forwarded-Client-Cert` to backends | **Only on routes whose chain contains `mtls-auth`**: every other route strips it with route-level `request_headers_to_remove` (§3.1.6) | Forward whenever a certificate was presented |
+| D11 | `X-Forwarded-Client-Cert` to backends | **Only on routes whose chain contains `mtls-auth`**: every other route strips it with route-level `request_headers_to_remove` (§3.1.7) | Forward whenever a certificate was presented |
+| D12 | Client certificate **relayed in a header** by a front proxy | **Same policy, same `accept`.** Believed only when the connection's own certificate chains to a pool entry marked `role: relay`, or under an explicit, off-by-default `trust_any` bypass. The relayed certificate is validated by the policy itself. Header deleted before backends unless forwarding is enabled and the header was believed (§3.1.3) | A separate `header-cert-auth` policy; believing any pooled connection (the APIM gap); a trusted-IP rung (N5) |
 
 The rationale for each decision, including what was rejected and why, is in Appendix A.
 
@@ -121,7 +127,7 @@ close the connection when that verification fails. The result reaches ext_proc a
 `connection.peer_certificate_valid`, next to the certificate itself. Consequences:
 
 - **Every certificate outcome is an HTTP outcome.** An invalid certificate produces the same uniform
-  `401` as a certificate from the wrong authority (§3.1.7), with an analytics record and an
+  `401` as a certificate from the wrong authority (§3.1.8), with an analytics record and an
   access-log line. Nothing about certificates is decided by a TLS alert.
 - **`false` is a deny, unconditionally.** The policy never overrides Envoy's verdict. What it adds is
   the *reason* for its own telemetry (§3.3): Envoy hands over a boolean, so the policy inspects the
@@ -143,7 +149,7 @@ policy therefore never treats a presented certificate as trusted on the strength
 **Authority verification: the trust bundle is listener-wide.**
 
 Under D2 there is **one** client-CA validation context for the whole listener, built from every
-row of `gw_client_ca_certificate` on this gateway. An API's `accept: [{ca: partner-bank-root}]`
+row of `certificates` with `usage = client` on this gateway. An API's `accept: [{ca: partner-bank-root}]`
 therefore **cannot** be enforced at the handshake — any certificate from any uploaded CA passes it
 — and must be re-established inside `mtls-auth`.
 
@@ -153,7 +159,7 @@ the leaf, not the chain). So "was this issued by ca-1?" must be answered cryptog
 - `leaf.CheckSignatureFrom(ca1)` where the referenced CA is the **direct** issuer, **or**
 - build a path from the leaf to the entry's authority with `x509.Verify`: **roots** = the named
   entry's certificate(s); **intermediates** = the client chain from the XFCC `Chain` element
-  (§3.1.6) **plus every certificate in the pool** (any entry — they are all trusted anchors at the
+  (§3.1.7) **plus every certificate in the pool** (any entry — they are all trusted anchors at the
   handshake already, so using them as path material widens nothing); `KeyUsages` =
   `ExtKeyUsageAny` (Go's default is `ServerAuth`, which would reject every client certificate). The
   XFCC value is read **only** when `connection.mtls == true`, i.e. when Envoy itself overwrote the
@@ -173,8 +179,8 @@ so a DN collision in the pool is harmless and is not rejected.
 
 Two consequences, both in v1:
 
-- `gw_client_ca_certificate` stores **one authority per row**, so a row is a verifiable key rather
-  than an opaque bundle. The row's identity is the certificate that actually issues client
+- A `usage = client` certificate row stores **one authority**, so it is a verifiable key rather than
+  an opaque bundle (the existing `usage = upstream` rows may remain bundles, as today). The row's identity is the certificate that actually issues client
   certificates. Its root is **optional**: an intermediate alone is a complete anchor (the same
   partial-chain reliance as a pooled leaf, M0) and trusts only what that intermediate signed —
   the tightest choice. Adding the root widens trust to every intermediate the root has signed and
@@ -200,7 +206,7 @@ both, or neither:
 | `thumbprints` | list of SHA-256 digests of the DER leaf, lowercase hex, against `connection.sha256_peer_certificate_digest`; any listed value matches | you want *these exact certificates* and nothing else |
 
 An entry with neither accepts any certificate the authority ever issues — a deliberate, documented
-choice, and the controller warns when the pool holds more than one authority (§3.1.4).
+choice, and the controller warns when the pool holds more than one authority (§3.1.5).
 
 **`match` semantics.** `uriSANs` and `dnsSANs` are lists of at least one value each; a list matches
 when **any** of the certificate's SANs of that type equals **any** listed value (OR within a list).
@@ -252,11 +258,112 @@ like `jwt-auth`, nothing that any other policy consumes as a signal:
 | `CredentialID` | the leaf thumbprint, canonical lowercase hex |
 | `Properties` | subject DN, issuer DN, serial, `notAfter`, matched entry index |
 
-#### 3.1.3 Component walk
+#### 3.1.3 Certificates relayed in a header (D12)
+
+**The topology.** A front proxy — load balancer, WAF, CDN — terminates the client's TLS, verifies the
+client certificate, and opens its own connection to the gateway. The client's certificate can reach
+the gateway only as an HTTP header the proxy sets. The proxy is responsible for deleting any header of
+that name a client sends and writing the correct one.
+
+**One policy.** `mtls-auth` handles both cases. The `accept` list, the pool, the `AuthContext`, the
+response body and every test are the same whether the certificate came from the handshake or from
+the header. The API YAML does not change: a developer names who they accept; how the certificate
+reached the gateway is the operator's concern.
+
+**Gateway-level configuration.** A deployment fact, so it lives in `config.toml` (§5.3), not in any
+API:
+
+```toml
+[router.downstream_tls.client_certificate_header]
+name               = "X-WSO2-CLIENT-CERTIFICATE"   # what the proxy sets; ALB/nginx names configurable
+trust_any          = false                          # bypass: believe the header from any connection
+forward_to_backend = false                          # pass a believed header through to backends
+```
+
+There is no `enabled` key. Header mode is on when **either** a pool entry has `role: relay` **or**
+`trust_any` is true, and off otherwise. Turning it on therefore always names *how* the source is
+trusted; the weakest option has the most alarming name.
+
+**Relay entries: a pool entry with `role: relay`.** A relay entry *vouches* for the header: its
+certificate on the connection is what makes the header believable. The admin uploads the proxy's
+authority to the pool like any partner's and marks it as a relay:
+
+```
+POST /certificates
+{ "name": "edge-lb-ca", "usage": "client", "role": "relay", "certificate": "-----BEGIN CERTIFICATE----- …" }
+```
+
+A relay entry is in the listener's trust bundle like every entry, so the proxy's connection
+completes and Envoy reports its verdict. A relay entry **cannot be named in any `accept`** (§5.2.1):
+the proxy carries other identities and has none of its own on any API. If the proxy's certificate
+comes from a shared corporate CA, the entry takes the same narrowing an `accept` entry does
+(`match: {dnsSANs: [...]}`), because "chains to the corporate CA" would let every corporate service
+relay identities.
+
+**What the policy does, in plain steps.** On a route with `mtls-auth`:
+
+1. Header absent → evaluate the connection's certificate against `accept`, exactly as §3.1.2.
+2. Header present, header mode off → same as step 1; the header is deleted.
+3. Header present, `trust_any` true → **believe the header** (go to step 5). The connection is not
+   consulted; this is the network-is-trusted posture.
+4. Header present, relay entries exist → believe the header **only if** the connection presented a
+   certificate, Envoy reported it valid, and it chains to a relay entry (with `match` satisfied).
+   Otherwise the header is **ignored, not rejected**: the connection's own certificate is evaluated
+   as itself, so a partner sending a header is authenticated as that partner, never as the header.
+5. Header believed → the certificate **inside the header** becomes the subject. Because no
+   handshake validated it, the policy does the work Envoy would have: parse it (URL-encoded PEM,
+   PEM, or bare base64 body, detected), check `notBefore`/`notAfter`, build a path to the pool
+   (§3.1.1's `x509.Verify`), then evaluate it against `accept`.
+
+| Header | Connection certificate | Header mode | Evaluated against `accept` |
+|---|---|---|---|
+| absent | none / invalid / valid | any | none → `401`; invalid → `401`; valid → the connection certificate |
+| present | any | off | as if absent; header deleted |
+| present | none or invalid | relay | none → `401 no_certificate`; invalid → `401` (Envoy's reason). Header ignored |
+| present | valid, not a relay entry | relay | the **connection** certificate, as itself |
+| present | valid, chains to a relay entry | relay | the **header** certificate |
+| present | anything, even none | bypass | the **header** certificate |
+
+**What `AuthContext` records.** `AuthType` stays `mtls`, so `subscription-validation`, analytics and
+every consumer are unchanged. `Properties` gains `source` = `handshake` \| `header` \| `bypass` and,
+for a relayed identity, `relayedBy` = the relay entry's name and the proxy certificate's subject. The
+proxy's identity is kept for audit; the identity the API authorised is the relayed client.
+
+**The header never reaches a backend by default.** On every route — with or without `mtls-auth` —
+the configured header is deleted before forwarding (the D11 mechanism, extended to this header
+name). With `forward_to_backend = true` it is forwarded **only when the gateway believed it** (steps
+3–4); a header from anyone else is still deleted. There is no way to forward an unverified header.
+
+**Why not the simpler check.** "Believe the header whenever the connection's certificate is valid
+against the pool" is APIM's `enable_client_validation: true`. The pool also holds partner
+authorities, so under that rule partner A, connecting directly, can send a header carrying partner
+B's certificate and be authenticated as B — no key of B's was ever proven. The relay role is the one
+bit that separates "may connect" from "may relay". It is not needed only when the gateway is
+reachable from nothing but the proxy; that is precisely the deployment `trust_any` names honestly.
+
+**Failure behaviour, all fail-closed.**
+
+| Situation | Result |
+|---|---|
+| Header believed but unparseable | `401 invalid_certificate` |
+| Relayed certificate expired / not yet valid | `401 expired` / `401 not_yet_valid` |
+| Relayed certificate chains to no pool entry | `401 untrusted_chain` |
+| Relayed certificate valid but not in `accept` | `401` with the usual reasons |
+| `accept` names a relay entry | deploy `400` (§5.2.1) |
+| Relay entry deleted while it is the last one and `trust_any` is false | allowed — header mode simply turns off; not an S19 reference |
+| `trust_any = true` | startup `WARN`, and `HEADER_CERT_BYPASS_ACTIVE` on every `mtls-auth` deploy response (§5.2.2) |
+| Header present on a connection that is not a relay | `DEBUG` log with the connection's subject — an impersonation attempt or a misconfigured client, either worth seeing |
+
+**What the front proxy must do** (guide material, not gateway behaviour): terminate the client's
+TLS and verify against the partner authorities; delete any incoming header of the configured name;
+set it to the client's certificate; and, for the relay posture, present its own certificate when
+connecting to the gateway.
+
+#### 3.1.4 Component walk
 
 Six components, in dependency order. Steps 3–5 are the cross-repo critical path (§6).
 
-**(1) Controller — listener config, derived.** There is no configuration switch (§3.1.4, §5.3).
+**(1) Controller — listener config, derived.** There is no configuration switch (§3.1.5, §5.3).
 `createDownstreamTLSContext` (`translator.go:2396`) gains a client-validation branch that the
 translator takes **when at least one deployed API attaches `mtls-auth`**, and not otherwise:
 
@@ -281,8 +388,9 @@ When the last `mtls-auth` attachment is removed, the branch is no longer taken a
 returns to one-way TLS on the next snapshot.
 
 **(2) Controller — SDS.** `sds.go` today serves exactly one secret. It gains:
-- `SecretNameDownstreamClientCA` — a second `Secret_ValidationContext`, built from
-  `gw_client_ca_certificate` **only**. It must not share a bundle with `upstream_ca_bundle`.
+- `SecretNameDownstreamClientCA` — a second `Secret_ValidationContext`, built from `certificates`
+  rows with `usage = client` **only**. `upstream_ca_bundle` is built from `usage = upstream` rows
+  only (today it loads every row; the filter is what keeps the two bundles disjoint, S7).
 - `Secret_TlsCertificate` support, for §3.2 and for D8.
 
 **(3) Controller — the snapshot-inclusion gate (easy to miss, silent when wrong).**
@@ -354,12 +462,13 @@ per D5's table — `AuthType: "mtls"`, `Subject`, `Issuer` (the pool entry name)
 thumbprint). It writes **no** shared metadata: no application id, nothing another policy consumes.
 On no match, a uniform `401` (S2a).
 
-#### 3.1.4 The user-facing surface: a pool, and a policy that selects from it
+#### 3.1.5 The user-facing surface: a pool, and a policy that selects from it
 
 Two tiers, governed differently. This split is the design, not an implementation detail.
 
-**The gateway administrator curates a pool.** `POST /client-ca-certificates` adds an authority
-that may sign client certificates. The pool is the **handshake boundary** — a presented certificate
+**The gateway administrator curates a pool.** `POST /certificates` with `usage: client` adds an
+authority that may sign client certificates — the same endpoint that already holds backend trust,
+told where the certificate lands. The pool is the **handshake boundary** — a presented certificate
 must chain to something in it or the connection is dropped before any request exists. Writes are
 `admin`; `GET` is `admin, developer`, matching the roles the existing `/certificates` endpoints
 already use, and the read matters because a developer cannot reference a pool entry by name
@@ -438,12 +547,13 @@ something from the transport. The controller must refuse the deployment, with a 
 |---|---|
 | The pool is empty | Nothing could ever validate; the API would deny everything |
 | `accept` names an authority not in the pool | Dangling reference — silently denies that partner |
+| `accept` names a pool entry with `role: relay` | A relay carries other identities and has none of its own; naming it would authenticate the proxy as a client (§3.1.3) |
 | `router.https_enabled` is false | No TLS listener, so no certificate can ever be presented; every request would 401. The same check runs at **startup**: a controller with `https_enabled: false` and persisted APIs attaching `mtls-auth` refuses to start (GO-AUTH-011) |
 | ~~The running gateway does not populate the certificate attribute~~ | Deferred (§6). Interim: fail-closed plus a rate-limited kernel error. |
 
 Each of those is an outage that presents as a misconfiguration, so it is caught at deploy time.
 
-#### 3.1.5 Composition with other auth
+#### 3.1.6 Composition with other auth
 
 `AuthContext.Previous` already models multi-layer auth, so "certificate AND token" needs no new
 machinery — attach both policies.
@@ -459,7 +569,7 @@ actually occurred; and certificate failures are the harder ones for a caller to 
 `x-wso2-application-id`, there is no shared metadata for two auth policies to fight over. Each
 decides independently; the request must satisfy every one attached.
 
-#### 3.1.6 Forwarding identity to the backend
+#### 3.1.7 Forwarding identity to the backend
 
 Set `ForwardClientCertDetails: SANITIZE_SET` on the HCM plus `set_current_client_cert_details`
 with `subject`, `uri`, `dns`, `cert` and **`chain: true`** — the chain is what §3.1.1's path
@@ -473,7 +583,7 @@ XFCC references repo-wide, so this is net-new and must ship with the forged-head
 a certificate was *presented*, whether Envoy's verdict was `true` or `false` and whether any API cares.
 Left alone, a request carrying an untrusted or merely irrelevant certificate to a **public** API
 would reach that backend with an XFCC header describing an identity nobody accepted. So every route
-whose chain lacks `mtls-auth` strips the header at the router (§3.1.3 (4b)), and on an `mtls-auth`
+whose chain lacks `mtls-auth` strips the header at the router (§3.1.4 (4b)), and on an `mtls-auth`
 route a rejected certificate never reaches the backend at all:
 
 | Route | Certificate | Policy | XFCC at the backend |
@@ -483,7 +593,11 @@ route a rejected certificate never reaches the backend at all:
 | `mtls-auth` | invalid, or valid but not in `accept` | `401` | never forwarded |
 | `mtls-auth` | valid and accepted | allow | forwarded, truthfully |
 
-#### 3.1.7 The `401` the policy returns
+The **configured client-certificate header** (§3.1.3) follows the same rule with one addition: it is
+deleted on every route unless `forward_to_backend` is on **and** the gateway believed it. A header the
+gateway ignored is never forwarded, whatever the route.
+
+#### 3.1.8 The `401` the policy returns
 
 **Identical to `jwt-auth` and `api-key-auth`.** The policy exposes the same three parameters those
 policies already have, with the same defaults, and renders the body with the same switch:
@@ -735,7 +849,7 @@ neighbours:
 
 | Metric | Type | Labels | Set from |
 |---|---|---|---|
-| `client_ca_certificates_total` | gauge | — | pool row count, on every write (mirrors `certificates_total`) |
+| `certificates_total` (exists) | gauge | **new label** `usage` | row count per usage, on every write; existing scrapes without the label keep working via the `upstream` series |
 | `gateway_identities_total` | gauge | — | identity row count, on every write |
 | `tls_handshake_failures_total` | counter | `reason` (closed enum, §5.2.3) | the same listener-access-log stream that feeds the ring buffer (§5.2.3); incremented once per entry. Under D9 this counts only pre-certificate TLS failures; certificate rejections are `policy_executions_total{status="denied"}` |
 | `certificate_expiry_seconds` | gauge (exists, unset) | `cert_id`, `cert_name` | `notAfter` of every pooled authority, identity **and** existing `/certificates` entry (§5.2.2) |
@@ -761,8 +875,10 @@ certificate is present, and the decision always:
 | `mtls_auth.result` | `allow` or `deny` |
 | `mtls_auth.reason` | on deny, one of: `no_certificate`, `attribute_absent`, `expired`, `not_yet_valid`, `untrusted_chain`, `invalid_certificate` (Envoy verdict `false`, no closer cause found), `authority_not_accepted`, `san_mismatch`, `thumbprint_mismatch` |
 | `mtls_auth.matched_entry` | index into `accept` on allow |
+| `mtls_auth.source` | `handshake`, `header` or `bypass` — how the evaluated certificate arrived (§3.1.3) |
+| `mtls_auth.relayed_by` | the relay entry name when `source` is `header` |
 
-The reason attribute is for operators; the caller's `401` body never varies (§3.1.7). No private
+The reason attribute is for operators; the caller's `401` body never varies (§3.1.8). No private
 material and no full certificate is ever a span attribute.
 
 **Access log.** The default **JSON** format (`config.go:1228-1252`) has no TLS field today. Five are
@@ -798,26 +914,29 @@ certificate, or an XFCC header value (S6).
 
 ## 4. Data model
 
-Two new tables (D7). The repo's schema rule (`db-schema-changes.md`, R0-FROZEN) freezes every table
-already shipped to customers because there is no migration framework; a **new** table has no
-customer data, so the freeze does not apply and it needs only a guarded
-`CREATE TABLE IF NOT EXISTS` in each of `gateway-controller-db.sql`, `.postgres.sql` and
-`.sqlserver.sql` — **no `ALTER` path required**, since a guarded `CREATE` is correct against both
-fresh and already-provisioned databases. Apply R1–R10 via the `designing-db-schemas` skill before
-writing the DDL; the shapes below are indicative, not final.
+One shipped table gains two columns; one new table is added (D7). The repo's schema rule
+(`db-schema-changes.md`, R0-FROZEN) freezes every table already shipped to customers because there is
+no migration framework, but it **permits additive changes**: a new nullable-or-defaulted column, a
+new index, a new table. Apply R1–R10 via the `designing-db-schemas` skill before writing the DDL; the
+shapes below are indicative, not final.
 
-**`gw_client_ca_certificate`** — inbound trust anchors.
+**`certificates` (shipped) — two additive columns.** Client authorities reuse this table and its
+`/certificates` endpoint rather than a parallel store, so one id space, one name space and one set of
+handlers serve both trust directions.
 
 | Column | Notes |
 |---|---|
-| `uuid` | PK, UUIDv7, matching `StoredCertificate` convention |
-| `gateway_id` | scoping, as every existing table; PK is `(gateway_id, uuid)`, `UNIQUE(gateway_id, name)` |
-| `name` | operator-facing label |
-| `certificate` | PEM — **one authority**, optionally with the intermediates needed to build a path to it (§3.1.1). Never several unrelated authorities in one row |
-| `subject`, `issuer`, `not_before`, `not_after` | parsed metadata of the issuing certificate |
-| `created_at`, `updated_at` | audit |
+| `usage` | `upstream` (default) or `client`. `upstream` rows feed `upstream_ca_bundle` exactly as today; `client` rows feed `downstream_client_ca` (§3.1.4). Every existing row is `upstream` by default, so behaviour for current deployments is unchanged |
+| `role` | `client` (default) or `relay`; meaningful only when `usage = client`. A relay row may vouch for a header-carried certificate and may not be named in `accept` (§3.1.3) |
 
-**`gw_gateway_identity`** — outbound keypairs.
+Because a `CREATE TABLE IF NOT EXISTS` is a no-op on a provisioned database, both columns ship with a
+per-dialect `ALTER TABLE … ADD COLUMN … DEFAULT …` guarded for idempotency (R0-UPGRADE-PATH). The
+existing `UNIQUE(gateway_id, name)` stays: names are unique across both usages, and a reference is
+checked for the right usage at deploy time (§5.2.1). For `usage = client` rows the upload enforces one
+authority per row (§3.1.1); `upstream` rows keep today's bundle semantics and `cert_count`.
+
+**`gw_gateway_identity`** — outbound keypairs. New table, guarded `CREATE TABLE IF NOT EXISTS` in
+each of `gateway-controller-db.sql`, `.postgres.sql` and `.sqlserver.sql`, no `ALTER` path.
 
 | Column | Notes |
 |---|---|
@@ -829,8 +948,9 @@ writing the DDL; the shapes below are indicative, not final.
 | `key_algorithm`, `subject`, `issuer`, `not_before`, `not_after` | parsed metadata |
 | `created_at`, `updated_at` | audit |
 
-Note the PQC sizing rule (`post-quantum-cryptography.md` d.4): these are `BLOB`/`BYTEA`/`TEXT`,
-never `VARCHAR(512)`. An ML-DSA-65 signature is 3309 B and chains are unbounded in practice.
+Note the PQC sizing rule (`post-quantum-cryptography.md` d.4): certificate and key columns are
+`BLOB`/`BYTEA`/`TEXT`, never `VARCHAR(512)`. An ML-DSA-65 signature is 3309 B and chains are
+unbounded in practice.
 
 **Validation at write time, not first request.** A cert/key mismatch or an already-expired
 certificate must be rejected at upload with a clear error, not surfaced later as an opaque Envoy
@@ -853,9 +973,9 @@ developer reads:
 
 | Endpoint | Roles | Purpose |
 |---|---|---|
-| `POST /client-ca-certificates` | `admin` | Add an authority that may sign client certificates |
-| `GET /client-ca-certificates` | `admin, developer` | List the pool — developers read it to select |
-| `DELETE /client-ca-certificates/{id}` | `admin` | Remove an authority |
+| `POST /certificates` **(existing, extended)** | `admin` | New optional body fields: `usage` (`upstream` default, `client`) says where the certificate lands; `role: relay` (with `usage: client`) marks a front proxy's authority as allowed to relay certificates in a header (§3.1.3). Omit both and the call behaves exactly as today |
+| `GET /certificates` **(existing, extended)** | `admin, developer` | New optional `?usage=` filter; each item carries `usage`, `role`, `isLeaf` and, for `client`, `referencedByApis`. Developers read it to select authorities for `accept` |
+| `DELETE /certificates/{id}` **(existing, extended)** | `admin` | For `usage = client` rows the S19 and S8 refusals apply (`409`) |
 | `POST /gateway-identities` | `admin` | Add a certificate + key the gateway presents to backends |
 | `PUT /gateway-identities/{id}` | `admin` | Rotate one |
 | `GET /gateway-identities` | `admin, developer` | List — **never returns `privateKey`, for any role** |
@@ -865,11 +985,11 @@ developer reads:
 
 Response bodies for every success, warning and failure are fixed in §5.2.
 
-The existing `/certificates` endpoints are **unchanged** and are not listed above; the feature depends
-on them because an upstream's `tls.trustedCAs` names entries created there (§3.2.1).
-`/client-ca-certificates` and `/certificates` are opposite directions — who may call us, and who we
-may call. They are separate resources precisely so that adding a client authority cannot widen
-which backends the gateway trusts.
+The two trust directions — who may call us (`usage: client`) and who we may call (`usage: upstream`,
+named by `tls.trustedCAs`, §3.2.1) — share one endpoint and one table but never one bundle: each SDS
+secret is built from its own `usage` filter (§3.1.4), and S7's disjointness test is what guarantees
+that adding a client authority cannot widen backend trust. Callers that never send `usage` get
+today's behaviour unchanged.
 
 **Deliberately absent:** any endpoint binding a certificate to an application. `mtls-auth` produces
 an `AuthContext` and nothing else (D5); the gateway has no `/applications` endpoints and this design
@@ -881,7 +1001,7 @@ JWT-protected one, through the existing `/subscriptions` endpoints and `subscrip
 Every status code in §8.11–§8.15 resolves to one of the shapes below. Nothing is left to the
 implementer; where the platform already has a convention, it is used unchanged. Two audiences: the admin or developer calling the management API (§5.2.1, §5.2.2) and the operator
 diagnosing a failure (§5.2.3, §5.2.4). What the **data plane** returns is specified with the behaviour
-that produces it: the policy's `401` in §3.1.7 and the sterile backend-failure `503` in §3.2.6.
+that produces it: the policy's `401` in §3.1.8 and the sterile backend-failure `503` in §3.2.6.
 
 #### 5.2.1 Management API — errors
 
@@ -936,7 +1056,10 @@ policy `i`", and the real response carries the actual numbers.
 | `accept: []` | `spec.policies[i].params.accept` | omit `accept` to inherit every pooled authority, or list at least one entry |
 | entry without `ca` | `spec.policies[i].params.accept[j].ca` | `ca` is required and must name an authority in this gateway's client-CA pool |
 | `ca` not in pool | `spec.policies[i].params.accept[j].ca` | no client-CA authority named `<name>` exists on this gateway |
-| pool empty | `spec.policies[i]` | `mtls-auth` requires at least one client-CA authority; add one with `POST /client-ca-certificates` |
+| `ca` names a relay entry | `spec.policies[i].params.accept[j].ca` | `<name>` is a relay (front proxy) entry and cannot be accepted as a client |
+| `ca` names a `usage: upstream` certificate | `spec.policies[i].params.accept[j].ca` | `<name>` is a backend trust certificate (`usage: upstream`); `accept` takes `usage: client` authorities |
+| `trustedCAs` names a `usage: client` certificate | `spec.upstreamDefinitions[d].tls.trustedCAs[k]` | `<name>` is a client authority (`usage: client`); `trustedCAs` takes `usage: upstream` certificates |
+| pool empty | `spec.policies[i]` | `mtls-auth` requires at least one client authority; add one with `POST /certificates` and `usage: client` |
 | `match.uriSANs: []`, or an empty string in `uriSANs`/`dnsSANs` | `spec.policies[i].params.accept[j].match.uriSANs` (or `…[k]` for the empty element) | list at least one non-empty SAN, or remove `match` to accept any certificate from this authority |
 | `thumbprints: []` | `spec.policies[i].params.accept[j].thumbprints` | list at least one fingerprint, or remove `thumbprints` to accept any certificate from this authority |
 | malformed fingerprint | `spec.policies[i].params.accept[j].thumbprints[k]` | a fingerprint is the SHA-256 of the certificate as 64 hex characters (colons and a `sha256:` prefix are accepted) |
@@ -950,12 +1073,16 @@ policy `i`", and the real response carries the actual numbers.
 | `tls` on an `http://` target | `spec.upstreamDefinitions[d].upstreams[u].url` | `tls` is configured but this target is `http://`; every target of a definition with `tls` must be `https://` |
 | `tls` on an inline upstream | `spec.upstream.main.tls` | `tls` is not supported on an inline upstream; move it to `upstreamDefinitions` and reference it |
 
-**`400` on `POST /client-ca-certificates` and `POST`/`PUT /gateway-identities`** — `field` is a
-top-level request property.
+**`400` on `POST /certificates` (with `usage: client`) and `POST`/`PUT /gateway-identities`** — `field`
+is a top-level request property. Rows marked † apply only when `usage` is `client`; an `upstream`
+upload keeps today's validation.
 
 | Input | `field` | `message` |
 |---|---|---|
-| two unrelated CAs in one PEM | `certificate` | this PEM contains more than one unrelated authority; upload each as its own entry |
+| two unrelated CAs in one PEM † | `certificate` | this PEM contains more than one unrelated authority; upload each as its own entry |
+| `role` not `client` or `relay` | `role` | `role` must be `client` or `relay` |
+| `usage` not `upstream` or `client` | `usage` | `usage` must be `upstream` or `client` |
+| `role` given with `usage: upstream` | `role` | `role` applies only to `usage: client` certificates |
 | private key in a CA upload | `certificate` | the upload contains a private key; a client-CA entry accepts certificates only |
 | expired certificate | `certificate` | the certificate expired on `<notAfter>` |
 | non-PEM or malformed | `certificate` | the value is not a PEM-encoded certificate |
@@ -992,7 +1119,7 @@ reference and whose `message` names the API:
 `id`, `state` and timestamps; its OpenAPI schema is named `ResourceStatus`. That object gains
 `warnings`, an optional read-only array of `{code, field, message}` — in the example below it is
 `status.warnings`. It is present only when non-empty and absent otherwise (§8.16). The
-`POST /client-ca-certificates` and `POST`/`PUT /gateway-identities` responses have no `status` object,
+`POST /certificates` and `POST`/`PUT /gateway-identities` responses have no `status` object,
 so on those the same `warnings` array sits at the top level. Every warning is also written to the
 controller log at `WARN` with the same `code`.
 
@@ -1022,7 +1149,7 @@ configuration key, consistent with §5.3 — and applies to every pooled authori
 
 | Channel | Mechanism | Who sees it |
 |---|---|---|
-| Pull | `CERT_EXPIRES_SOON` in `warnings[]` on `GET /client-ca-certificates`, `GET /gateway-identities`, and on the deploy response of any API that names the entry | whoever lists or deploys |
+| Pull | `CERT_EXPIRES_SOON` in `warnings[]` on `GET /certificates`, `GET /gateway-identities`, and on the deploy response of any API that names the entry | whoever lists or deploys |
 | Log | one `WARN` line per entry per day while inside the horizon, carrying the code, the entry name and `notAfter` | whoever reads controller logs |
 | Metric | the existing gauge `certificate_expiry_seconds{cert_id, cert_name}` (`pkg/metrics/metrics.go:305`, declared today but never set) is set to the entry's `notAfter` for every pooled authority and identity, alongside the `/certificates` entries it was declared for | operators alerting in Prometheus, e.g. `certificate_expiry_seconds - time() < 30*86400` |
 
@@ -1033,7 +1160,7 @@ needs no gateway-side notification machinery.
 |---|---|---|
 | `MTLS_ACCEPT_INHERITS_POOL` | `accept` omitted while the pool holds >1 authority | `spec.policies[i].params.accept` |
 | `MTLS_ACCEPT_UNNARROWED` | an entry has neither `match` nor `thumbprints` while the pool holds >1 authority | `spec.policies[i].params.accept[j]` |
-| `MTLS_AUTH_NOT_FIRST` | an auth policy precedes `mtls-auth` in the chain (§3.1.5) | `spec.policies[k]` |
+| `MTLS_AUTH_NOT_FIRST` | an auth policy precedes `mtls-auth` in the chain (§3.1.6) | `spec.policies[k]` |
 | `MTLS_THUMBPRINT_NORMALISED` | a fingerprint was rewritten to canonical form; `message` carries the canonical value | `spec.policies[i].params.accept[j].thumbprints[k]` |
 | `TLS_IDENTITY_EXPIRED` | `tls.identity` names an identity whose certificate has expired since upload | `spec.upstreamDefinitions[d].tls.identity` |
 | `TLS_VERIFY_HOSTNAME_DISABLED` | `verifyHostName: false` | `spec.upstreamDefinitions[d].tls.verifyHostName` |
@@ -1041,6 +1168,7 @@ needs no gateway-side notification machinery.
 | `CLIENT_CA_IS_LEAF` | uploaded certificate lacks `CA:TRUE` (self-signed client, §3.1.2) | `certificate` |
 | `IDENTITY_NO_CLIENTAUTH_EKU` | identity certificate has an EKU extension without `clientAuth` | `certificate` |
 | `CERT_EXPIRES_SOON` | a pooled authority or identity expires within **30 days**; on `GET` listings and on deploy responses that reference it | `notAfter` |
+| `HEADER_CERT_BYPASS_ACTIVE` | `trust_any` is true: the client-certificate header is believed from any connection. On every `mtls-auth` deploy response and at controller startup (§3.1.3) | — |
 
 #### 5.2.3 Diagnostics — `GET /tls/handshake-failures`
 
@@ -1125,11 +1253,23 @@ admin or developer diagnosing their own upstream; it is never surfaced to API ca
 
 ---
 
-### 5.3 TOML — nothing new
+### 5.3 TOML — one block, for the one thing that is a deployment fact
 
 There is deliberately **no** `client_validation` block and no enable flag. The listener's client
-validation is derived from deployed APIs (§3.1.4), so adding configuration for it would create a
+validation is derived from deployed APIs (§3.1.5), so adding configuration for it would create a
 second source of truth that can disagree with the first.
+
+The one addition is for header-relayed certificates (§3.1.3), because whether a front proxy sits in
+front of the gateway is a property of the deployment that no API definition can derive:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `router.downstream_tls.client_certificate_header.name` | `X-WSO2-CLIENT-CERTIFICATE` | header the proxy sets; override for ALB (`X-Amzn-Mtls-Clientcert`) or nginx names |
+| `…client_certificate_header.trust_any` | `false` | believe the header from any connection — the trusted-network posture; warns loudly while on |
+| `…client_certificate_header.forward_to_backend` | `false` | forward a **believed** header to backends; an ignored header is always deleted |
+
+Which connections may relay is **not** TOML: it is the `role: relay` mark on a pool entry, set through
+the management API by the admin who uploads the proxy's authority.
 
 The existing `[router.downstream_tls]` and `[router.upstream.tls]` blocks are unchanged, except
 that `verify_host_name` gains a per-upstream override (§3.2.1) while remaining the gateway-wide
@@ -1194,6 +1334,11 @@ misconfiguration. Two mitigations — the first required, the second deferred by
    act — and the policy-engine and controller ship in lockstep. Revisit before the first
    `mtls-auth` major bump.
 
+**`/certificates` gains optional fields.** `usage` and `role` on `POST`, `?usage=` on `GET`, and new
+read-only fields on every item. A caller that sends neither field gets exactly today's behaviour; a
+caller that persists the response shape must tolerate the new fields. The table change is additive
+(§4) with a guarded per-dialect `ALTER`.
+
 **Access-log JSON fields (§3.3).** Five TLS fields are added to the default JSON access-log format.
 Additive for JSON consumers; the positional text format is unchanged. Call it out in the release notes
 alongside the `503` body change below.
@@ -1227,13 +1372,13 @@ each one.
 | # | Requirement | Rule |
 |---|---|---|
 | S1 | Absent/invalid certificate → **deny**. The nil accessor must never mean "not required". | GO-AUTH-001 |
-| S2a | **Every certificate rejection** — no certificate, Envoy verdict `false` (untrusted, expired, depth, key usage), authority not in `accept`, SAN or fingerprint mismatch — returns one uniform 401 body, fixed in §3.1.7. The response never varies by cause; the cause goes to telemetry only. | error-handling d.4/d.5 |
+| S2a | **Every certificate rejection** — no certificate, Envoy verdict `false` (untrusted, expired, depth, key usage), authority not in `accept`, SAN or fingerprint mismatch — returns one uniform 401 body, fixed in §3.1.8. The response never varies by cause; the cause goes to telemetry only. | error-handling d.4/d.5 |
 | S2b | Only failures that occur **before a certificate can be evaluated** — protocol/cipher/ALPN mismatch, malformed `ClientHello` — are TLS alerts with no HTTP response. They are recorded by §5.2.3. Note that CA membership is observable at the TLS layer regardless (the TLS 1.2 `CertificateRequest` advertises the accepted-CA list); enable Envoy's suppress-client-CA-list option to reduce that disclosure. | inherent |
 | S3 | Identity comparison is **constant-time** (`subtle.ConstantTimeCompare`, as `basic-auth` does) and canonicalized. Never substring, never case-folded DN equality. | go-cors-validation d.1 (same class) |
 | S4 | A certificate widens *which pool entries an API accepts*, never which gateway's pool or which API. Identity is decided only from Envoy-asserted connection attributes, never from request headers or body. | GO-AUTH-005 (gateway scope) |
 | S5 | Whether a route requires a certificate is decided by **which policy chain the controller assigned to that route** — a structural match against the router/policy configuration — never by a request-shape heuristic. A route whose chain includes `mtls-auth` but cannot be resolved at request time is **denied**, not passed through. | GO-AUTH-017 |
 | S6 | Private keys: never in xDS `inline_bytes`, never returned by a read API, never in a config dump, never logged, encrypted at rest, file perms hard-fail if permissive. | xds-security d.3, GO-AUTH-003, GO-AUTH-018 |
-| S7 | Client-CA trust is a **separate bundle** from upstream trust. Uploading a client CA must not widen backend trust. | trust-boundary |
+| S7 | Client-CA trust is a **separate bundle** from upstream trust even though both live in `certificates`: `downstream_client_ca` is built from `usage = client` rows only and `upstream_ca_bundle` from `usage = upstream` rows only. A test asserts the two bundles are disjoint for any mixed table. Uploading a client authority must not widen backend trust. | trust-boundary |
 | S8 | A deployed API attaching `mtls-auth` while the client-CA pool is **empty** must be refused at deploy time, and a snapshot must never reference an empty bundle: `GetSecret` errors on an empty bundle (`sds.go:92-95`), the secret is omitted from the snapshot, and a listener referencing a never-arriving secret stays **warming** — an outage of `https_port` for *every* API, mTLS or not. Validate the effective outcome, as `ValidateXDSServerTLS` does. | GO-AUTH-011 |
 | S9 | Cert-store load failure is a **startup failure**, not a warn-and-continue (fixes the existing fail-open). | GO-AUTH-011 |
 | S10 | XFCC is `SANITIZE_SET`. A client-supplied XFCC header can never survive to the backend or be read as identity. | N1 |
@@ -1247,12 +1392,13 @@ each one.
 | S18 | A dangling reference — `accept` naming an authority absent from the pool, or `tls.identity` naming a missing identity — is refused at deploy time. Silently denying one partner is worse than refusing the change. | GO-AUTH-017 |
 | S19 | Removing a pool authority or an identity that a deployed API **names** (`accept[].ca` or `tls.identity`) is **refused with `409`** listing the referencing APIs — the delete-time mirror of S18. APIs that merely inherit the pool are not references. No existing delete endpoint checks references; this one must. | GO-AUTH-001 |
 | S20 | `X-Forwarded-Client-Cert` reaches a backend **only** on a route whose chain contains `mtls-auth` and whose policy accepted the certificate (D11). Every other route removes it with route-level `request_headers_to_remove`; a presented-but-untrusted or valid-but-irrelevant certificate never reaches a public backend as an XFCC identity. | N1 / GO-AUTH-017 |
+| S21 | A client certificate carried in a header is believed **only** when the connection's own certificate chains to a pool entry marked `role: relay`, or when `trust_any` is explicitly true — never because the connection's certificate is merely valid against the pool, and never by default. An ignored header changes nothing about the request's identity. The relayed certificate is parsed, date-checked and path-verified by the policy before `accept` runs, since no handshake did. The header is deleted before every backend unless `forward_to_backend` is on and the header was believed. `trust_any` produces a startup `WARN` and a deploy warning while on. | GO-AUTH-001 / GO-AUTH-017 / N1 |
 
 ---
 
 ## 8. Testing
 
-Organised by the user stories in §3.1.4 and §3.2.1, because the failure modes that matter are
+Organised by the user stories in §3.1.5 and §3.2.1, because the failure modes that matter are
 behavioural rather than unit-level. §8.1 is a prerequisite for everything else.
 
 ### 8.1 Test PKI fixtures
@@ -1429,6 +1575,11 @@ The tests that would catch a regression into a vulnerability. Not optional.
   is a non-goal.
 - Forged XFCC **alongside** a valid but different certificate → the handshake identity wins.
 - Header injection into the backend-facing XFCC — a client-supplied value never survives.
+- **Header impersonation (S21):** partner A connects directly with a valid certificate and sends the
+  configured header carrying partner B's certificate → authenticated as **A**, header ignored and
+  deleted, `DEBUG` line emitted. The same request over a plain connection → `401 no_certificate`.
+  The same header from the relay's connection → authenticated as **B** with `relayedBy` set. This is
+  the test that separates our design from APIM's.
 - **XFCC scoping (S20, D11):** a valid certificate presented to a **public** API → the backend
   receives no `x-forwarded-client-cert`; an **invalid** certificate presented to a public API → `200`,
   and the backend receives no XFCC; a valid, accepted certificate on an `mtls-auth` API → the backend
@@ -1492,7 +1643,7 @@ both halves.
 - `POST /rest-apis/{handle}/upstreams/{name}/tls-test` reports presented identity, verified backend and hostname match.
 - **Metrics (§3.3):** a policy deny increments `policy_executions_total{policy_name="mtls-auth", status="denied"}`
   and nothing `mtls-auth`-specific; a handshake failure increments `tls_handshake_failures_total{reason}`
-  with the same reason the ring buffer records; `client_ca_certificates_total` and
+  with the same reason the ring buffer records; `certificates_total{usage}` and
   `gateway_identities_total` track pool and identity writes; `certificate_expiry_seconds` is set for
   every pooled authority, identity and `/certificates` entry.
 - **Traces (§3.3):** the `mtls-auth` span carries `tls.client.subject`, `tls.client.issuer` (entry
@@ -1512,7 +1663,7 @@ both halves.
   mTLS — measure before making any of this a default.
 - ext_proc payload growth from `connection.peer_certificate` (a full PEM on every request to that
   listener). It is required in v1: the authority signature check and full-SAN matching both need it.
-- XFCC header size with `chain: true` (§3.1.6) on requests carrying a client certificate, as seen by
+- XFCC header size with `chain: true` (§3.1.7) on requests carrying a client certificate, as seen by
   both the policy engine and the backend.
 - `accept` evaluation and signature verification at realistic pool sizes and entry counts, not toy.
 
@@ -1530,6 +1681,7 @@ means the `POST /rest-apis` response; **request-time** means what a caller sees.
 | `- ca: X` only, X in pool | `201` | any cert issued by X |
 | `- ca: X` only, pool has >1 authority | `201` with warning (unnarrowed entry) | as above |
 | `- ca: X`, X **not** in pool | **`400`** naming X (S18) | — |
+| `- ca: X`, X has `role: relay` | **`400`** — a relay cannot be accepted as a client | — |
 | entry missing `ca` | **`400`** — `ca` required | — |
 | `match.uriSANs: [A]` | `201` | cert from X carrying URI SAN A |
 | `match.uriSANs: [A, B]` | `201` | cert from X carrying A **or** B (OR within the list) |
@@ -1551,11 +1703,11 @@ means the `POST /rest-apis` response; **request-time** means what a caller sees.
 | unknown param key (`mode`, `applicationId`, anything) | **`400`** — `additionalProperties: false` in the policy schema (S14 residual) | — |
 | `version: v2` when only v1 loaded | **`400`** — existing `policy_validator.go:196` behaviour | — |
 | `mtls-auth` attached **twice** at one scope | **`400`** — "`mtls-auth` may appear once per scope; use several `accept` entries instead". Enforced by the policy's own validation, not a general duplicate-policy rule (the controller has none today and other policies may legitimately repeat) | — |
-| `mtls-auth` at API level **and** on an operation | **`400`** naming the route — the merged chain would contain it twice and AND the two `accept` lists (§3.1.4); attach at one level only | — |
+| `mtls-auth` at API level **and** on an operation | **`400`** naming the route — the merged chain would contain it twice and AND the two `accept` lists (§3.1.5); attach at one level only | — |
 | `mtls-auth` on an operation only | `201` | only that operation requires a cert; siblings do not |
 | `mtls-auth` on a gateway with `router.https_enabled: false` | **`400`** — "`mtls-auth` requires the HTTPS listener"; a certificate cannot be requested over plaintext | — |
 | `mtls-auth` API called over the plaintext `listener_port` (HTTPS enabled) | `201` (nothing to refuse) | `401` — no certificate can exist on that connection; fail-closed, not an error condition |
-| `jwt-auth` listed **before** `mtls-auth` | `201` **with warning** (§3.1.5) | both enforced, in listed order |
+| `jwt-auth` listed **before** `mtls-auth` | `201` **with warning** (§3.1.6) | both enforced, in listed order |
 
 ### 8.12 Input matrix — upstream `tls` block
 
@@ -1581,11 +1733,15 @@ means the `POST /rest-apis` response; **request-time** means what a caller sees.
 
 ### 8.13 Input matrix — management endpoints
 
-**`POST /client-ca-certificates`** (admin)
+**`POST /certificates` with `usage: client`** (admin) — rows without `usage` are the existing behaviour and are not re-tested here
 
 | Payload | Result |
 |---|---|
 | one CA certificate (`CA:TRUE`) | `201`, metadata returned |
+| the same with `role: relay` | `201`; listing shows `role: relay`; header mode turns on if it was off |
+| `usage` omitted | `201` as an `upstream` certificate — today's behaviour, unchanged |
+| a name already used by an `upstream` certificate | `409` — one name space across usages |
+| `role: proxy` (unknown) | `400` |
 | issuing CA + its root in one PEM | `201`; `subject` is the issuing certificate |
 | a **leaf** (no `CA:TRUE`) | `201` — legitimate for self-signed clients (§3.1.2); response flags `isLeaf: true` |
 | **two unrelated** CAs in one PEM | **`400`** — "this PEM contains more than one unrelated authority; upload each as its own entry" (§3.1.1). Test: every certificate in the body must sign or be signed by another in the same body; the entry's identity is the one no other certificate in the body is signed by. A chain (issuing + root) passes; two roots do not |
@@ -1601,11 +1757,11 @@ means the `POST /rest-apis` response; **request-time** means what a caller sees.
 | caller is `developer` | **`403`** |
 | unauthenticated | `401` |
 
-**`GET /client-ca-certificates`** — `admin` and `developer` succeed; `referencedByApis` reflects only
+**`GET /certificates?usage=client`** — `admin` and `developer` succeed; `referencedByApis` reflects only
 APIs that name the entry in `accept` (inheriting APIs are not counted); private material never
 present (there is none).
 
-**`DELETE /client-ca-certificates/{id}`** (admin)
+**`DELETE /certificates/{id}` for a `usage: client` row** (admin)
 
 | State | Result |
 |---|---|
@@ -1652,25 +1808,25 @@ identity.
 | # | Given | Sequence | Why |
 |---|---|---|---|
 | O1 | pool is **empty** | 1. developer deploys an API with `accept: [ca-a]` → **`400`**, `errors[0].field = …accept[0].ca`, "no client-CA authority named `ca-a` exists on this gateway" 2. admin adds `ca-a` → `201` 3. developer redeploys the same YAML → **`201`**; `ca-a` certificates authenticate | S18: a name that resolves to nothing is refused when written, never stored as a silent deny. Nothing re-resolves it later, so the redeploy is required. |
-| O2 | pool is empty | 1. admin adds `ca-a` → `201` 2. developer deploys `accept: [ca-a]` → `201`; `ca-a` certificates authenticate | The intended order: admin curates, developer selects (§3.1.4). |
-| O2a | pool is **empty** | 1. developer deploys an API with `mtls-auth` and **`accept` omitted** → **`400`**, `field = spec.policies[0]`, "`mtls-auth` requires at least one client-CA authority; add one with `POST /client-ca-certificates`" 2. admin adds `ca-a` → `201` 3. developer redeploys → `201`; the API inherits `{ca-a}` and follows the pool from then on (O3) | S8: inheriting an empty pool would deploy an API that denies every caller. Together with O7 (the last authority cannot be removed while mTLS APIs exist) this makes "mTLS API on an empty pool" an unreachable state, so no request-time behaviour needs defining for it. |
+| O2 | pool is empty | 1. admin adds `ca-a` → `201` 2. developer deploys `accept: [ca-a]` → `201`; `ca-a` certificates authenticate | The intended order: admin curates, developer selects (§3.1.5). |
+| O2a | pool is **empty** | 1. developer deploys an API with `mtls-auth` and **`accept` omitted** → **`400`**, `field = spec.policies[0]`, "`mtls-auth` requires at least one client authority; add one with `POST /certificates` and `usage: client`" 2. admin adds `ca-a` → `201` 3. developer redeploys → `201`; the API inherits `{ca-a}` and follows the pool from then on (O3) | S8: inheriting an empty pool would deploy an API that denies every caller. Together with O7 (the last authority cannot be removed while mTLS APIs exist) this makes "mTLS API on an empty pool" an unreachable state, so no request-time behaviour needs defining for it. |
 | O3 | pool = `{ca-a}` | 1. developer deploys with **`accept` omitted** → `201`, response echoes `accept: [ca-a]` 2. admin adds `ca-b` → `201` 3. a `ca-b` certificate calls the API → **`200`, no redeploy** 4. `GET /rest-apis/{handle}` → resolved `accept` shows `[ca-a, ca-b]`; the stored definition still has no `accept` key | Omitted `accept` is a standing instruction, re-resolved on every pool change and pushed in the next policy snapshot. The `GET` proves the read model tracks the pool, not the deploy-time echo. |
 | O4 | pool = `{ca-a}` | 1. developer deploys `accept: [ca-a]` → `201` 2. admin adds `ca-b` → `201` 3. a `ca-b` certificate calls the API → handshake **succeeds** (the pool trusts `ca-b`), policy returns **`401`** | S16: pool membership is not authorization. Contrast with O3 — the only difference is whether `accept` was written. |
 | O5 | pool = `{ca-a, ca-b}`, API deployed with `accept` omitted | 1. admin removes `ca-a` → `204` 2. a `ca-a` certificate on a **new** connection → `401` (`untrusted_chain`): Envoy reports `valid = false` 3. an **already-open** `ca-a` connection keeps working until it closes or idles out | D10: pool changes reach new handshakes only. Inheriting APIs are not references, so nothing is refused and nothing is surfaced — the documented default. |
 | O6 | pool = `{ca-a, ca-b}`, API deployed with `accept: [ca-a]` | 1. admin removes `ca-a` → **`409`**, `errors[]` lists the API and the referencing path 2. the API keeps working unchanged | S19: a named dependency cannot be deleted from under a running API. The admin edits the API's `accept` first. |
 | O7 | pool = `{ca-a}` only, one API attaches `mtls-auth` (with or without `accept`) | 1. admin removes `ca-a` → **`409`**, "cannot remove the last client-CA authority while 1 deployed API attaches `mtls-auth`" | S8: an empty pool with mTLS APIs would leave the listener referencing an empty bundle — a warming `https_port` or a silent deny-all. Applies even when no API names `ca-a`. |
 
-**Group 2 — the listener follows the deployed APIs (D1, D2, §3.1.4 derived config)**
+**Group 2 — the listener follows the deployed APIs (D1, D2, §3.1.5 derived config)**
 
 | # | Given | Sequence | Why |
 |---|---|---|---|
-| O8 | pool = `{ca-a}`, **no** API attaches `mtls-auth`, clients connected to public APIs | 1. developer deploys the **first** mTLS API → `201` 2. next snapshot: listener gains the validation context 3. **existing** connections to public APIs are unaffected 4. **new** connections on `https_port` are asked for a certificate (and may decline) | The validation context is derived, not switched on. Adding it must not drain existing connections (SDS, §3.1.3). |
+| O8 | pool = `{ca-a}`, **no** API attaches `mtls-auth`, clients connected to public APIs | 1. developer deploys the **first** mTLS API → `201` 2. next snapshot: listener gains the validation context 3. **existing** connections to public APIs are unaffected 4. **new** connections on `https_port` are asked for a certificate (and may decline) | The validation context is derived, not switched on. Adding it must not drain existing connections (SDS, §3.1.4). |
 | O9 | one mTLS API deployed | 1. developer removes that API (or redeploys it without `mtls-auth`) 2. next snapshot: validation context removed 3. new connections are no longer asked; nothing else changes | The mirror of O8: the last attachment leaving turns asking off. |
 | O10 | two mTLS APIs deployed | 1. developer redeploys **one** of them without `mtls-auth` → `201` 2. that API serves callers with no certificate 3. the listener **still asks** every new connection, because the other API still attaches the policy | Enforcement is per API; asking is per listener (§3.1.1). |
 | O11 | API deployed with `thumbprints: ["old"]`, a client holding `new` is connected and getting `401` | 1. developer redeploys with `thumbprints: ["old", "new"]` → `201` 2. the client's **next request on the already-open connection** → `200` | D10: `accept` is evaluated per request, so an edit takes effect without a reconnect. |
 | O17 | pool = `{ca-a, ca-b}` | 1. deploy API-1 with `accept: [ca-a]` and API-2 with `accept: [ca-b]`, in either order 2. a `ca-a` certificate → `200` on API-1, `401` on API-2; a `ca-b` certificate → the reverse | Per-API selection is independent; deploy order is irrelevant. |
 | O21 | API attaches `mtls-auth` **and** `subscription-validation`; caller has a valid certificate but no subscription | 1. call → **`403`** from `subscription-validation` 2. subscription created 3. same connection, next call → `200` | D5: the two policies are independent; a certificate never satisfies the subscription check and vice versa. |
-| O22 | API deployed with `mtls-auth` at API level | 1. developer redeploys adding `mtls-auth` on one operation as well → **`400`** naming that route 2. the previous deployment stays in force | §3.1.4 one-attachment-per-route: both would run and AND their `accept` lists. |
+| O22 | API deployed with `mtls-auth` at API level | 1. developer redeploys adding `mtls-auth` on one operation as well → **`400`** naming that route 2. the previous deployment stays in force | §3.1.5 one-attachment-per-route: both would run and AND their `accept` lists. |
 
 **Group 3 — outbound identities (S18, S19, D6)**
 
@@ -1686,10 +1842,10 @@ identity.
 | # | Given | Sequence | Why |
 |---|---|---|---|
 | O15 | mTLS APIs deployed, controller restarts | 1. controller restarts 2. listener is re-derived from persisted APIs and pool **identically** 3. there is **no window** in which the listener lacks its validation context while APIs attach `mtls-auth` | Derived config must be reproducible from storage alone; a gap would either drop mTLS callers or, worse, serve without asking. |
-| O15a | mTLS APIs deployed, operator sets `router.https_enabled: false`, controller restarts | 1. startup **refused**, log names the APIs 2. nothing is served | GO-AUTH-011: the effective outcome (mTLS APIs with no TLS listener) is invalid; fail closed at startup rather than serve 401s forever (§3.1.4). |
+| O15a | mTLS APIs deployed, operator sets `router.https_enabled: false`, controller restarts | 1. startup **refused**, log names the APIs 2. nothing is served | GO-AUTH-011: the effective outcome (mTLS APIs with no TLS listener) is invalid; fail closed at startup rather than serve 401s forever (§3.1.5). |
 | O16 | Envoy reconnects to the controller (restart, network blip) | 1. snapshot re-sync 2. SDS secrets (`listener_cert`, `downstream_client_ca`, identities) arrive **before or with** the listener 3. the listener is never left **warming** | §3.2.4 / S8: a listener referencing a secret that has not arrived does not serve; the snapshot gate must include listener-referenced secrets. |
-| O18 | pool is empty | 1. admin's `POST /client-ca-certificates` for `ca-a` and developer's deploy with `accept: [ca-a]` arrive **near-simultaneously** 2. if the CA commit landed first, the deploy → `201`; otherwise → `400` 3. the deploy must read **committed** pool state, never a stale cache | A spurious S18 from a cache would look like a bug to the developer; correctness requires read-after-commit. |
-| O19 | pool = `{ca-a}`, `ca-a`'s `notAfter` passes while APIs name it | 1. `ca-a` certificates on new connections → `401` (`untrusted_chain`): Envoy validates the chain including the authority's own dates and reports `valid = false` 2. `GET /client-ca-certificates` shows it expired; `CERT_EXPIRES_SOON` warned 30 days beforehand 3. a deploy naming it → `201` with a warning | Expiry is surfaced, never silent. Deploy is not refused because the admin may be mid-rotation. |
+| O18 | pool is empty | 1. admin's `POST /certificates` (`usage: client`) for `ca-a` and developer's deploy with `accept: [ca-a]` arrive **near-simultaneously** 2. if the CA commit landed first, the deploy → `201`; otherwise → `400` 3. the deploy must read **committed** pool state, never a stale cache | A spurious S18 from a cache would look like a bug to the developer; correctness requires read-after-commit. |
+| O19 | pool = `{ca-a}`, `ca-a`'s `notAfter` passes while APIs name it | 1. `ca-a` certificates on new connections → `401` (`untrusted_chain`): Envoy validates the chain including the authority's own dates and reports `valid = false` 2. `GET /certificates` shows it expired; `CERT_EXPIRES_SOON` warned 30 days beforehand 3. a deploy naming it → `201` with a warning | Expiry is surfaced, never silent. Deploy is not refused because the admin may be mid-rotation. |
 | O20 | gateway A has `ca-a` in its pool, gateway B does not | 1. the same API YAML with `accept: [ca-a]` is deployed to both 2. A → `201`; B → **`400`** | Pools are per gateway (§3.1.1 scope). The same definition is not portable until each gateway's pool is prepared. |
 
 ### 8.15 Request-time matrix — client × API
@@ -1824,6 +1980,43 @@ depends on it.
 - The policy never adds a certificate from the XFCC chain to `Roots`; a chain whose final
   certificate is an untrusted root must fail even though it is self-consistent.
 
+
+### 8.18 Header-relay matrix — every way a header and a connection can combine
+
+`API-M` has `mtls-auth` with `accept: [{ca: partner-a-root}]`. Pool: `partner-a-root`,
+`partner-b-root`, `edge-lb-ca` (`role: relay`). The header carries `client-b` (issued by
+`partner-b-root`) unless stated. "Believed" means the header certificate was evaluated against
+`accept`; here `client-b` is **not** accepted by `API-M`, so a believed header yields
+`401 authority_not_accepted` — the point of most rows is *which* certificate was evaluated, shown in
+the `mtls_auth.source` and subject columns.
+
+| # | Header mode | Header | Connection | Evaluated cert | Result | `source` |
+|---|---|---|---|---|---|---|
+| H1 | off | absent | `client-a` valid | `client-a` | `200` | `handshake` |
+| H2 | off | present | `client-a` valid | `client-a` (header deleted) | `200` | `handshake` |
+| H3 | off | present | none | — | `401 no_certificate` | — |
+| H4 | relay | present | none | — (header ignored) | `401 no_certificate` | — |
+| H5 | relay | present | `client-a` **expired** | — (header ignored) | `401 expired` | — |
+| H6 | relay | present (`client-b`) | `client-a` valid | **`client-a`** | `200` as A, `DEBUG` logged | `handshake` |
+| H7 | relay | present (`client-a`) | `edge-lb` valid | **`client-a`** | `200`, `relayedBy = edge-lb-ca` | `header` |
+| H8 | relay | present (`client-b`) | `edge-lb` valid | `client-b` | `401 authority_not_accepted` | `header` |
+| H9 | relay | present (garbage) | `edge-lb` valid | — | `401 invalid_certificate` | `header` |
+| H10 | relay | present (`client-a` **expired**) | `edge-lb` valid | — | `401 expired` — the policy checked dates, not Envoy | `header` |
+| H11 | relay | present (cert from no pooled authority) | `edge-lb` valid | — | `401 untrusted_chain` | `header` |
+| H12 | relay | absent | `edge-lb` valid | `edge-lb` | `401 authority_not_accepted` — a relay is not a client | `handshake` |
+| H13 | relay | present (`client-a`) | `edge-lb` valid but **no `match`** on a narrowed relay entry | `edge-lb` | `401 authority_not_accepted`, header ignored | `handshake` |
+| H14 | bypass | present (`client-a`) | none | `client-a` | `200`, `HEADER_CERT_BYPASS_ACTIVE` was warned | `bypass` |
+| H15 | bypass | present (`client-a`) | `client-b` valid | `client-a` — the connection is not consulted | `200` as A | `bypass` |
+| H16 | any | present | public API (no `mtls-auth`) | none | `200`; header **deleted** at the backend | — |
+| H17 | relay, `forward_to_backend` | present (`client-a`) | `edge-lb` valid, public API | none | `200`; header **forwarded** to the backend | — |
+| H18 | relay, `forward_to_backend` | present | `client-a` valid, public API | none | `200`; header **deleted** — not believed | — |
+| H19 | relay | deploy `accept: [{ca: edge-lb-ca}]` | — | — | `400` (§5.2.1) | — |
+| H20 | relay | delete `edge-lb-ca`, `trust_any` false | — | — | `204`; header mode off; H7 now behaves as H6 | — |
+
+Unit tests the matrix implies: header parsing accepts URL-encoded PEM, PEM and bare base64 and
+rejects everything else; the relay path check uses the same `x509.Verify` parameters as `accept`
+(§3.1.1); `Properties.source` is set on every allow.
+
 ---
 
 ## 9. Phasing
@@ -1853,7 +2046,8 @@ upstream (it does not extend it), as §8.5 and §8.12 already test.
 
 **M3 — Inbound.** ext_proc attributes, SDK field and accessor, proto, policy-engine population,
 `mtls-auth` policy, the CA pool endpoints, `accept` resolution and deploy-time validation. Both
-identity forms — authority+SAN and thumbprint — ship here. Carries the three-repo release ordering
+identity forms — authority+SAN and thumbprint — ship here, and so does header relay (D12): the
+`role` column, the TOML block, and the relay branch of the policy. Carries the three-repo release ordering
 of §6.
 
 Running these in parallel means M1 is a hard bottleneck for both, and the two teams share the
@@ -1953,7 +2147,7 @@ treats a JWT-protected one: it looks for its `Subscription-Key` header and decid
 Two things follow, and both are simplifications:
 
 - **No coordination between the two policies.** Each does its job; a caller must satisfy both.
-  Order matters only for cost (§3.1.5), not for correctness.
+  Order matters only for cost (§3.1.6), not for correctness.
 - **No control-plane dependency.** Nothing here needs a platform-api resource, an event, or a
   gateway-side credential store, which is what lets both identity forms ship in v1.
 
@@ -1972,32 +2166,28 @@ Therefore backend mTLS goes on a new **`Upstream.tls` block**, alongside trust s
 request-scoped can influence it only by selecting a *different cluster* — never by changing an
 existing connection's certificate.
 
-### A.7 D7 — New tables, not the frozen `certificates` table
+### A.7 D7 — Client authorities on the existing `/certificates`; identities in a new table
 
 `certificates` is a shipped table and therefore frozen under the repo's schema rule
-(`db-schema-changes.md` R0-FROZEN: no retyping, renaming or constraint changes on customer data). More importantly,
-every row in it feeds **one flat bundle** used for upstream verification (`certstore.go:73-130`).
-Adding client-CA certificates to that bundle — even with a `usage` tag — risks a change that
-silently widens which backends the gateway trusts. That is a trust-boundary violation introduced
-by a storage convenience.
+(`db-schema-changes.md` R0-FROZEN: no retyping, renaming or constraint changes on customer data) — but
+additive defaulted columns are permitted, and `usage` and `role` are exactly that. An earlier draft of
+this decision created a parallel `/client-ca-certificates` endpoint and `gw_client_ca_certificate`
+table, on the argument that every `certificates` row feeds one flat bundle (`certstore.go:73-130`) and
+mixing client authorities into it risked widening backend trust. That risk is real but it is a
+**loading** concern, not a **storage** one: filtering each SDS bundle by `usage` is a one-line query
+change and a one-test guarantee (S7), while a second endpoint doubles the handlers, the id space, the
+name space, the listing, the docs and the guide for what an operator sees as one kind of object — a
+certificate the gateway trusts, in one direction or the other. Reusing the endpoint with a `usage`
+field is what the owner asked for and what an operator would expect.
 
-Two **new** tables instead. New tables need only a guarded `CREATE TABLE IF NOT EXISTS` per
-dialect and no `ALTER` path (R0-UPGRADE-PATH), so this is both safer and *less* migration work:
-
-- `gw_client_ca_certificate` — inbound trust anchors (CA bundle for validating client certs).
-- `gw_gateway_identity` — outbound keypairs (cert chain + encrypted private key). Named for what
-  it holds — *our* identity — so it is not mistaken for a sibling of `gw_client_ca_certificate`.
-
-The existing `certificates` table and `/certificates` API are left untouched, and keep meaning
-exactly what they mean today: upstream trust.
-
-Gateway identities also do **not** ride the existing `secrets` store. A secret is an opaque string
-(≤10240 characters) consumed by rendering `{{ secret "handle" }}` into the API definition at deploy
-time — which would place a private key inside stored API configuration, the opposite of S6's
-"SDS only" rule. An opaque string also cannot be validated at write (cert/key match, expiry,
-metadata for listings), and the size cap already excludes an RSA-4096 chain and every PQC
-certificate. An identity is a typed object with its own endpoint, delivered to Envoy directly over
-SDS, and never rendered into a definition.
+Gateway identities do **not** join that table. They carry a private key, so they need the encrypted
+column, the write-only read contract (S17) and the `PUT` rotation semantics that trust anchors never
+need. They also do not ride the existing `secrets` store: a secret is an opaque string (≤10240
+characters) consumed by rendering `{{ secret "handle" }}` into the API definition at deploy time —
+which would place a private key inside stored API configuration, the opposite of S6's "SDS only"
+rule. An opaque string also cannot be validated at write (cert/key match, expiry, metadata), and the
+size cap already excludes an RSA-4096 chain and every PQC certificate. An identity is a typed object
+with its own endpoint, delivered to Envoy directly over SDS, and never rendered into a definition.
 
 ### A.8 D8 — Listener private key moves to SDS
 
@@ -2045,3 +2235,22 @@ a coupling on the engine seeing every request; route-level `request_headers_to_r
 Envoy-native, derived from the same per-route chain the controller already builds, and runs after
 ext_proc so the policy keeps its chain material. It also closes a gap that exists under any option: a
 valid certificate presented to a public API used to reach that backend as XFCC without anyone asking.
+
+### A.12 D12 — Header relay in the same policy, believed only by a named relay or an explicit bypass
+
+Two products informed this. APIM's `MutualSSLAuthenticator` honours a certificate header when the
+connection's certificate exists in the listener truststore; the truststore also holds every client
+certificate, so any mTLS client can relay any other client's identity — proof of possession is never
+established for the relayed certificate. Kong's `header-cert-auth` is a separate plugin that believes
+the header when the source IP is in `trusted_ips`, with a documented warning that disabling that check
+lets anyone inject certificates. Both ship a bypass, both default it off.
+
+Chosen: one policy, because the `accept` semantics, output and tests are identical and a second
+policy would duplicate them; a **named** relaying entry, because the pool cannot distinguish "may
+connect" from "may relay" on its own and one bit per entry is the smallest thing that can; an
+explicit `trust_any` bypass, because the deployment where the gateway is reachable only from the proxy
+is real and the honest name for what it trusts is the network. Rejected: believing any valid pooled
+connection (APIM's gap); a source-IP rung in this increment (N5 — it sits between the two shipped
+options and can be added later); a separate policy (the original N1, withdrawn); an `enabled` flag
+with no statement of who is trusted. The relayed certificate is validated by the policy because
+Envoy's verdict covers only the connection's certificate, which under relay is the proxy's.

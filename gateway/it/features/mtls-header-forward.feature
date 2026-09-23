@@ -79,13 +79,13 @@ Feature: Forwarding a believed relayed certificate to the backend
     And I wait for the endpoint "http://localhost:8080/fwd-public/v1.0/anything" to be ready
     And I wait for the endpoint "http://localhost:8080/fwd/v1.0/anything" to respond with status 401
 
-  Scenario: A header the gateway believed is forwarded, on protected and public routes alike
+  Scenario: A header the gateway believed is forwarded where the policy evaluated it, and never on a public route
     When I send a GET request to "https://localhost:8443/fwd/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
     And the response should contain echoed header "x-wso2-client-certificate" containing "BEGIN"
     When I send a GET request to "https://localhost:8443/fwd-public/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
-    And the response should contain echoed header "x-wso2-client-certificate" containing "BEGIN"
+    And the response should not contain echoed header "x-wso2-client-certificate"
 
   Scenario: A header from a connection that is not the relay is deleted even with forwarding on
     When I send a GET request to "https://localhost:8443/fwd-public/v1.0/anything" with client certificate "client-valid" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-wrong-ca"

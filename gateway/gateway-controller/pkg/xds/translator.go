@@ -109,31 +109,9 @@ type Translator struct {
 	transformers      map[string]models.ConfigTransformer // kind → transformer (optional)
 	eventGatewayHooks EventGatewayXDSHooks                // optional, set by an event-gateway-controller binary
 
-	// requireDownstreamClientCA is set once per TranslateConfigs call, before
-	// the HTTPS listener is built, to whether at least one deployed config
-	// attaches mtls-auth (see configAttachesMTLSAuth). Read by
-	// createDownstreamTLSContext. A struct field rather than a parameter so
-	// createListener/createDownstreamTLSContext keep their existing call
-	// signatures; safe because TranslateConfigs (and therefore every write to
-	// this field) always runs under SnapshotManager's mutex — never
-	// concurrently with another translation on the same Translator.
-	requireDownstreamClientCA bool
-
-	// certStoreInitErr records a certstore.LoadCertificates failure at
-	// construction time. Per go-network-service-hardening.md/
-	// authentication_authorization.md GO-AUTH-011, a cert-store load
-	// failure must be a startup failure, not a silently-degraded warning:
-	// main() checks CertStoreInitError() via GetTranslator() and refuses to
-	// start when it is non-nil. Kept as a field (rather than making
-	// NewTranslator return an error) so existing callers/tests constructing
-	// a Translator directly are unaffected — this process's own main() is
-	// the only caller expected to check it.
-	certStoreInitErr error
-
 	// tlsSecretRefs accumulates the per-cluster mTLS wiring
 	// (identity/trustedCAs) observed while translating the CURRENT
-	// TranslateConfigs call, reset at its start (same per-call-field
-	// pattern as requireDownstreamClientCA). Read via
+	// TranslateConfigs call, reset at its start. Read via
 	// GetUpstreamTLSSecretRefs by the snapshot manager, which hands it to
 	// the SDSSecretManager so it builds exactly the secrets this
 	// snapshot's clusters reference.
@@ -175,11 +153,16 @@ type resolvedTimeout struct {
 	Idle    *time.Duration
 }
 
-// NewTranslator creates a new translator
-func NewTranslator(logger *slog.Logger, routerConfig *config.RouterConfig, db storage.Storage, config *config.Config) *Translator {
+// NewTranslator creates a new translator. It returns a non-nil error when a
+// configured certificate store fails to load — per
+// go-network-service-hardening.md / authentication_authorization.md
+// GO-AUTH-011, a cert-store load failure must be a startup failure, not a
+// silently-degraded warning: main() must refuse to start when this error is
+// non-nil, since a disabled cert store would silently drop the upstream
+// trust bundle and the ability to present any gateway identity.
+func NewTranslator(logger *slog.Logger, routerConfig *config.RouterConfig, db storage.Storage, config *config.Config) (*Translator, error) {
 	// Initialize certificate store if custom certs path is configured
 	var cs *certstore.CertStore
-	var initErr error
 	if routerConfig.Upstream.TLS.CustomCertsPath != "" {
 		cs = certstore.NewCertStore(
 			logger,
@@ -188,35 +171,25 @@ func NewTranslator(logger *slog.Logger, routerConfig *config.RouterConfig, db st
 			routerConfig.Upstream.TLS.TrustedCertPath,
 		)
 
-		// Load certificates at initialization. A failure here is now a
-		// startup failure (see certStoreInitErr) rather than a
-		// warn-and-disable-SDS fallback: with SDS disabled, every upstream
-		// TLS context silently loses its trust bundle AND its ability to
-		// present a gateway identity, which is a silent security
-		// degradation, not a safe default.
+		// Load certificates at initialization. A failure here is a startup
+		// failure rather than a warn-and-disable-SDS fallback: with SDS
+		// disabled, every upstream TLS context silently loses its trust
+		// bundle AND its ability to present a gateway identity, which is a
+		// silent security degradation, not a safe default.
 		if _, err := cs.LoadCertificates(); err != nil {
 			logger.Error("Failed to initialize certificate store",
 				slog.String("custom_certs_path", routerConfig.Upstream.TLS.CustomCertsPath),
 				slog.Any("error", err))
-			initErr = fmt.Errorf("failed to initialize certificate store: %w", err)
+			return nil, fmt.Errorf("failed to initialize certificate store: %w", err)
 		}
 	}
 
 	return &Translator{
-		logger:           logger,
-		routerConfig:     routerConfig,
-		certStore:        cs,
-		config:           config,
-		certStoreInitErr: initErr,
-	}
-}
-
-// CertStoreInitError returns the error recorded by NewTranslator if loading
-// the certificate store failed at construction time, or nil otherwise.
-// main() must check this and refuse to start when it is non-nil (fail
-// closed) — see certStoreInitErr's doc comment.
-func (t *Translator) CertStoreInitError() error {
-	return t.certStoreInitErr
+		logger:       logger,
+		routerConfig: routerConfig,
+		certStore:    cs,
+		config:       config,
+	}, nil
 }
 
 // convertServerHeaderTransformation converts string configuration values to Envoy enum values
@@ -1011,12 +984,8 @@ func (t *Translator) TranslateConfigs(
 	// Variable to hold the shared route configuration (created once, used by both listeners)
 	var sharedRouteConfig *route.RouteConfiguration
 
-	// requireDownstreamClientCA is read by createDownstreamTLSContext, called
-	// (only for the HTTPS listener) from within createListener below.
-	t.requireDownstreamClientCA = anyMTLSAuth
-
 	// Always create the HTTP listener, even with no APIs deployed
-	httpListener, routeConfig, err := t.createListener(virtualHosts, false)
+	httpListener, routeConfig, err := t.createListener(virtualHosts, false, anyMTLSAuth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP listener: %w", err)
 	}
@@ -1028,7 +997,7 @@ func (t *Translator) TranslateConfigs(
 		log.Info("HTTPS is enabled, creating HTTPS listener",
 			slog.Int("https_port", t.routerConfig.HTTPSPort),
 			slog.Bool("requires_client_cert_validation", anyMTLSAuth))
-		httpsListener, _, err := t.createListener(virtualHosts, true)
+		httpsListener, _, err := t.createListener(virtualHosts, true, anyMTLSAuth)
 		if err != nil {
 			log.Error("Failed to create HTTPS listener", slog.Any("error", err))
 			return nil, fmt.Errorf("failed to create HTTPS listener: %w", err)
@@ -1496,7 +1465,7 @@ func createSterile503LocalReplyConfig() *hcm.LocalReplyConfig {
 // createListener creates an Envoy listener with access logging
 // If isHTTPS is true, creates an HTTPS listener with TLS configuration
 // Uses RDS (Route Discovery Service) to share route configuration between listeners
-func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS bool) (*listener.Listener, *route.RouteConfiguration, error) {
+func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS bool, requireDownstreamClientCA bool) (*listener.Listener, *route.RouteConfiguration, error) {
 	routeConfig := t.createRouteConfiguration(virtualHosts)
 
 	// Create router filter with typed config
@@ -1643,7 +1612,7 @@ func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS b
 
 	// Add TLS configuration if HTTPS
 	if isHTTPS {
-		tlsContext, err := t.createDownstreamTLSContext()
+		tlsContext, err := t.createDownstreamTLSContext(requireDownstreamClientCA)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create downstream TLS context: %w", err)
 		}
@@ -2556,10 +2525,12 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 		//    definition falling back to the gateway-wide bundle and by a
 		//    definition with no tls block at all (the original, pre-mTLS
 		//    behavior).
-		// 4. Certificate parameter (per-upstream cert, currently unused but
-		//    kept for future) — only reachable when there is no tls block,
-		//    since case 2 above already errors a tls-block definition with
-		//    no certStore rather than falling through to this.
+		// 4. Certificate parameter — a per-endpoint trust override resolved
+		//    from upstreamCerts (processEndpoint: keyed by the endpoint's own
+		//    URL, or constants.DefaultCertificateKey as a fallback) and
+		//    passed in as certificate. Only reachable when there is no tls
+		//    block, since case 2 above already errors a tls-block definition
+		//    with no certStore rather than falling through to this.
 		// 5. Configured trusted cert path (system certs only) — same
 		//    tls-block exclusion as above.
 		// 6. If none provided, Envoy falls back to system default trust
@@ -2791,9 +2762,9 @@ func SnapshotReferencesSDSSecret(clusters, listeners []types.Resource, secretNam
 // go-control-plane-xds-security.md directive 3, applied to the downstream
 // listener the same way it already applied to upstream secrets).
 //
-// t.requireDownstreamClientCA is true precisely when at least one deployed
-// API attaches mtls-auth (computed once per TranslateConfigs call, from
-// every route chain being translated). When true, the listener additionally
+// requireDownstreamClientCA is true precisely when at least one deployed API
+// attaches mtls-auth (computed once per TranslateConfigs call, from every
+// route chain being translated). When true, the listener additionally
 // requests (but does not require) a client certificate, and Envoy validates
 // whatever is presented against the client-CA pool via SDS
 // (SecretNameDownstreamClientCA), reporting the verdict on the connection
@@ -2806,7 +2777,7 @@ func SnapshotReferencesSDSSecret(clusters, listeners []types.Resource, secretNam
 // (which authority, which SANs/thumbprint) before authenticating the
 // caller. There is no router-config switch for any of this: the listener's
 // behavior is entirely derived from what's deployed.
-func (t *Translator) createDownstreamTLSContext() (*tlsv3.DownstreamTlsContext, error) {
+func (t *Translator) createDownstreamTLSContext(requireDownstreamClientCA bool) (*tlsv3.DownstreamTlsContext, error) {
 	// Parse cipher suites
 	var cipherSuites []string
 	if t.routerConfig.DownstreamTLS.Ciphers != "" {
@@ -2850,7 +2821,7 @@ func (t *Translator) createDownstreamTLSContext() (*tlsv3.DownstreamTlsContext, 
 		CommonTlsContext: commonTLSContext,
 	}
 
-	if t.requireDownstreamClientCA {
+	if requireDownstreamClientCA {
 		commonTLSContext.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContextSdsSecretConfig{
 			ValidationContextSdsSecretConfig: &tlsv3.SdsSecretConfig{
 				Name:      SecretNameDownstreamClientCA,
@@ -2865,11 +2836,6 @@ func (t *Translator) createDownstreamTLSContext() (*tlsv3.DownstreamTlsContext, 
 
 	return downstreamTLSContext, nil
 }
-
-// createTLSProtocolVersion converts string TLS version to Envoy TLS version enum
-// mtlsAuthPolicyName is the policy that derives the HTTPS listener's request
-// for a client certificate — see createDownstreamTLSContext.
-const mtlsAuthPolicyName = "mtls-auth"
 
 // configAttachesMTLSAuth reports whether cfg's RestAPI representation
 // attaches mtls-auth at API level or on any operation. Mirrors the
@@ -2897,7 +2863,7 @@ func policiesAttachMTLSAuth(policies *[]api.Policy) bool {
 		return false
 	}
 	for _, p := range *policies {
-		if p.Name == mtlsAuthPolicyName {
+		if p.Name == config.MtlsAuthPolicyName {
 			return true
 		}
 	}
@@ -2920,13 +2886,14 @@ func chainAttachesMTLSAuth(chain *models.PolicyChain) bool {
 		return false
 	}
 	for _, p := range chain.Policies {
-		if p.Name == mtlsAuthPolicyName {
+		if p.Name == config.MtlsAuthPolicyName {
 			return true
 		}
 	}
 	return false
 }
 
+// createTLSProtocolVersion converts string TLS version to Envoy TLS version enum
 func (t *Translator) createTLSProtocolVersion(version string) tlsv3.TlsParameters_TlsProtocol {
 	switch strings.ToUpper(version) {
 	case constants.TLSVersion10:

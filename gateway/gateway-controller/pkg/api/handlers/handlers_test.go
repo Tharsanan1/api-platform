@@ -1404,7 +1404,7 @@ func attachTestEventHub(server *APIServer, hub eventhub.EventHub, gatewayID stri
 	if server.systemConfig != nil {
 		server.systemConfig.Controller.Server.GatewayID = gatewayID
 	}
-	policyValidator := config.NewPolicyValidator(server.policyDefinitions)
+	policyValidator := config.NewPolicyValidator(server.policyDefinitions, nil)
 	policyVersionResolver := utils.NewLoadedPolicyVersionResolver(server.policyDefinitions)
 	server.deploymentService = utils.NewAPIDeploymentService(server.store, server.db, server.snapshotManager, server.validator, server.routerConfig, hub, gatewayID, nil, server.httpClient)
 	server.apiKeyService = utils.NewAPIKeyService(server.store, server.db, server.apiKeyXDSManager, &server.systemConfig.APIKey, hub, gatewayID)

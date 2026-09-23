@@ -127,7 +127,7 @@ func secretsByName(t *testing.T, secrets []types.Resource) map[string]*tlsv3.Sec
 }
 
 // writeListenerCertFiles writes a freshly generated cert/key pair to temp
-// files and returns their paths, for SetDownstreamListenerCert.
+// files and returns their paths, for NewSDSSecretManager's listener-cert args.
 func writeListenerCertFiles(t *testing.T) (certPath, keyPath string) {
 	t.Helper()
 	entity := pki.NewSelfSignedLeaf(t, "listener")
@@ -153,10 +153,9 @@ func TestSDSSecretManager_GetSecrets_UpstreamAndClientRows_HTTPSEnabled(t *testi
 	require.NoError(t, err)
 
 	certPath, keyPath := writeListenerCertFiles(t)
-	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
-	sm.SetDownstreamListenerCert(certPath, keyPath, true)
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger, certPath, keyPath, true)
 
-	secrets, err := sm.GetSecrets()
+	secrets, err := sm.GetSecrets(nil)
 	require.NoError(t, err)
 	require.Len(t, secrets, 3, "expected upstream_ca_bundle, downstream_client_ca and downstream_listener_cert")
 
@@ -198,10 +197,9 @@ func TestSDSSecretManager_GetSecrets_NoClientRows_ClientCASecretAbsent(t *testin
 	require.NoError(t, err)
 
 	certPath, keyPath := writeListenerCertFiles(t)
-	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
-	sm.SetDownstreamListenerCert(certPath, keyPath, true)
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger, certPath, keyPath, true)
 
-	secrets, err := sm.GetSecrets()
+	secrets, err := sm.GetSecrets(nil)
 	require.NoError(t, err)
 
 	byName := secretsByName(t, secrets)
@@ -215,10 +213,9 @@ func TestSDSSecretManager_GetSecrets_HTTPSEnabled_UnreadableListenerCert_Errors(
 	db := &fakeSDSStorage{}
 	cs := certstore.NewCertStore(logger, db, "", "")
 
-	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
-	sm.SetDownstreamListenerCert("/nonexistent/does-not-exist.crt", "/nonexistent/does-not-exist.key", true)
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger, "/nonexistent/does-not-exist.crt", "/nonexistent/does-not-exist.key", true)
 
-	_, err := sm.GetSecrets()
+	_, err := sm.GetSecrets(nil)
 	assert.Error(t, err, "a failed listener-cert read must fail the whole snapshot, not be silently omitted")
 }
 
@@ -227,11 +224,10 @@ func TestSDSSecretManager_GetSecrets_HTTPSDisabled_NoListenerSecretNoError(t *te
 	db := &fakeSDSStorage{}
 	cs := certstore.NewCertStore(logger, db, "", "")
 
-	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
 	// Deliberately invalid paths: httpsEnabled false must mean these are never read.
-	sm.SetDownstreamListenerCert("/nonexistent/does-not-exist.crt", "/nonexistent/does-not-exist.key", false)
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger, "/nonexistent/does-not-exist.crt", "/nonexistent/does-not-exist.key", false)
 
-	secrets, err := sm.GetSecrets()
+	secrets, err := sm.GetSecrets(nil)
 	require.NoError(t, err)
 
 	byName := secretsByName(t, secrets)
@@ -262,7 +258,7 @@ func TestCertStore_GetClientCABundle_OnlyClientRows(t *testing.T) {
 }
 
 // ============================================================================
-// Gateway-identity and per-upstream-trust SDS secrets (mTLS outbound, slice 5)
+// Gateway-identity and per-upstream-trust SDS secrets (mTLS outbound)
 // ============================================================================
 
 // TestSDSSecretManager_GetSecrets_GatewayIdentity_DecryptedKeyOnlyInSecret
@@ -284,10 +280,9 @@ func TestSDSSecretManager_GetSecrets_GatewayIdentity_DecryptedKeyOnlyInSecret(t 
 	cs := certstore.NewCertStore(logger, db, "", "")
 	cs.SetEncryptionManager(mgr)
 
-	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
-	sm.SetUpstreamTLSSecretRefs([]UpstreamTLSSecretRef{{IdentityName: "out-identity-a"}})
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger, "", "", false)
 
-	secrets, err := sm.GetSecrets()
+	secrets, err := sm.GetSecrets([]UpstreamTLSSecretRef{{IdentityName: "out-identity-a"}})
 	require.NoError(t, err)
 
 	byName := secretsByName(t, secrets)
@@ -329,13 +324,12 @@ func TestSDSSecretManager_GetSecrets_PerUpstreamTrust_ExactTrustedCAs(t *testing
 	}}
 	cs := certstore.NewCertStore(logger, db, "", "")
 
-	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
-	sm.SetUpstreamTLSSecretRefs([]UpstreamTLSSecretRef{{
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger, "", "", false)
+
+	secrets, err := sm.GetSecrets([]UpstreamTLSSecretRef{{
 		APIHandle: "out-partner-api", DefinitionName: "partner-a",
 		TrustedCANames: []string{"out-backend-ca-1", "out-backend-ca-2"},
 	}})
-
-	secrets, err := sm.GetSecrets()
 	require.NoError(t, err)
 
 	byName := secretsByName(t, secrets)
@@ -364,13 +358,12 @@ func TestSDSSecretManager_GetSecrets_PerUpstreamTrust_DedupedAcrossRefs(t *testi
 	}}
 	cs := certstore.NewCertStore(logger, db, "", "")
 
-	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
-	sm.SetUpstreamTLSSecretRefs([]UpstreamTLSSecretRef{
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger, "", "", false)
+
+	secrets, err := sm.GetSecrets([]UpstreamTLSSecretRef{
 		{APIHandle: "out-partner-api", DefinitionName: "partner-a", TrustedCANames: []string{"out-backend-ca"}},
 		{APIHandle: "out-partner-api", DefinitionName: "partner-a", TrustedCANames: []string{"out-backend-ca"}},
 	})
-
-	secrets, err := sm.GetSecrets()
 	require.NoError(t, err)
 
 	count := 0

@@ -47,33 +47,28 @@ type RestAPITransformer struct {
 	// mtlsCertStore is the client certificate authority pool lookup used to
 	// resolve mtls-auth's accept list into certificate material at
 	// chain-build time (see injectMtlsInternalParams in mtls_internal.go).
-	// Nil until SetMtlsCertificateStore is called — a setter rather than a
-	// constructor parameter so existing NewRestAPITransformer call sites
-	// (including tests) are unaffected; injection is simply skipped while
-	// unset.
+	// Nil disables the injection entirely.
 	mtlsCertStore config.MtlsAuthCertificateStore
 }
 
-// SetMtlsCertificateStore wires the client-CA pool lookup used to resolve
-// mtls-auth's accept list at chain-build time. Called once from cmd/controller
-// (and from NewLLMTransformer, which owns its own RestAPITransformer) with the
-// same storage.Storage already threaded to every other consumer of the
-// certificate pool.
-func (t *RestAPITransformer) SetMtlsCertificateStore(store config.MtlsAuthCertificateStore) {
-	t.mtlsCertStore = store
-}
-
-// NewRestAPITransformer creates a new RestAPITransformer.
+// NewRestAPITransformer creates a new RestAPITransformer. mtlsCertStore wires
+// the client-CA pool lookup used to resolve mtls-auth's accept list at
+// chain-build time — cmd/controller (and NewLLMTransformer, which owns its
+// own RestAPITransformer) pass the same storage.Storage already threaded to
+// every other consumer of the certificate pool; a nil value disables the
+// injection entirely.
 func NewRestAPITransformer(
 	routerConfig *config.RouterConfig,
 	systemConfig *config.Config,
 	policyDefinitions map[string]models.PolicyDefinition,
+	mtlsCertStore config.MtlsAuthCertificateStore,
 ) *RestAPITransformer {
 	return &RestAPITransformer{
 		routerConfig:      routerConfig,
 		systemConfig:      systemConfig,
 		policyDefinitions: policyDefinitions,
 		latestVersions:    config.BuildLatestVersionIndex(policyDefinitions),
+		mtlsCertStore:     mtlsCertStore,
 	}
 }
 

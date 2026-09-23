@@ -271,8 +271,8 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
       | accept: [{ ca: listener-backend-trust }]                            | spec.policies[0].params.accept[0].ca                 | listener-backend-trust is a backend trust certificate (usage: upstream); accept takes usage: client authorities  |
       | accept: [{ ca: listener-partner-a, match: { uriSANs: [] } }]        | spec.policies[0].params.accept[0].match.uriSANs      | list at least one non-empty SAN, or remove match to accept any certificate from this authority                   |
       | accept: [{ ca: listener-partner-a, match: { dnsSANs: ["a", ""] } }] | spec.policies[0].params.accept[0].match.dnsSANs[1]   | list at least one non-empty SAN, or remove match to accept any certificate from this authority                   |
-      | accept: [{ ca: listener-partner-a, thumbprints: [] }]               | spec.policies[0].params.accept[0].thumbprints        | list at least one fingerprint, or remove thumbprints to accept any certificate from this authority               |
-      | accept: [{ ca: listener-partner-a, thumbprints: ["zz"] }]           | spec.policies[0].params.accept[0].thumbprints[0]     | a fingerprint is the SHA-256 of the certificate as 64 hex characters (colons and a sha256: prefix are accepted)  |
+      | accept: [{ ca: listener-partner-a, thumbprints: [] }]               | spec.policies[0].params.accept[0].thumbprints        | list at least one thumbprint, or remove thumbprints to accept any certificate from this authority               |
+      | accept: [{ ca: listener-partner-a, thumbprints: ["zz"] }]           | spec.policies[0].params.accept[0].thumbprints[0]     | a thumbprint is the SHA-256 of the certificate as 64 hex characters (colons and a sha256: prefix are accepted)  |
       | accept: [{ ca: listener-partner-a, thumbprint: "9f86d081" }]        | spec.policies[0].params.accept[0].thumbprint         | unknown parameter thumbprint; the field is thumbprints                                                            |
       | mode: strict                                                        | spec.policies[0].params.mode                         | unknown parameter mode                                                                                            |
 
@@ -481,7 +481,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     And the response should include a warning with code "MTLS_AUTH_NOT_FIRST" for field "spec.policies[0]"
     When I delete the API "mtls-warned-api"
 
-  Scenario: A fingerprint written with colons or a prefix is accepted and normalised with a warning
+  Scenario: A thumbprint written with colons or a prefix is accepted and normalised with a warning
     Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
     When I deploy this API configuration:
       """

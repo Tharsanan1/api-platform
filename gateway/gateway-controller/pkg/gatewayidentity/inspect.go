@@ -34,15 +34,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
 )
 
 const (
 	fieldCertificate = "certificate"
 	fieldPrivateKey  = "privateKey"
 
-	msgNotPEMCertificate = "the value is not a PEM-encoded certificate"
-	msgKeyMismatch       = "the private key does not match the certificate"
-	msgPassphraseKey     = "passphrase-protected private keys are not supported; " +
+	msgKeyMismatch   = "the private key does not match the certificate"
+	msgPassphraseKey = "passphrase-protected private keys are not supported; " +
 		"upload an unencrypted key (it is encrypted at rest by the gateway)"
 	msgNotPEMKey = "the value is not a PEM-encoded private key"
 
@@ -103,12 +104,12 @@ func ParseChain(pemData []byte) ([]*x509.Certificate, error) {
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			return nil, &FieldError{Field: fieldCertificate, Message: msgNotPEMCertificate}
+			return nil, &FieldError{Field: fieldCertificate, Message: clientca.MsgNotPEMCertificate}
 		}
 		chain = append(chain, cert)
 	}
 	if len(chain) == 0 {
-		return nil, &FieldError{Field: fieldCertificate, Message: msgNotPEMCertificate}
+		return nil, &FieldError{Field: fieldCertificate, Message: clientca.MsgNotPEMCertificate}
 	}
 	return chain, nil
 }

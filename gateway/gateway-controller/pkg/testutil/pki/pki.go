@@ -33,6 +33,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"net/url"
 	"testing"
 	"time"
@@ -89,6 +90,16 @@ func WithURISANs(uris ...string) LeafOption {
 func WithDNSSANs(dns ...string) LeafOption {
 	return func(c *x509.Certificate) {
 		c.DNSNames = append(c.DNSNames, dns...)
+	}
+}
+
+// WithIPSANs adds IP address subject alternative names — needed when a
+// caller dials a literal IP rather than a hostname, since tls verification
+// (or x509.Certificate.VerifyHostname) matches a literal IP address only
+// against an IP SAN, never a DNS SAN.
+func WithIPSANs(ips ...net.IP) LeafOption {
+	return func(c *x509.Certificate) {
+		c.IPAddresses = append(c.IPAddresses, ips...)
 	}
 }
 

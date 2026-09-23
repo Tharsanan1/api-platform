@@ -915,7 +915,9 @@ func createTestAPIServerWithCertStore(t *testing.T, db storage.Storage) *APIServ
 	// the real file (relative to this package directory) rather than the
 	// default "./lua/..." path, which only resolves from the repo root.
 	server.routerConfig.Lua.RequestTransformation.ScriptPath = "../../../lua/request_transformation.lua"
-	server.snapshotManager = xds.NewSnapshotManager(server.store, server.logger, server.routerConfig, db, server.systemConfig)
+	snapshotManager, err := xds.NewSnapshotManager(server.store, server.logger, server.routerConfig, db, server.systemConfig)
+	require.NoError(t, err)
+	server.snapshotManager = snapshotManager
 	return server
 }
 
@@ -1245,7 +1247,7 @@ func TestListCertificates_WarningsAndFieldPresence(t *testing.T) {
 }
 
 // ============================================================================
-// DELETE referential integrity for client-CA authorities (slice 4)
+// DELETE referential integrity for client-CA authorities
 // ============================================================================
 
 func clientAuthorityCert(name string) *models.StoredCertificate {
@@ -1515,7 +1517,7 @@ func TestListCertificates_ReferencedByApis_CountsNamingAPIsOnly(t *testing.T) {
 }
 
 // ============================================================================
-// Certificate upload validation: match narrowing (slice 4)
+// Certificate upload validation: match narrowing
 // ============================================================================
 
 func uploadCertificateRawJSON(t *testing.T, server *APIServer, jsonBody string) *httptest.ResponseRecorder {
@@ -1655,7 +1657,7 @@ func TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList(t *testing.T) 
 }
 
 // ============================================================================
-// Gateway identities: usage: identity certificates (slice 5)
+// Gateway identities: usage: identity certificates
 // ============================================================================
 
 // testEncryptionManager builds a real (temp-key-backed) AES-GCM provider

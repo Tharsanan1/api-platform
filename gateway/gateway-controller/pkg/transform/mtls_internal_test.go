@@ -130,8 +130,7 @@ func TestBuildPolicyChain_MtlsAuth_InjectsInternalParams_APILevel(t *testing.T) 
 	rootA := clientCA(t, "auth-ca-a")
 	store := newFakeMtlsCertStore(rootA)
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
-	transformer.SetMtlsCertificateStore(store)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), store)
 
 	cfg := makeRestAPIStoredConfig(
 		[]api.Policy{mtlsAuthPolicy(map[string]interface{}{
@@ -157,8 +156,7 @@ func TestBuildPolicyChain_MtlsAuth_InjectsInternalParams_OperationLevel(t *testi
 	rootA := clientCA(t, "auth-ca-a")
 	store := newFakeMtlsCertStore(rootA)
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
-	transformer.SetMtlsCertificateStore(store)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), store)
 
 	cfg := makeRestAPIStoredConfig(
 		nil,
@@ -187,8 +185,7 @@ func TestBuildPolicyChain_MtlsAuth_OmittedAccept_ResolvesToNonRelayPool(t *testi
 	relayEntry := relayCA(t, "auth-ca-relay")
 	store := newFakeMtlsCertStore(clientEntry, relayEntry)
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
-	transformer.SetMtlsCertificateStore(store)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), store)
 
 	cfg := makeRestAPIStoredConfig(
 		[]api.Policy{mtlsAuthPolicy(nil)}, // no params at all: accept omitted
@@ -218,8 +215,7 @@ func TestBuildPolicyChain_MtlsAuth_CopiesMatchNormalisesThumbprints_LeavesAuthor
 	rootA := clientCA(t, "auth-ca-a")
 	store := newFakeMtlsCertStore(rootA)
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
-	transformer.SetMtlsCertificateStore(store)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), store)
 
 	authoredThumbprint := "SHA256:AA:BB:" + strings.Repeat("0", 60) // mixed-case + colons + prefix, 64 hex chars once normalised
 	authoredMatch := map[string]interface{}{"uriSANs": []interface{}{"urn:partner-a:payments"}}
@@ -269,8 +265,7 @@ func TestBuildPolicyChain_MtlsAuth_NoInjectionForOtherPolicies(t *testing.T) {
 	defs := map[string]models.PolicyDefinition{
 		"header-mutate|v1.0.0": {Name: "header-mutate", Version: "v1.0.0"},
 	}
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
-	transformer.SetMtlsCertificateStore(store)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs, store)
 
 	cfg := makeRestAPIStoredConfig([]api.Policy{{Name: "header-mutate", Version: ""}}, nil)
 
@@ -298,8 +293,7 @@ func TestBuildPolicyChain_MtlsAuth_RelaysParam_ListsRelayRowsWithMatch(t *testin
 	relayWithMatch.Match = &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}}
 	store := newFakeMtlsCertStore(clientEntry, relayNoMatch, relayWithMatch)
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
-	transformer.SetMtlsCertificateStore(store)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), store)
 
 	cfg := makeRestAPIStoredConfig([]api.Policy{mtlsAuthPolicy(nil)}, nil)
 
@@ -345,8 +339,7 @@ func TestBuildPolicyChain_MtlsAuth_RelaysParam_EmptyWhenNoRelays(t *testing.T) {
 	clientEntry := clientCA(t, "auth-ca-a")
 	store := newFakeMtlsCertStore(clientEntry) // no relay rows at all
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
-	transformer.SetMtlsCertificateStore(store)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), store)
 
 	cfg := makeRestAPIStoredConfig([]api.Policy{mtlsAuthPolicy(nil)}, nil)
 
@@ -378,8 +371,7 @@ func TestBuildPolicyChain_MtlsAuth_HeaderParam_CarriesRouterConfig(t *testing.T)
 		TrustAny:         true,
 		ForwardToBackend: true,
 	}
-	transformer := NewRestAPITransformer(routerCfg, &config.Config{}, mtlsAuthDefs())
-	transformer.SetMtlsCertificateStore(store)
+	transformer := NewRestAPITransformer(routerCfg, &config.Config{}, mtlsAuthDefs(), store)
 
 	cfg := makeRestAPIStoredConfig([]api.Policy{mtlsAuthPolicy(nil)}, nil)
 
@@ -396,8 +388,8 @@ func TestBuildPolicyChain_MtlsAuth_HeaderParam_CarriesRouterConfig(t *testing.T)
 }
 
 func TestBuildPolicyChain_MtlsAuth_NilStore_NoInjection(t *testing.T) {
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
-	// SetMtlsCertificateStore deliberately not called: mtlsCertStore stays nil.
+	// mtlsCertStore deliberately passed as nil: injection is skipped entirely.
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), nil)
 
 	cfg := makeRestAPIStoredConfig(
 		[]api.Policy{mtlsAuthPolicy(map[string]interface{}{

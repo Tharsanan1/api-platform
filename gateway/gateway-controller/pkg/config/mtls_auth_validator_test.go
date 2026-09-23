@@ -205,7 +205,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptListRejections(t *testing.T) {
 				map[string]interface{}{"ca": "listener-partner-a", "thumbprints": []interface{}{}},
 			}},
 			field:   "spec.policies[0].params.accept[0].thumbprints",
-			message: "list at least one fingerprint, or remove thumbprints to accept any certificate from this authority",
+			message: "list at least one thumbprint, or remove thumbprints to accept any certificate from this authority",
 		},
 		{
 			name: "malformed thumbprint",
@@ -213,7 +213,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptListRejections(t *testing.T) {
 				map[string]interface{}{"ca": "listener-partner-a", "thumbprints": []interface{}{"zz"}},
 			}},
 			field:   "spec.policies[0].params.accept[0].thumbprints[0]",
-			message: "a fingerprint is the SHA-256 of the certificate as 64 hex characters (colons and a sha256: prefix are accepted)",
+			message: "a thumbprint is the SHA-256 of the certificate as 64 hex characters (colons and a sha256: prefix are accepted)",
 		},
 		{
 			name: "unknown param thumbprint (singular)",
@@ -233,7 +233,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptListRejections(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := NewMtlsAuthValidator(pool(), true)
+			v := NewMtlsAuthValidator(pool(), true, false)
 			apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(tt.params))
 
 			errs := v.ValidateRestAPI(apiConfig)
@@ -246,7 +246,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptListRejections(t *testing.T) {
 }
 
 func TestMtlsAuthValidator_ValidateRestAPI_EmptyPool(t *testing.T) {
-	v := NewMtlsAuthValidator(newFakeMtlsCertStore(), true)
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(), true, false)
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	errs := v.ValidateRestAPI(apiConfig)
@@ -259,7 +259,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_EmptyPool(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_HTTPSDisabled(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, false)
+	v := NewMtlsAuthValidator(store, false, false)
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	errs := v.ValidateRestAPI(apiConfig)
@@ -275,7 +275,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_HTTPSDisabled(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_DuplicateInOneScope(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-a"},
@@ -295,7 +295,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_DuplicateInOneScope(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_APIAndOperationLevel(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 
 	cfg := createValidRestAPIConfig()
 	cfg.Spec.Policies = &[]api.Policy{mtlsPolicy(nil)}
@@ -314,7 +314,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_APIAndOperationLevel(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_ValidAPI_NoErrors(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-a"},
@@ -330,7 +330,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_ValidAPI_NoErrors(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_OperationLevelFieldPath(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-b"}, // not in the pool
@@ -354,7 +354,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_AcceptOmitted_TwoAuthoriti
 		relayCA("listener-edge-lb"),
 		upstreamCA("listener-backend-trust"),
 	)
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 
 	original := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 	resolved, warnings := v.ResolveMtlsAuthForResponse(*original)
@@ -390,7 +390,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_AcceptOmitted_TwoAuthoriti
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_SingleAuthority_NoWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 	resolved, warnings := v.ResolveMtlsAuthForResponse(*apiConfig)
@@ -407,7 +407,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_SingleAuthority_NoWarning(
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_UnnarrowedEntry_Warning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"), clientCA("listener-partner-b"))
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-a"},
@@ -422,7 +422,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_UnnarrowedEntry_Warning(t 
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_PrecedingAuthPolicy_Warning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{
@@ -440,7 +440,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_PrecedingAuthPolicy_Warnin
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_ThumbprintNormalised(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 
 	raw := "sha256:9F:86:D0:81:88:4C:7D:65:9A:2F:EA:A0:C5:5A:D0:15:A3:BF:4F:1B:2B:0B:82:2C:D1:5D:6C:15:B0:F0:0A:08"
 	acceptParams := map[string]interface{}{"accept": []interface{}{
@@ -476,7 +476,7 @@ func TestValidateMTLSStartupInvariant_HTTPSDisabled_APILevelMTLS_Errors(t *testi
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 	configs := []*models.StoredConfig{storedConfigWithRestAPI("mtls-api", apiConfig)}
 
-	err := ValidateMTLSStartupInvariant(configs, false)
+	err := ValidateMTLSStartupInvariant(configs, false, false)
 
 	if err == nil {
 		t.Fatal("expected an error when https is disabled and a stored config attaches mtls-auth at API level")
@@ -487,7 +487,7 @@ func TestValidateMTLSStartupInvariant_HTTPSDisabled_OperationLevelMTLS_Errors(t 
 	apiConfig := restAPIWithOperationLevelPolicy(mtlsPolicy(nil))
 	configs := []*models.StoredConfig{storedConfigWithRestAPI("mtls-api", apiConfig)}
 
-	err := ValidateMTLSStartupInvariant(configs, false)
+	err := ValidateMTLSStartupInvariant(configs, false, false)
 
 	if err == nil {
 		t.Fatal("expected an error when https is disabled and a stored config attaches mtls-auth at operation level")
@@ -498,7 +498,7 @@ func TestValidateMTLSStartupInvariant_HTTPSEnabled_NoError(t *testing.T) {
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 	configs := []*models.StoredConfig{storedConfigWithRestAPI("mtls-api", apiConfig)}
 
-	if err := ValidateMTLSStartupInvariant(configs, true); err != nil {
+	if err := ValidateMTLSStartupInvariant(configs, true, false); err != nil {
 		t.Fatalf("expected no error when https is enabled, got: %v", err)
 	}
 }
@@ -507,12 +507,12 @@ func TestValidateMTLSStartupInvariant_NoMTLSConfigs_NoError(t *testing.T) {
 	plainConfig := createValidRestAPIConfig()
 	configs := []*models.StoredConfig{storedConfigWithRestAPI("plain-api", plainConfig)}
 
-	if err := ValidateMTLSStartupInvariant(configs, false); err != nil {
+	if err := ValidateMTLSStartupInvariant(configs, false, false); err != nil {
 		t.Fatalf("expected no error when no stored config attaches mtls-auth, got: %v", err)
 	}
 }
 
-// ============ SetHeaderTrustAny: the header-relay trust_any relaxation ============
+// ============ headerTrustAny: the header-relay trust_any relaxation ============
 
 // TestMtlsAuthValidator_ValidateRestAPI_HeaderTrustAny_RelaxesHTTPSRequirement
 // guards that a relayed header can legitimately arrive over plaintext from a
@@ -520,7 +520,7 @@ func TestValidateMTLSStartupInvariant_NoMTLSConfigs_NoError(t *testing.T) {
 // longer produces the "requires the HTTPS listener" refusal.
 func TestMtlsAuthValidator_ValidateRestAPI_HeaderTrustAny_RelaxesHTTPSRequirement(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, false).SetHeaderTrustAny(true)
+	v := NewMtlsAuthValidator(store, false, true)
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	errs := v.ValidateRestAPI(apiConfig)
@@ -533,7 +533,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_HeaderTrustAny_RelaxesHTTPSRequiremen
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_EmitsBypassWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true).SetHeaderTrustAny(true)
+	v := NewMtlsAuthValidator(store, true, true)
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	_, warnings := v.ResolveMtlsAuthForResponse(*apiConfig)
@@ -544,11 +544,11 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_EmitsBypass
 }
 
 // TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypassWarning
-// guards the off case: no SetHeaderTrustAny call at all (defaults to false)
-// never emits HEADER_CERT_BYPASS_ACTIVE.
+// guards the off case: headerTrustAny false never emits
+// HEADER_CERT_BYPASS_ACTIVE.
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypassWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true)
+	v := NewMtlsAuthValidator(store, true, false)
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	_, warnings := v.ResolveMtlsAuthForResponse(*apiConfig)
@@ -564,7 +564,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypa
 // it even though trust_any is true gateway-wide.
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_NoMTLSAuth_NoBypassWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true).SetHeaderTrustAny(true)
+	v := NewMtlsAuthValidator(store, true, true)
 	plainConfig := createValidRestAPIConfig()
 
 	_, warnings := v.ResolveMtlsAuthForResponse(*plainConfig)
@@ -574,22 +574,22 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_NoMTLSAuth_
 	}
 }
 
-// ============ ValidateMTLSStartupInvariantForRouter ============
+// ============ ValidateMTLSStartupInvariant: the headerTrustAny relaxation ============
 
-func TestValidateMTLSStartupInvariantForRouter_HTTPSDisabled_HeaderTrustAny_NoError(t *testing.T) {
+func TestValidateMTLSStartupInvariant_HTTPSDisabled_HeaderTrustAny_NoError(t *testing.T) {
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 	configs := []*models.StoredConfig{storedConfigWithRestAPI("mtls-api", apiConfig)}
 
-	if err := ValidateMTLSStartupInvariantForRouter(configs, false, true); err != nil {
+	if err := ValidateMTLSStartupInvariant(configs, false, true); err != nil {
 		t.Fatalf("expected no error when https is disabled but trust_any is true, got: %v", err)
 	}
 }
 
-func TestValidateMTLSStartupInvariantForRouter_HTTPSDisabled_HeaderTrustAnyFalse_Errors(t *testing.T) {
+func TestValidateMTLSStartupInvariant_HTTPSDisabled_HeaderTrustAnyFalse_Errors(t *testing.T) {
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 	configs := []*models.StoredConfig{storedConfigWithRestAPI("mtls-api", apiConfig)}
 
-	if err := ValidateMTLSStartupInvariantForRouter(configs, false, false); err == nil {
+	if err := ValidateMTLSStartupInvariant(configs, false, false); err == nil {
 		t.Fatal("expected an error when https is disabled and trust_any is false")
 	}
 }

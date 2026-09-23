@@ -106,21 +106,15 @@ type MtlsAuthValidator struct {
 }
 
 // NewMtlsAuthValidator creates a validator bound to the gateway's
-// certificate store and its (static, config-file-sourced) HTTPS-listener
-// enablement. Defaults headerTrustAny to false — call SetHeaderTrustAny to
-// mirror router.downstream_tls.client_certificate_header.trust_any.
-func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled bool) *MtlsAuthValidator {
-	return &MtlsAuthValidator{store: store, httpsEnabled: httpsEnabled}
-}
-
-// SetHeaderTrustAny mirrors
-// router.downstream_tls.client_certificate_header.trust_any onto this
-// validator: when true, the HTTPS-listener requirement is relaxed (a relayed
-// header can legitimately arrive over plaintext from a trusted front proxy)
-// and every resolved response carries WarningCodeHeaderCertBypassActive.
-func (v *MtlsAuthValidator) SetHeaderTrustAny(trustAny bool) *MtlsAuthValidator {
-	v.headerTrustAny = trustAny
-	return v
+// certificate store and the router facts governing mtls-auth's
+// HTTPS-listener requirement: httpsEnabled is router.https_enabled, and
+// headerTrustAny is
+// router.downstream_tls.client_certificate_header.trust_any — when true, the
+// HTTPS-listener requirement is relaxed (a relayed header can legitimately
+// arrive over plaintext from a trusted front proxy) and every resolved
+// response carries WarningCodeHeaderCertBypassActive.
+func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled, headerTrustAny bool) *MtlsAuthValidator {
+	return &MtlsAuthValidator{store: store, httpsEnabled: httpsEnabled, headerTrustAny: headerTrustAny}
 }
 
 // mtlsOccurrence is one place mtls-auth is attached in a RestAPI: either the
@@ -476,7 +470,7 @@ func validateAcceptEntryThumbprints(entryPath string, entry map[string]interface
 	if len(tpSlice) == 0 {
 		errs = append(errs, ValidationError{
 			Field:   tpPath,
-			Message: "list at least one fingerprint, or remove thumbprints to accept any certificate from this authority",
+			Message: "list at least one thumbprint, or remove thumbprints to accept any certificate from this authority",
 		})
 		return errs
 	}
@@ -486,7 +480,7 @@ func validateAcceptEntryThumbprints(entryPath string, entry map[string]interface
 		if _, _, valid := normalizeThumbprint(s); !valid {
 			errs = append(errs, ValidationError{
 				Field:   fmt.Sprintf("%s[%d]", tpPath, k),
-				Message: "a fingerprint is the SHA-256 of the certificate as 64 hex characters (colons and a sha256: prefix are accepted)",
+				Message: "a thumbprint is the SHA-256 of the certificate as 64 hex characters (colons and a sha256: prefix are accepted)",
 			})
 		}
 	}
@@ -494,7 +488,7 @@ func validateAcceptEntryThumbprints(entryPath string, entry map[string]interface
 	return errs
 }
 
-// normalizeThumbprint canonicalises a caller-supplied fingerprint: lowercase,
+// normalizeThumbprint canonicalises a caller-supplied thumbprint: lowercase,
 // no colon separators, no "sha256:" prefix. valid reports whether the result
 // is exactly 64 hex characters; changed reports whether normalisation
 // altered the input (used to decide whether MTLS_THUMBPRINT_NORMALISED is
@@ -713,7 +707,7 @@ func (v *MtlsAuthValidator) resolveOnePolicy(p api.Policy, fieldPath string, poo
 							warnings = append(warnings, clientca.Warning{
 								Code:    WarningCodeMTLSThumbprintNormalised,
 								Field:   fmt.Sprintf("%s.thumbprints[%d]", entryPath, k),
-								Message: fmt.Sprintf("fingerprint normalised to %s", canonical),
+								Message: fmt.Sprintf("thumbprint normalised to %s", canonical),
 							})
 						}
 					}
@@ -731,35 +725,21 @@ func (v *MtlsAuthValidator) resolveOnePolicy(p api.Policy, fieldPath string, poo
 }
 
 // ValidateMTLSStartupInvariant enforces, once at startup, that no persisted
-// RestAPI attaches mtls-auth while the HTTPS listener is disabled. This
-// mirrors the deploy-time check in ValidateRestAPI, applied to whatever is
-// already on disk — router.https_enabled is config-file-sourced and static
-// per process, so this only ever fires when the operator disabled HTTPS
-// after previously deploying an mtls-auth API, per
-// authentication_authorization.md GO-AUTH-011: validate the *effective*
-// startup state and fail closed (refuse to start) rather than silently
-// running with a listener that can never satisfy an already-deployed API's
-// authentication requirement.
-//
-// This is the headerTrustAny=false case of
-// ValidateMTLSStartupInvariantForRouter; kept as its own entry point so
-// existing callers/tests that only ever cared about https_enabled don't need
-// to thread the header config through.
-func ValidateMTLSStartupInvariant(configs []*models.StoredConfig, httpsEnabled bool) error {
-	return validateMTLSStartupInvariant(configs, httpsEnabled, false)
-}
-
-// ValidateMTLSStartupInvariantForRouter is ValidateMTLSStartupInvariant with
-// the same trust_any relaxation ValidateRestAPI applies at deploy time:
-// headerTrustAny mirrors
-// router.downstream_tls.client_certificate_header.trust_any, and when true
-// the HTTPS-listener requirement is relaxed — a relayed header can
-// legitimately arrive over plaintext from a trusted front proxy.
-func ValidateMTLSStartupInvariantForRouter(configs []*models.StoredConfig, httpsEnabled, headerTrustAny bool) error {
-	return validateMTLSStartupInvariant(configs, httpsEnabled, headerTrustAny)
-}
-
-func validateMTLSStartupInvariant(configs []*models.StoredConfig, httpsEnabled, headerTrustAny bool) error {
+// RestAPI attaches mtls-auth while neither the HTTPS listener nor the
+// header-relay trust_any relaxation can satisfy its authentication
+// requirement. This mirrors the deploy-time check in ValidateRestAPI,
+// applied to whatever is already on disk: httpsEnabled is
+// router.https_enabled and headerTrustAny is
+// router.downstream_tls.client_certificate_header.trust_any — when true the
+// HTTPS-listener requirement is relaxed, as a relayed header can
+// legitimately arrive over plaintext from a trusted front proxy. Both are
+// config-file-sourced and static per process, so this only ever fires when
+// the operator disabled HTTPS (and the header relaxation) after previously
+// deploying an mtls-auth API, per authentication_authorization.md
+// GO-AUTH-011: validate the *effective* startup state and fail closed
+// (refuse to start) rather than silently running with a listener that can
+// never satisfy an already-deployed API's authentication requirement.
+func ValidateMTLSStartupInvariant(configs []*models.StoredConfig, httpsEnabled, headerTrustAny bool) error {
 	if httpsEnabled || headerTrustAny {
 		return nil
 	}

@@ -48,7 +48,7 @@ parameters:
           thumbprints:
             type: array
             description: >-
-              Narrows this entry to certificates whose SHA-256 fingerprint is
+              Narrows this entry to certificates whose SHA-256 thumbprint is
               one of these values. Accepts 64 hex characters, with or without
               colon separators and a "sha256:" prefix; normalised to 64
               lowercase hex characters. Omit to accept any certificate issued

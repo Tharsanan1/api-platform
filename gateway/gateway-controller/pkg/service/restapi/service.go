@@ -219,8 +219,8 @@ func (s *RestAPIService) Create(params CreateParams) (*CreateResult, error) {
 // invoke this after the configuration has already passed deploy-time
 // validation (Create/Update having returned no error).
 func (s *RestAPIService) ResolveMtlsAuthForResponse(cfg api.RestAPI) (api.RestAPI, []clientca.Warning) {
-	v := config.NewMtlsAuthValidator(s.db, s.routerConfig.HTTPSEnabled).
-		SetHeaderTrustAny(s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny)
+	v := config.NewMtlsAuthValidator(s.db, s.routerConfig.HTTPSEnabled,
+		s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny)
 	return v.ResolveMtlsAuthForResponse(cfg)
 }
 

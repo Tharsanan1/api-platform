@@ -963,7 +963,7 @@ func TestGetPolicy_MalformedPEM_ReturnsError(t *testing.T) {
 	})
 }
 
-// ─── Header-relay decision order (slice 4) ───────────────────────────────────
+// ─── Header-relay decision order ───────────────────────────────────
 
 // TestMtlsAuthPolicy_Evaluate_HeaderRelay covers evaluate()'s full decision
 // order for a client certificate relayed in a header by a front proxy: header
@@ -1097,7 +1097,7 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 	})
 }
 
-// ─── Header forwarding to the backend (slice 4) ──────────────────────────────
+// ─── Header forwarding to the backend ──────────────────────────────
 
 // TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend covers
 // forwardToBackend's contract: remove the header only when it was NOT

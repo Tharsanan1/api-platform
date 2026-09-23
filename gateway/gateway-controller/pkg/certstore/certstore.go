@@ -70,11 +70,12 @@ type CertStore struct {
 
 	// encryptionManager decrypts a gateway identity's private key when
 	// building its SDS secret. Set post-construction via
-	// SetEncryptionManager (mirroring SDSSecretManager's
-	// SetDownstreamListenerCert) so existing callers/tests that never
-	// touch gateway identities are unaffected; nil makes
-	// GetGatewayIdentityMaterial fail closed rather than serve an
-	// undecryptable (or worse, still-encrypted) key.
+	// SetEncryptionManager: the CertStore is constructed deep inside
+	// NewTranslator, while the encryption provider manager is built
+	// independently in main() from the loaded provider config and wired in
+	// afterward via GetCertStore(). nil makes GetGatewayIdentityMaterial fail
+	// closed rather than serve an undecryptable (or worse, still-encrypted)
+	// key.
 	encryptionManager *encryption.ProviderManager
 }
 

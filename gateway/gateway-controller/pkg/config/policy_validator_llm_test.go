@@ -36,7 +36,7 @@ func ratelimitDefs() map[string]models.PolicyDefinition {
 }
 
 func TestPolicyValidator_ValidateLLMProviderPolicies_Valid(t *testing.T) {
-	validator := NewPolicyValidator(ratelimitDefs())
+	validator := NewPolicyValidator(ratelimitDefs(), nil)
 
 	cfg := &api.LLMProviderConfiguration{
 		Spec: api.LLMProviderConfigData{
@@ -54,7 +54,7 @@ func TestPolicyValidator_ValidateLLMProviderPolicies_Valid(t *testing.T) {
 }
 
 func TestPolicyValidator_ValidateLLMProviderPolicies_NonExistentName(t *testing.T) {
-	validator := NewPolicyValidator(ratelimitDefs())
+	validator := NewPolicyValidator(ratelimitDefs(), nil)
 
 	cfg := &api.LLMProviderConfiguration{
 		Spec: api.LLMProviderConfigData{
@@ -71,7 +71,7 @@ func TestPolicyValidator_ValidateLLMProviderPolicies_NonExistentName(t *testing.
 }
 
 func TestPolicyValidator_ValidateLLMProviderPolicies_NonExistentMajorVersion(t *testing.T) {
-	validator := NewPolicyValidator(ratelimitDefs())
+	validator := NewPolicyValidator(ratelimitDefs(), nil)
 
 	// The reproduction from issue #2466: a policy that exists but at a non-existent major version.
 	cfg := &api.LLMProviderConfiguration{
@@ -89,7 +89,7 @@ func TestPolicyValidator_ValidateLLMProviderPolicies_NonExistentMajorVersion(t *
 }
 
 func TestPolicyValidator_ValidateLLMProviderPolicies_EmptyVersionResolvesToLatest(t *testing.T) {
-	validator := NewPolicyValidator(ratelimitDefs())
+	validator := NewPolicyValidator(ratelimitDefs(), nil)
 
 	// An empty version is a valid input: it resolves to the latest available version.
 	cfg := &api.LLMProviderConfiguration{
@@ -105,7 +105,7 @@ func TestPolicyValidator_ValidateLLMProviderPolicies_EmptyVersionResolvesToLates
 }
 
 func TestPolicyValidator_ValidateLLMProviderPolicies_LegacyAndOperationErrors(t *testing.T) {
-	validator := NewPolicyValidator(ratelimitDefs())
+	validator := NewPolicyValidator(ratelimitDefs(), nil)
 
 	cfg := &api.LLMProviderConfiguration{
 		Spec: api.LLMProviderConfigData{
@@ -127,7 +127,7 @@ func TestPolicyValidator_ValidateLLMProviderPolicies_LegacyAndOperationErrors(t 
 }
 
 func TestPolicyValidator_ValidateLLMProxyPolicies_Valid(t *testing.T) {
-	validator := NewPolicyValidator(ratelimitDefs())
+	validator := NewPolicyValidator(ratelimitDefs(), nil)
 
 	cfg := &api.LLMProxyConfiguration{
 		Spec: api.LLMProxyConfigData{
@@ -142,7 +142,7 @@ func TestPolicyValidator_ValidateLLMProxyPolicies_Valid(t *testing.T) {
 }
 
 func TestPolicyValidator_ValidateLLMProxyPolicies_NonExistentMajorVersion(t *testing.T) {
-	validator := NewPolicyValidator(ratelimitDefs())
+	validator := NewPolicyValidator(ratelimitDefs(), nil)
 
 	cfg := &api.LLMProxyConfiguration{
 		Spec: api.LLMProxyConfigData{

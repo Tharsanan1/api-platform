@@ -38,21 +38,16 @@ type PolicyValidator struct {
 	mtlsAuthValidator *MtlsAuthValidator
 }
 
-// NewPolicyValidator creates a new policy validator
-func NewPolicyValidator(policyDefinitions map[string]models.PolicyDefinition) *PolicyValidator {
+// NewPolicyValidator creates a new policy validator. mtlsAuthValidator wires
+// the mtls-auth-specific validator (client-CA pool lookups + HTTPS-listener
+// enablement); a nil value disables mtls-auth-specific validation entirely —
+// callers that don't need it (e.g. most unit tests) simply pass nil.
+func NewPolicyValidator(policyDefinitions map[string]models.PolicyDefinition, mtlsAuthValidator *MtlsAuthValidator) *PolicyValidator {
 	return &PolicyValidator{
 		policyDefinitions: policyDefinitions,
 		latestVersions:    BuildLatestVersionIndex(policyDefinitions),
+		mtlsAuthValidator: mtlsAuthValidator,
 	}
-}
-
-// SetMtlsAuthValidator wires the mtls-auth-specific validator (client-CA pool
-// lookups + HTTPS-listener enablement), mirroring APIValidator's
-// SetPolicyValidator setter pattern. A nil validator (the zero value, never
-// explicitly set) disables mtls-auth-specific validation entirely — callers
-// that don't wire one (e.g. most unit tests) simply skip it.
-func (pv *PolicyValidator) SetMtlsAuthValidator(v *MtlsAuthValidator) {
-	pv.mtlsAuthValidator = v
 }
 
 // BuildLatestVersionIndex scans policy definitions once and builds a map of

@@ -365,24 +365,21 @@ func main() {
 	// Fail closed (GO-AUTH-011): a persisted RestAPI that attaches mtls-auth
 	// while the HTTPS listener is disabled can never authenticate any
 	// caller, so refuse to start rather than run in that state.
-	if err := config.ValidateMTLSStartupInvariantForRouter(configStore.GetAll(), cfg.Router.HTTPSEnabled,
+	if err := config.ValidateMTLSStartupInvariant(configStore.GetAll(), cfg.Router.HTTPSEnabled,
 		cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny); err != nil {
 		log.Error("Refusing to start", slog.Any("error", err))
 		os.Exit(1)
 	}
 
-	// Initialize xDS snapshot manager with router config
-	snapshotManager := xds.NewSnapshotManager(configStore, log, &cfg.Router, db, cfg)
-
-	// Refuse to start if the certificate store failed to load (see
+	// Initialize xDS snapshot manager with router config. Refuse to start if
+	// the certificate store failed to load (see
 	// go-network-service-hardening.md / GO-AUTH-011): a degraded cert store
 	// would silently drop the upstream trust bundle and the ability to
 	// present any gateway identity, rather than fail loudly.
-	if translator := snapshotManager.GetTranslator(); translator != nil {
-		if err := translator.CertStoreInitError(); err != nil {
-			log.Error("Refusing to start: certificate store failed to initialize", slog.Any("error", err))
-			os.Exit(1)
-		}
+	snapshotManager, err := xds.NewSnapshotManager(configStore, log, &cfg.Router, db, cfg)
+	if err != nil {
+		log.Error("Refusing to start: certificate store failed to initialize", slog.Any("error", err))
+		os.Exit(1)
 	}
 
 	// Initialize SDS secret manager if custom certificates are configured
@@ -401,8 +398,6 @@ func main() {
 			snapshotManager.GetCache(),
 			"router-node", // Same node ID as main xDS
 			log,
-		)
-		sdsSecretManager.SetDownstreamListenerCert(
 			cfg.Router.DownstreamTLS.CertPath,
 			cfg.Router.DownstreamTLS.KeyPath,
 			cfg.Router.HTTPSEnabled,
@@ -424,13 +419,12 @@ func main() {
 	// falls back to the legacy path, which names clusters "cluster_<scheme>_<host>" —
 	// the policy engine then routes to upstream_* clusters that don't exist in Envoy,
 	// and every API returns 503 cluster_not_found until it is redeployed
-	restTransformer := transform.NewRestAPITransformer(&cfg.Router, cfg, policyDefinitions)
 	// The policy engine has no database access, so mtls-auth's accept list is
 	// resolved into certificate material at chain-build time — see
 	// pkg/transform/mtls_internal.go. db already satisfies
 	// config.MtlsAuthCertificateStore (the same lookups the deploy-time
 	// validator uses).
-	restTransformer.SetMtlsCertificateStore(db)
+	restTransformer := transform.NewRestAPITransformer(&cfg.Router, cfg, policyDefinitions, db)
 	llmTransformer := transform.NewLLMTransformer(configStore, db, &cfg.Router, cfg, policyDefinitions, policyVersionResolver)
 	transformerRegistry := transform.NewRegistry(restTransformer, llmTransformer)
 
@@ -582,9 +576,9 @@ func main() {
 
 	// Create validator with policy validation support
 	validator := config.NewAPIValidator()
-	policyValidator := config.NewPolicyValidator(policyDefinitions)
-	policyValidator.SetMtlsAuthValidator(config.NewMtlsAuthValidator(db, cfg.Router.HTTPSEnabled).
-		SetHeaderTrustAny(cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny))
+	mtlsAuthValidator := config.NewMtlsAuthValidator(db, cfg.Router.HTTPSEnabled,
+		cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny)
+	policyValidator := config.NewPolicyValidator(policyDefinitions, mtlsAuthValidator)
 	validator.SetPolicyValidator(policyValidator)
 	validator.SetUpstreamTLSValidator(config.NewUpstreamTLSValidator(db))
 

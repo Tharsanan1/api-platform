@@ -89,10 +89,9 @@ type APIServer struct {
 	certExpiryWarnThrottle certExpiryWarnThrottle
 
 	// encryptionManager encrypts a gateway identity's private key at rest.
-	// Set post-construction via SetEncryptionManager (mirroring
-	// SnapshotManager.SetSDSSecretManager) so existing callers/tests
-	// constructing an APIServer without encryption configured are
-	// unaffected; nil means gateway-identity upload/update is refused
+	// Set post-construction via SetEncryptionManager, since the encryption
+	// provider manager is built from operator config that may configure no
+	// provider at all; nil means gateway-identity upload/update is refused
 	// (fail-closed — a key must never be persisted unencrypted).
 	encryptionManager *encryption.ProviderManager
 }
@@ -142,7 +141,7 @@ func NewAPIServer(
 	subscriptionResourceService := utils.NewSubscriptionResourceService(db, subscriptionSnapshotUpdater, eventHub, gatewayID)
 
 	policyVersionResolver := utils.NewLoadedPolicyVersionResolver(policyDefinitions)
-	policyValidator := config.NewPolicyValidator(policyDefinitions)
+	policyValidator := config.NewPolicyValidator(policyDefinitions, nil)
 	parser := config.NewParser()
 	routerConfig := &systemConfig.Router
 	mcpDeploymentService := utils.NewMCPDeploymentService(store, db, snapshotManager, policyManager, policyValidator, eventHub, gatewayID, secretService, policyVersionResolver)

@@ -354,7 +354,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
     When I send a GET request to "https://localhost:8443/ref-lever/v1.0/anything" with client certificate "client-valid"
     Then the response status code should be 200
 
-  Scenario: A fingerprint cut-over lists old and new, then drops the old
+  Scenario: A thumbprint cut-over lists old and new, then drops the old
     Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
     When I deploy this API configuration with fixture values:
       """

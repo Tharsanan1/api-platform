@@ -153,7 +153,7 @@ type acceptEntry struct {
 	dnsSANs []string
 
 	// thumbprints narrows this entry to certificates whose canonical SHA-256
-	// fingerprint is one of these values. Normalized to lowercase hex with no
+	// thumbprint is one of these values. Normalized to lowercase hex with no
 	// separators at parse time. Nil means no thumbprint narrowing.
 	thumbprints []string
 }
@@ -202,11 +202,10 @@ type evaluationResult struct {
 	serialNumber string
 	notAfter     time.Time
 
-	// source, relayedBy, and relaySubject are exposed for tests (see the
-	// package doc comment update for slice 4) and, on success, copied into
-	// AuthContext.Properties by OnRequestHeaders. source is one of
-	// sourceConnection/sourceHeader/sourceBypass; relayedBy/relaySubject are
-	// populated only when source == sourceHeader.
+	// source, relayedBy, and relaySubject are exposed for tests and, on
+	// success, copied into AuthContext.Properties by OnRequestHeaders.
+	// source is one of sourceConnection/sourceHeader/sourceBypass;
+	// relayedBy/relaySubject are populated only when source == sourceHeader.
 	source       string
 	relayedBy    string
 	relaySubject string
@@ -218,8 +217,9 @@ type evaluationResult struct {
 // list and client-CA pool once, at policy-bind time, into x509.Certificate
 // values — so a malformed pool entry surfaces as a bind-time error instead of
 // being re-parsed (and possibly failing) on every request. This mirrors the
-// gateway-controller's cors policy's GetPolicy, not this package's own
-// previous singleton-with-no-state convention.
+// gateway-controller's cors policy's GetPolicy: a per-binding instance
+// carrying its own parsed state, rather than a stateless singleton shared
+// across every binding.
 type MtlsAuthPolicy struct {
 	accept []acceptEntry
 	pool   []*x509.Certificate
@@ -315,8 +315,8 @@ func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[str
 	return p.evaluateConnectionCertificate(reqCtx, now)
 }
 
-// evaluateConnectionCertificate is slice 3's original evaluate() body: the
-// connection's own certificate evaluated against the accept list. This is
+// evaluateConnectionCertificate evaluates the connection's own certificate
+// against the accept list. This is
 // what runs whenever the header is absent, ignored (header mode off, or on
 // but no relay vouches for this connection), ignored-but-logged (step 4
 // above), or simply never in play at all.

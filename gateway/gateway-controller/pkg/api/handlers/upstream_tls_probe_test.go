@@ -20,13 +20,8 @@ package handlers
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -39,7 +34,7 @@ import (
 )
 
 // ============================================================================
-// TestUpstreamTLS / probeUpstreamTLS (slice 5)
+// TestUpstreamTLS / probeUpstreamTLS
 // ============================================================================
 //
 // probeUpstreamTLS dials via config.UpstreamSSRFDialContext, which refuses
@@ -73,37 +68,12 @@ func nonLoopbackIPv4(t *testing.T) net.IP {
 	return nil
 }
 
-func mustProbeSerial(t *testing.T) *big.Int {
-	t.Helper()
-	max := new(big.Int).Lsh(big.NewInt(1), 128)
-	n, err := rand.Int(rand.Reader, max)
-	require.NoError(t, err)
-	return n
-}
-
 // issueServerCertForIP issues a serverAuth leaf, signed by ca, carrying ip as
-// its sole IP SAN — pki.go only supports DNS/URI SANs, and these tests dial
-// a literal IP rather than a hostname, so leaf.VerifyHostname(host) needs an
-// IP SAN to ever match.
+// its sole IP SAN — these tests dial a literal IP rather than a hostname, so
+// leaf.VerifyHostname(host) needs an IP SAN to ever match.
 func issueServerCertForIP(t *testing.T, ca *pki.Entity, ip net.IP, cn string) *pki.Entity {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	tmpl := &x509.Certificate{
-		SerialNumber:          mustProbeSerial(t),
-		Subject:               pkix.Name{CommonName: cn},
-		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour * 365),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		IPAddresses:           []net.IP{ip},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, key.Public(), ca.Key)
-	require.NoError(t, err)
-	cert, err := x509.ParseCertificate(der)
-	require.NoError(t, err)
-	return &pki.Entity{Cert: cert, Key: key, DER: der}
+	return pki.NewLeaf(t, ca, cn, pki.WithIPSANs(ip), pki.WithEKU(x509.ExtKeyUsageServerAuth))
 }
 
 // probeTestBackend is an in-test TLS server plus everything needed to tear

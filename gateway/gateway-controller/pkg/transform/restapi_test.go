@@ -113,7 +113,7 @@ func makeRestAPIStoredConfigWithResilience(apiRes, opRes *api.Resilience) *model
 
 func TestRestAPITransformer_ResiliencePrecedence(t *testing.T) {
 	const routeKey = "GET|/test/hello|main.local"
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{})
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{}, nil)
 
 	t.Run("operation-level overrides API-level", func(t *testing.T) {
 		cfg := makeRestAPIStoredConfigWithResilience(
@@ -183,7 +183,7 @@ func TestRestAPITransformer_APILevelEmptyVersionResolvesToLatest(t *testing.T) {
 		"header-mutate|v2.0.0": {Name: "header-mutate", Version: "v2.0.0"},
 	}
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs, nil)
 	cfg := makeRestAPIStoredConfig(
 		[]api.Policy{{Name: "header-mutate", Version: ""}}, // empty version
 		nil,
@@ -209,7 +209,7 @@ func TestRestAPITransformer_DuplicateAPILevelPoliciesPreserved(t *testing.T) {
 		"set-headers|v1.0.0": {Name: "set-headers", Version: "v1.0.0"},
 	}
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs, nil)
 	cfg := makeRestAPIStoredConfig(
 		[]api.Policy{
 			{Name: "set-headers", Version: "v1", Params: &map[string]interface{}{"header": "X-First"}},
@@ -245,7 +245,7 @@ func TestRestAPITransformer_OperationLevelEmptyVersionResolvesToLatest(t *testin
 		"rate-limit|v1.0.0": {Name: "rate-limit", Version: "v1.0.0"},
 	}
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs, nil)
 	cfg := makeRestAPIStoredConfig(
 		nil,
 		[]api.Policy{{Name: "rate-limit", Version: ""}}, // empty version at op level
@@ -265,7 +265,7 @@ func TestRestAPITransformer_OperationLevelEmptyVersionResolvesToLatest(t *testin
 func TestRestAPITransformer_UnknownPolicySkipped(t *testing.T) {
 	defs := map[string]models.PolicyDefinition{} // empty — policy won't resolve
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs, nil)
 	cfg := makeRestAPIStoredConfig(
 		[]api.Policy{{Name: "unknown-policy", Version: ""}},
 		nil,
@@ -290,7 +290,7 @@ func TestRestAPITransformer_LatestVersionIndexBuiltOnConstruction(t *testing.T) 
 		"auth|v2.0.0": {Name: "auth", Version: "v2.0.0"},
 	}
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs, nil)
 
 	// Verify the pre-computed index has the correct latest version.
 	assert.Equal(t, "v3.0.0", transformer.latestVersions["auth"],
@@ -317,7 +317,7 @@ func TestRestAPITransformer_EmptyVersionUsesResolvedVersionInChain(t *testing.T)
 		"header-mutate|v2.0.0": {Name: "header-mutate", Version: "v2.0.0"},
 	}
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs, nil)
 	cfg := makeRestAPIStoredConfig(
 		[]api.Policy{{Name: "header-mutate", Version: ""}},
 		nil,
@@ -475,7 +475,7 @@ func TestRestAPITransformer_SandboxRouteClusterHeader(t *testing.T) {
 	const expectedSandboxCluster = "upstream_sandbox_sandbox-backend_9080"
 
 	t.Run("without upstreamDefinitions the sandbox route still uses cluster_header defaulting to the sandbox cluster", func(t *testing.T) {
-		transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
+		transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs, nil)
 		cfg := makeRestAPIStoredConfig(nil, nil)
 		restAPI := cfg.Configuration.(api.RestAPI)
 		restAPI.Spec.Upstream.Sandbox = &api.Upstream{Url: ptrStr(sandboxURL)}
@@ -491,7 +491,7 @@ func TestRestAPITransformer_SandboxRouteClusterHeader(t *testing.T) {
 	})
 
 	t.Run("with upstreamDefinitions the sandbox route uses cluster_header defaulting to the sandbox cluster", func(t *testing.T) {
-		transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
+		transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs, nil)
 		cfg := makeRestAPIStoredConfig(nil, nil)
 		restAPI := cfg.Configuration.(api.RestAPI)
 		restAPI.Spec.Upstream.Sandbox = &api.Upstream{Url: ptrStr(sandboxURL)}
@@ -513,7 +513,7 @@ func TestRestAPITransformer_SandboxRouteClusterHeader(t *testing.T) {
 // rdc.UpstreamClusters map key, so every route's DefaultCluster (used when no policy sets the
 // upstream) must be one of those keys — otherwise a route that relies on the default returns 500.
 func TestRestAPITransformer_DefaultClusterReferencesRealCluster(t *testing.T) {
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{})
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{}, nil)
 
 	upDefs := []api.UpstreamDefinition{{Name: "alt-upstream"}}
 	apiData := api.APIConfigData{
@@ -578,7 +578,7 @@ func mkMatch(method, path string, headers ...api.OperationHeaderMatch) *api.Oper
 // Gateway-API earlier-rule-wins tie-break). This is the regression guard for the
 // HTTPRouteHeaderMatching / MatchingAcrossRoutes conformance behavior.
 func TestRestAPITransformer_HeaderMatchRoutesDoNotCollide(t *testing.T) {
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{})
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{}, nil)
 
 	apiData := api.APIConfigData{
 		DisplayName: "Header Matching API",
@@ -668,7 +668,7 @@ func TestSplitVhosts(t *testing.T) {
 // vhosts.main produces one route per production hostname (each serving the main upstream), and
 // that the first entry is the primary vhost. This is the replacement for the removed vhostList.
 func TestRestAPITransformer_SemicolonVhostsExpandToMultipleHosts(t *testing.T) {
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{})
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{}, nil)
 
 	apiData := api.APIConfigData{
 		DisplayName: "Multi VHost API",
@@ -760,7 +760,7 @@ func TestRestAPITransformer_MixedSchemeUpstreamDefinition(t *testing.T) {
 		return nil
 	}
 
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{})
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{}, nil)
 
 	t.Run("mixed https and http is rejected", func(t *testing.T) {
 		_, err := transformer.Transform(mkCfg("https://a:8443", "http://b:8080"))
@@ -792,7 +792,7 @@ func TestRestAPITransformer_MixedSchemeUpstreamDefinition(t *testing.T) {
 // coexist as two distinct routes (the header match gives the second a discriminator segment), so
 // header precedence — not a collision — decides which serves a given request.
 func TestRestAPITransformer_SimpleAndMatchSamePathCoexist(t *testing.T) {
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{})
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{}, nil)
 	apiData := api.APIConfigData{
 		DisplayName: "Mixed Form API",
 		Context:     "/test",
@@ -837,7 +837,7 @@ func TestRestAPITransformer_SimpleAndMatchSamePathCoexist(t *testing.T) {
 func TestRestAPITransformer_OperationFormCombinations(t *testing.T) {
 	mk := func(ops []api.Operation) *models.RuntimeDeployConfig {
 		t.Helper()
-		transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{})
+		transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{}, nil)
 		apiData := api.APIConfigData{
 			DisplayName: "Forms API", Context: "/test", Version: "1.0.0", Operations: ops,
 			Upstream: struct {
@@ -898,7 +898,7 @@ func TestRestAPITransformer_OperationFormCombinations(t *testing.T) {
 // that references it) so the RDC->Envoy translation can apply it instead of dropping it.
 // A definition without a timeout leaves ConnectTimeout nil (the global default applies later).
 func TestRestAPITransformer_ConnectTimeoutFromDefinition(t *testing.T) {
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{})
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, map[string]models.PolicyDefinition{}, nil)
 
 	build := func(connect *string) (*models.RuntimeDeployConfig, error) {
 		def := api.UpstreamDefinition{

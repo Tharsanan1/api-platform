@@ -81,6 +81,14 @@ type Bundle struct {
 	Warnings []Warning
 }
 
+// MsgNotPEMCertificate is the sterile validation message for a
+// certificate/uploaded-value field that failed to parse as a PEM-encoded
+// certificate. Exported so every certificate-content validator in the
+// gateway-controller module (clientca, gatewayidentity, the
+// /certificates upload handler) reports this exact wording, rather than
+// each declaring its own copy of the same string.
+const MsgNotPEMCertificate = "the value is not a PEM-encoded certificate"
+
 const (
 	codeClientCAIsLeaf      = "CLIENT_CA_IS_LEAF"
 	codeClientCANotYetValid = "CLIENT_CA_NOT_YET_VALID"
@@ -88,7 +96,6 @@ const (
 	fieldCertificate        = "certificate"
 	fieldNotAfter           = "notAfter"
 	msgPrivateKeyPresent    = "the upload contains a private key; a client-CA entry accepts certificates only"
-	msgNotPEMCertificate    = "the value is not a PEM-encoded certificate"
 	msgUnrelatedAuthorities = "this PEM contains more than one unrelated authority; upload each as its own entry"
 	msgLeafNotAuthority     = "the certificate is not a certificate authority; it is pooled as a one-member authority that trusts exactly this certificate"
 )
@@ -216,12 +223,12 @@ func parseCertificateBlocks(data []byte) ([]*x509.Certificate, error) {
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			return nil, &FieldError{Field: fieldCertificate, Message: msgNotPEMCertificate}
+			return nil, &FieldError{Field: fieldCertificate, Message: MsgNotPEMCertificate}
 		}
 		certs = append(certs, cert)
 	}
 	if len(certs) == 0 {
-		return nil, &FieldError{Field: fieldCertificate, Message: msgNotPEMCertificate}
+		return nil, &FieldError{Field: fieldCertificate, Message: MsgNotPEMCertificate}
 	}
 	return certs, nil
 }

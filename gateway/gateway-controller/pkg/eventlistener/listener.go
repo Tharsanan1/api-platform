@@ -127,7 +127,7 @@ func NewEventListener(
 		logger:                logger,
 		systemConfig:          systemConfig,
 		policyDefinitions:     policyDefinitions,
-		policyValidator:       config.NewPolicyValidator(policyDefinitions),
+		policyValidator:       config.NewPolicyValidator(policyDefinitions, nil),
 		secretResolver:        secretResolver,
 		policyVersionResolver: policyVersionResolver,
 		ctx:                   ctx,

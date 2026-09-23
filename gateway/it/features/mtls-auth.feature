@@ -147,9 +147,9 @@ Feature: Authenticating API callers with a client certificate
     And the response should contain echoed header "x-forwarded-client-cert" containing "URI=urn:partner-a:payments"
     And the response should contain echoed header "x-forwarded-client-cert" containing "Cert="
 
-  # ==================== EXACT CERTIFICATES BY FINGERPRINT ====================
+  # ==================== EXACT CERTIFICATES BY THUMBPRINT ====================
 
-  Scenario: An API accepting exact fingerprints admits those certificates and nothing else from the authority
+  Scenario: An API accepting exact thumbprints admits those certificates and nothing else from the authority
     Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
     When I deploy this API configuration with fixture values:
       """
@@ -186,7 +186,7 @@ Feature: Authenticating API callers with a client certificate
     When I send a GET request to "https://localhost:8443/mtls-thumb/v1.0/anything" with no client certificate
     Then the response status code should be 401
 
-  Scenario: A renewed certificate is admitted once its fingerprint is listed alongside the old one
+  Scenario: A renewed certificate is admitted once its thumbprint is listed alongside the old one
     Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
     When I deploy this API configuration with fixture values:
       """

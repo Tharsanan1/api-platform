@@ -270,7 +270,7 @@ func NewClient(
 	}
 
 	policyVersionResolver := utils.NewLoadedPolicyVersionResolver(policyDefinitions)
-	policyValidator := config.NewPolicyValidator(policyDefinitions)
+	policyValidator := config.NewPolicyValidator(policyDefinitions, nil)
 	client.llmDeploymentService = utils.NewLLMDeploymentService(
 		store,
 		db,

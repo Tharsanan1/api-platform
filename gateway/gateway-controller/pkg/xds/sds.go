@@ -57,20 +57,12 @@ type SDSSecretManager struct {
 	nodeID    string
 
 	// listenerCertPath/listenerKeyPath and httpsEnabled configure the
-	// downstream_listener_cert secret. Set via SetDownstreamListenerCert —
-	// kept out of the constructor so existing callers/tests that only need
-	// the upstream_ca_bundle secret (via GetSecret) are unaffected.
+	// downstream_listener_cert secret; httpsEnabled false makes GetSecrets
+	// skip this secret entirely rather than attempt to read files that may
+	// not exist when HTTPS is disabled.
 	listenerCertPath string
 	listenerKeyPath  string
 	httpsEnabled     bool
-
-	// upstreamTLSRefs is set via SetUpstreamTLSSecretRefs before each
-	// GetSecrets call — the per-cluster mTLS wiring (gateway identity /
-	// per-upstream trust) collected by the translator for the snapshot
-	// currently being built. Kept as a field (mirroring
-	// SetDownstreamListenerCert) rather than a GetSecrets parameter so
-	// existing callers/tests exercising the unrelated secrets are unaffected.
-	upstreamTLSRefs []UpstreamTLSSecretRef
 }
 
 // UpstreamTLSSecretRef describes one upstream definition's mTLS wiring as
@@ -117,34 +109,24 @@ func UpstreamCAValidationContextSecretName(apiHandle, definitionName string) str
 	return SecretNamePrefixUpstreamCA + apiHandle + ":" + definitionName
 }
 
-// SetUpstreamTLSSecretRefs sets the per-cluster mTLS wiring for the snapshot
-// currently being built. Must be called before GetSecrets whenever any
-// deployed upstream definition carries a tls block.
-func (sm *SDSSecretManager) SetUpstreamTLSSecretRefs(refs []UpstreamTLSSecretRef) {
-	sm.upstreamTLSRefs = refs
-}
-
-// NewSDSSecretManager creates a new SDS secret manager
-// It shares the same cache and node ID as the main xDS to ensure Envoy can fetch secrets
-func NewSDSSecretManager(certStore *certstore.CertStore, cache cache.SnapshotCache, nodeID string, logger *slog.Logger) *SDSSecretManager {
+// NewSDSSecretManager creates a new SDS secret manager, sharing the same
+// cache and node ID as the main xDS so Envoy can fetch secrets.
+// listenerCertPath/listenerKeyPath/httpsEnabled configure the
+// downstream_listener_cert secret, sourced from the same router config that
+// already gates the HTTPS listener itself; httpsEnabled false makes
+// GetSecrets skip this secret entirely rather than attempt to read files
+// that may not exist when HTTPS is disabled.
+func NewSDSSecretManager(certStore *certstore.CertStore, cache cache.SnapshotCache, nodeID string, logger *slog.Logger,
+	listenerCertPath, listenerKeyPath string, httpsEnabled bool) *SDSSecretManager {
 	return &SDSSecretManager{
-		cache:     cache,
-		certStore: certStore,
-		logger:    logger,
-		nodeID:    nodeID,
+		cache:            cache,
+		certStore:        certStore,
+		logger:           logger,
+		nodeID:           nodeID,
+		listenerCertPath: listenerCertPath,
+		listenerKeyPath:  listenerKeyPath,
+		httpsEnabled:     httpsEnabled,
 	}
-}
-
-// SetDownstreamListenerCert configures the source files for the
-// downstream_listener_cert secret. Must be called (from the same router
-// config that already gates the HTTPS listener itself) before GetSecrets is
-// relied on for a snapshot that includes an HTTPS listener; httpsEnabled
-// false makes GetSecrets skip this secret entirely rather than attempt to
-// read files that may not exist when HTTPS is disabled.
-func (sm *SDSSecretManager) SetDownstreamListenerCert(certPath, keyPath string, httpsEnabled bool) {
-	sm.listenerCertPath = certPath
-	sm.listenerKeyPath = keyPath
-	sm.httpsEnabled = httpsEnabled
 }
 
 // GetCache returns the SDS snapshot cache
@@ -233,7 +215,7 @@ func (sm *SDSSecretManager) GetSecret() (types.Resource, error) {
 // between a database delete committing and this process's in-memory
 // ConfigStore catching up, and that must degrade only the one affected
 // API's cluster, never every other API in the same snapshot.
-func (sm *SDSSecretManager) GetSecrets() ([]types.Resource, error) {
+func (sm *SDSSecretManager) GetSecrets(upstreamTLSRefs []UpstreamTLSSecretRef) ([]types.Resource, error) {
 	var secrets []types.Resource
 
 	if upstreamSecret, err := sm.GetSecret(); err != nil {
@@ -307,8 +289,8 @@ func (sm *SDSSecretManager) GetSecrets() ([]types.Resource, error) {
 	// downgrade for that API alone — everything else in the snapshot is
 	// unaffected.
 	if sm.certStore != nil {
-		seenIdentities := make(map[string]bool, len(sm.upstreamTLSRefs))
-		for _, ref := range sm.upstreamTLSRefs {
+		seenIdentities := make(map[string]bool, len(upstreamTLSRefs))
+		for _, ref := range upstreamTLSRefs {
 			if ref.IdentityName == "" || seenIdentities[ref.IdentityName] {
 				continue
 			}
@@ -344,8 +326,8 @@ func (sm *SDSSecretManager) GetSecrets() ([]types.Resource, error) {
 		// same name in one snapshot. A lookup failure here is likewise
 		// non-fatal to the snapshot, for the same convergence-window reason
 		// as gateway identities above — skip only this one secret.
-		seenValidationContexts := make(map[string]bool, len(sm.upstreamTLSRefs))
-		for _, ref := range sm.upstreamTLSRefs {
+		seenValidationContexts := make(map[string]bool, len(upstreamTLSRefs))
+		for _, ref := range upstreamTLSRefs {
 			if len(ref.TrustedCANames) == 0 {
 				continue
 			}

@@ -75,20 +75,29 @@ type SnapshotManager struct {
 	afterGetAll      func() // nil in production; test hook for deterministic race testing
 }
 
-// NewSnapshotManager creates a new snapshot manager
-func NewSnapshotManager(store *storage.ConfigStore, logger *slog.Logger, routerConfig *config.RouterConfig, db storage.Storage, cfg *config.Config) *SnapshotManager {
+// NewSnapshotManager creates a new snapshot manager. It returns a non-nil
+// error when the translator's certificate store fails to load (see
+// NewTranslator) — per go-network-service-hardening.md/
+// authentication_authorization.md GO-AUTH-011, callers must refuse to start
+// rather than run with a degraded cert store.
+func NewSnapshotManager(store *storage.ConfigStore, logger *slog.Logger, routerConfig *config.RouterConfig, db storage.Storage, cfg *config.Config) (*SnapshotManager, error) {
 	// Create a snapshot cache with a simple node ID hasher
 	snapshotCache := cache.NewSnapshotCache(false, cache.IDHash{}, &slogAdapter{logger: logger})
 
+	translator, err := NewTranslator(logger, routerConfig, db, cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	return &SnapshotManager{
 		cache:            snapshotCache,
-		translator:       NewTranslator(logger, routerConfig, db, cfg),
+		translator:       translator,
 		store:            store,
 		logger:           logger,
 		nodeID:           "router-node",
 		statusCallback:   nil,
 		sdsSecretManager: nil,
-	}
+	}, nil
 }
 
 // SetSDSSecretManager sets the SDS secret manager
@@ -148,8 +157,7 @@ func (sm *SnapshotManager) UpdateSnapshot(ctx context.Context, correlationID str
 	// how the old inline-bytes path failed translation outright when it
 	// read the same files directly.
 	if sm.sdsSecretManager != nil {
-		sm.sdsSecretManager.SetUpstreamTLSSecretRefs(sm.translator.GetUpstreamTLSSecretRefs())
-		secrets, err := sm.sdsSecretManager.GetSecrets()
+		secrets, err := sm.sdsSecretManager.GetSecrets(sm.translator.GetUpstreamTLSSecretRefs())
 		if err != nil {
 			log.Error("Failed to build SDS secrets", slog.Any("error", err))
 			metrics.SnapshotGenerationTotal.WithLabelValues("main", "error", trigger).Inc()

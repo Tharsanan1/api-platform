@@ -3,7 +3,6 @@
 **Status:** Ready for team review — all decisions recorded (D1–D12); one open question (Q-M, §10) with its own options paper
 **Branch:** `mtls`
 **Scope:** Data-plane mTLS in both directions — client → gateway (inbound) and gateway → backend (outbound)
-**Background:** [`research.md`](./research.md) holds the protocol and option analysis this spec draws on; it is not required reading.
 
 ---
 
@@ -45,7 +44,7 @@ This spec covers both directions. They are **not symmetric**:
   Header-relayed client certificates are in scope as G7 / D12 (§3.1.3). The
   identifier is retained so earlier references resolve; the concern that motivated it — a header
   believed without knowing who set it — is now S21.
-- N5. **Trusting a relayed header by source IP range.** Kong's `trusted_ips` rung. Deferred: the two
+- N5. **Trusting a relayed header by source IP range.** the source-IP allowlist rung some gateways offer. Deferred: the two
   shipped ways to believe a header (D12) cover the proof case and the trusted-network case; an
   address allowlist sits between them and can be added without changing either.
 - N2. **CRL (Certificate Revocation List) based revocation.** Envoy accepts a CRL as supplied data but will not fetch or refresh
@@ -2080,7 +2079,7 @@ capability negotiation (§6, deferred).
 
 1. **Q-M — SNI-scoped certificate requests on the shared listener.** Under D2 the shared HTTPS
    listener asks *every* connection for a certificate while any mTLS API exists, and D3's dedicated
-   port (M4) is the only relief the spec offers. Kong and Envoy Gateway instead ask only on the
+   port (M4) is the only relief the spec offers. Other gateways instead ask only on the
    hostnames of mTLS routes, on one port. Because enforcement here is per request in the policy
    (D1), a coalesced connection yields a `401` rather than the bypass that made GEP-91 reject the
    shape, so it is available to us as a derived second filter chain when every mTLS API has its
@@ -2128,7 +2127,7 @@ HTTP/2 forbids asking again (A.1). So on the shared listener the choice is binar
 or none. While any mTLS API is deployed the listener asks, and a browser with client certificates
 installed may show a selection dialog on public APIs — including the public *operations* of an API
 whose other operations use `mtls-auth`. No product can narrow this at the transport: all operations of
-one API share one hostname, so Kong's SNI map cannot separate them either.
+one API share one hostname, so an SNI map cannot separate them either.
 
 **The shape.** A second listener on its own port with `require_client_certificate: true`. The
 dedicated listener is a property of the **connection**, not of the API: every deployed API is reachable
@@ -2139,7 +2138,7 @@ dedicated port with its certificate. An mTLS operation reached over the shared p
 because no certificate can exist on that connection and the policy fails closed (§8.11). The operator
 publishes one base URL per listener.
 
-**Alternative for the M4 design.** Kong and Envoy Gateway split by *hostname* on one port instead —
+**Alternative for the M4 design.** Other gateways split by *hostname* on one port instead —
 an SNI-matched filter chain that asks only on the mTLS hostname. We rejected per-SNI chains in N4
 because HTTP/2 connection coalescing lets a browser reuse a connection across hostnames, but coalescing
 only occurs when one server certificate covers both names. With a separate certificate per hostname it
@@ -2261,8 +2260,8 @@ valid certificate presented to a public API used to reach that backend as XFCC w
 Two products informed this. APIM's `MutualSSLAuthenticator` honours a certificate header when the
 connection's certificate exists in the listener truststore; the truststore also holds every client
 certificate, so any mTLS client can relay any other client's identity — proof of possession is never
-established for the relayed certificate. Kong's `header-cert-auth` is a separate plugin that believes
-the header when the source IP is in `trusted_ips`, with a documented warning that disabling that check
+established for the relayed certificate. Some gateways use a separate header-based plugin that believes
+the header when the source IP is in an allowlist, with a documented warning that disabling that check
 lets anyone inject certificates. Both ship a bypass, both default it off.
 
 Chosen: one policy, because the `accept` semantics, output and tests are identical and a second

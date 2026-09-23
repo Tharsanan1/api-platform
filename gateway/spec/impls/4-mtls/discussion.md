@@ -7,15 +7,11 @@ uses it (xDS, policy-xDS, ext_proc), so the config vocabulary and identity helpe
 never been pointed at API traffic. This proposes both directions:
 
 1. **Inbound** — a client authenticates to an API with an X.509 certificate, enforced **per API**,
-   including when a load balancer terminates TLS in front of the gateway and relays the certificate
-   in a header.
+   including when a load balancer terminates TLS in front of the gateway and relays the certificate in a header.
 2. **Outbound** — the gateway presents a **per-upstream** client certificate to a backend that
    requires one, with per-upstream trust.
 
-The two are not symmetric. Inbound is part transport, part policy: Envoy negotiates and validates,
-a policy decides per API. Outbound is pure transport: a client certificate is presented on a pooled
-connection before any request exists, so no policy can touch it, and `upstream.auth.type` does not
-gain an `mtls` value.
+The two are not symmetric. Inbound is part transport, part policy: Envoy negotiates and validates, a policy decides per API. Outbound is pure transport: a client certificate is presented on a pooled connection before any request exists, so no policy can touch it, and `upstream.auth.type` does not gain an `mtls` value.
 
 mTLS is **authentication only**. The new `mtls-auth` policy writes an `AuthContext` and nothing
 else — no application id, nothing `subscription-validation` consumes. An API that needs both
@@ -101,8 +97,8 @@ backend unless forwarding is enabled and the header was believed.
 
 APIM does this in one authenticator with `enable_client_validation` (default true): the header is
 honoured if the connection's certificate exists in the truststore — which also holds every client
-certificate, so any client can relay another's identity. Kong's separate `header-cert-auth` plugin
-gates on `trusted_ips`. The relay mark is APIM's approach with that gap closed; trusted IPs are
+certificate, so any client can relay another's identity. Some gateways use a separate header-based plugin
+gated on a source-IP allowlist. The relay mark is APIM's approach with that gap closed; trusted IPs are
 deferred and can be added between the two options later.
 
 ## Outbound
@@ -161,5 +157,3 @@ header block above.
 - A dangling reference (`accept` naming a missing or relay or `upstream` entry; `tls.identity`
   missing) is refused at deploy. Deleting an entry an API names is refused with 409.
 - Private keys: never in xDS `inline_bytes`, never in a read response, config dump or log.
-
-Full spec: `gateway/spec/impls/4-mtls/spec.md` on branch `mtls`.

@@ -26,12 +26,12 @@ mTLS APIs**, decided from the SNI in the `ClientHello`.
 
 | Product | Mechanism | Shared port? |
 |---|---|---|
-| Kong `mtls-auth` | Keeps "an in-memory map of SNIs from Routes that require client certificates" and requests a certificate only when the `ClientHello` SNI is in the map. Docs: "SNIs must be set for all Routes that mutual TLS authentication uses"; without them Kong asks on every handshake. | yes |
+| A competing gateway's mTLS plugin | Keeps "an in-memory map of SNIs from Routes that require client certificates" and requests a certificate only when the `ClientHello` SNI is in the map. Docs: "SNIs must be set for all Routes that mutual TLS authentication uses"; without them it asks on every handshake. | yes |
 | Envoy Gateway | `ClientTrafficPolicy.tls.clientValidation` attached to a Gateway or one of its listeners; each listener hostname becomes an SNI-matched Envoy filter chain. `optional: true` gives request-not-require. | yes |
 | APK 1.3 | Gateway-wide `mtlsAPIsEnabled` TOML flag; when on, the single listener asks on every handshake. No SNI split, no second port. | yes, asks everyone |
 | Kubernetes Gateway API (GEP-91) | Per-**port** client validation. Per-route/per-hostname validation is declared a non-goal because of HTTP/2 connection coalescing. | per port |
 
-Kong and Envoy Gateway split by hostname on one port. GEP-91 refused to, for the reason in §4.
+Other gateways split by hostname on one port. GEP-91 refused to, for the reason in §4.
 
 ## 3. Why our design can do what GEP-91 could not
 
@@ -285,7 +285,7 @@ through its own `accept`.
 | Operator work | second port/Service/Ingress, second base URL | `vhosts.main` + DNS + SAN on the server cert | either |
 | Coalescing exposure | none | spurious `401` for a partner's browser on a multi-SAN cert; never a bypass | as (b) on the shared port |
 | Controller work | second listener; operator overlay work (`spec.md` §5.4) | `tls_inspector` + second filter chain + derivation + warning | both |
-| Industry precedent | GEP-91 | Kong, Envoy Gateway | — |
+| Industry precedent | GEP-91 | other gateways | — |
 | Milestone fit | M4 | small enough for M3; or M4 | M3 (b) + M4 (a) |
 
 ## 8. Tests this would add to `spec.md` §8

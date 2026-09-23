@@ -81,7 +81,7 @@ Decisions taken while writing slice 2 tests: unknown-parameter message is `unkno
 | §8.15 API-M rows (nothing, valid, extra SANs, SAN≠U, no SAN, renewed, wrong CA, same CN, same-DN CA, self-signed unpooled, expired, not-yet-valid, serverAuth-only) | IT mtls-auth outline *An API accepting one authority narrowed by URI SAN decides per certificate* (15 rows); UT mtlsauth_test evaluate branches |
 | §8.15 API-M chain depth > max | not automated: the listener uses Envoy's default depth, so no fixture exceeds it; revisit if a max_verify_depth is ever configured |
 | §8.15 API-P rows (cert ignored, XFCC stripped) | IT outline *A public API ignores whatever certificate arrives…* (6 rows) |
-| §8.15 API-T rows (thumbprint; renewed 401 until updated) | IT *An API accepting exact fingerprints…*; *A renewed certificate is admitted once its fingerprint is listed…* |
+| §8.15 API-T rows (thumbprint; renewed 401 until updated) | IT *An API accepting exact thumbprints…*; *A renewed certificate is admitted once its thumbprint is listed…* |
 | §8.15 forged XFCC with/without cert; header stripped | IT *A forged forwarded-certificate header never reaches a backend or stands in for a handshake*; UT SDK accessor never reads headers; UT policy: XFCC read only when MTLS true, chain never becomes a root |
 | §8.15 HTTP/1.1 and TLS 1.2 clients; one HTTP/2 connection across APIs | not automated: the request steps open a fresh connection per request; covered by the per-request evaluation design (UT) |
 | §8.15 mtls-auth + jwt-auth composition (4 rows, identical 401 bodies) | IT *A certificate and a token are both required when both policies are attached* |
@@ -121,7 +121,7 @@ Decisions taken while writing slice 2 tests: unknown-parameter message is `unkno
 | §8.13 DELETE last authority while mTLS APIs exist → 409 (S8) | IT: *The last client authority cannot be removed…*; UT |
 | §3.1.3 last relay entry deletable | IT: *A relay entry can be removed even when it is the last one…* |
 | §8.13 upstream row DELETE unchanged | IT: *An upstream trust certificate keeps today's removal behaviour* |
-| §8.4 revoke by removing a SAN; by removing an entry; thumbprint cut-over; renewed 401 until listed | IT: *Removing one SAN…*, *Removing one partner's entry…*, *A fingerprint cut-over…*; slice 3 thumbprint scenarios |
+| §8.4 revoke by removing a SAN; by removing an entry; thumbprint cut-over; renewed 401 until listed | IT: *Removing one SAN…*, *Removing one partner's entry…*, *A thumbprint cut-over…*; slice 3 thumbprint scenarios |
 | §8.4 pool removal → new handshakes only; inheriting APIs stop silently | IT inheriting-removal scenario (per-request accept resolution makes it immediate in practice) |
 | §8.8 same authority twice in `accept`; twice in pool under two names | IT: *Listing the same authority twice…*, *The same authority pooled under two names…* |
 | §8.18 H1–H13, H16, H19, H20 (default config) | IT mtls-header-relay (outline + scenarios); UT mtlsauth_test header relay |
@@ -192,3 +192,42 @@ Decisions taken while writing slice 2 tests: unknown-parameter message is `unkno
   bound to loopback reports `CONNECT_FAILED`.
 - An identity that cannot be loaded makes the TLS test return a sterile 500 rather than dialling
   without a certificate.
+
+## Slice 6 — observability (§3.3, §8.9, §8.16; §5.2.3 dropped, §8.10 noted)
+
+| Spec case | Test |
+|---|---|
+| §3.3 access log: `sni`, `tlsVer`, `peerSubj`, `peerFp` populated with a certificate, empty without one; `upTlsFail` on a backend TLS failure; text format unchanged | IT mtls-observability: *An accepted certificate is named in the access log…*, *A rejected certificate is an HTTP outcome…*, *A request without a certificate logs the certificate fields empty*, *A backend TLS failure is logged with its reason…*; UT config defaults (five JSON keys present, text format byte-identical) |
+| §3.3 analytics: `authType = mtls`, `userId` = subject, no application | IT: *An accepted certificate is named…* (`user_id`, no `applicationId`); UT policy `AuthContext.AuthType == "mtls"`; the analytics system policy stamps auth type generically (its own tests) |
+| §3.3 span attributes (`tls.client.*`, `enduser.id`, `mtls_auth.result/reason/matched_entry/source/relayed_by`), never a PEM | UT policy with an in-memory span recorder (allow, each deny reason, header source, bypass); UT executor: a policy receives its own span in `ctx` |
+| §3.3 deny reasons `authority_not_accepted`, `san_mismatch`, `thumbprint_mismatch` (most specific failure wins) | UT policy evaluation table |
+| §3.3 policy WARN when an `accept` entry names an authority the policy cannot find | UT policy log capture |
+| §3.3 / §8.9 `policy_executions_total{policy_name="mtls-auth", status="denied"}` and nothing `mtls-auth`-specific | IT: *A policy deny is counted like any other policy deny and nothing more* |
+| §3.3 `certificates_total{usage}`, `certificate_expiry_seconds{cert_id,cert_name}` set at startup and after every write, series removed on delete | IT: *Certificate gauges follow the pool…*; UT metrics refresh |
+| §8.9 an invalid certificate is a `401` with `peerSubj`/`peerFp` and in analytics | IT: *A rejected certificate is an HTTP outcome…* |
+| §8.9 expiry: `CERT_EXPIRES_SOON` in the response, WARN in the controller log, gauge set | IT: *Certificate gauges follow the pool and expiry is warned on every channel*; UT daily sweep (one WARN per certificate per run) |
+| §8.16 every warning `code` is from the closed set | UT: every code the controller can emit is in the OpenAPI `enum` |
+| §8.16 no private key in any response | already covered (S17) |
+| §5.2.3 `GET /tls/handshake-failures`, `tls_handshake_failures_total` | dropped — see decisions |
+| §8.10 performance items | not automated here: measured in the performance environment before any default changes |
+
+### Decisions taken in slice 6
+
+- `GET /tls/handshake-failures` and `tls_handshake_failures_total` are dropped from the feature.
+  With accept-untrusted, every certificate outcome is an HTTP outcome; what still dies before HTTP
+  (protocol version, cipher or ALPN mismatch, malformed ClientHello, resets) is unrelated to mTLS and
+  fails identically on a listener without it. Envoy's per-listener `ssl.*` stats already count those.
+  Per-connection handshake diagnostics, if wanted, are a separate feature for every HTTPS listener.
+- Gateway identities are certificate rows, so there is no separate identities gauge:
+  `certificates_total{usage="identity"}` is the count. The gauge's never-populated `type` label is
+  renamed `usage`.
+- Expiry warnings are logged by a daily sweep (also run at startup) rather than throttled from the
+  listing handler; the listing keeps returning the warning in the body.
+- The policy receives its own span through `ctx`, so it sets attributes with the OpenTelemetry API
+  and the executor stays generic.
+- Span attributes are unit-tested: the integration stack runs without a trace collector.
+- The analytics publisher used by the test stack exports the user id but not the auth type, so the
+  auth-type assertion is a unit test; the integration scenario asserts the user id and the absence of
+  an application.
+- The integration stack's router access log switches to the JSON format so the five fields can be
+  asserted; no scenario depended on the text format.

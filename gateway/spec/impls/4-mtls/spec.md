@@ -644,7 +644,7 @@ upstreamDefinitions:
     upstreams:
       - url: https://billing.partner.example.com
     tls:
-      identity: partner-billing-id       # a gateway identity, by name -> gw_gateway_identity
+      identity: partner-billing-id       # a gateway identity, by name -> /certificates (usage: identity)
       trustedCAs: [partner-billing-ca]   # per-upstream trust (G5), by name -> /certificates
       verifyHostName: true
 ```
@@ -660,7 +660,7 @@ while `tls` describes a trust relationship with a backend.
 
 | Field | Type | Default when absent | References | Constraint |
 |---|---|---|---|---|
-| `identity` | string | no client certificate presented | a `/gateway-identities` entry, by `name` | must exist on this gateway (S18); its certificate is what the gateway presents to this backend |
+| `identity` | string | no client certificate presented | a `/certificates` entry with `usage: identity`, by `name` | must exist on this gateway (S18); its certificate is what the gateway presents to this backend |
 | `trustedCAs` | list of strings, ≥1 | the gateway-wide backend trust bundle | `/certificates` entries, by `name` | every name must exist (S18); an empty list is `400`; **replaces** the gateway bundle for this upstream, does not extend it |
 | `verifyHostName` | boolean | `true` | — | `false` deploys with warning `TLS_VERIFY_HOSTNAME_DISABLED` |
 
@@ -941,18 +941,18 @@ existing `UNIQUE(gateway_id, name)` stays: names are unique across both usages, 
 checked for the right usage at deploy time (§5.2.1). For `usage = client` rows the upload enforces one
 authority per row (§3.1.1); `upstream` rows keep today's bundle semantics and `cert_count`.
 
-**`gw_gateway_identity`** — outbound keypairs. New table, guarded `CREATE TABLE IF NOT EXISTS` in
-each of `gateway-controller-db.sql`, `.postgres.sql` and `.sqlserver.sql`, no `ALTER` path.
+**Gateway identities are rows of the same table (D7, extended).** An identity is a certificate chain
+plus a private key the gateway presents to backends. It lands on `certificates` with `usage = identity`
+and two further additive nullable columns, shipped in the same single migration as `usage` and `role`:
 
 | Column | Notes |
 |---|---|
-| `uuid` | PK, UUIDv7 |
-| `gateway_id` | scoping; PK `(gateway_id, uuid)`, `UNIQUE(gateway_id, name)` |
-| `name` | operator-facing label |
-| `certificate_chain` | PEM, leaf first |
-| `private_key_ciphertext` | **encrypted at rest** via `pkg/encryption`; never returned by any API |
-| `key_algorithm`, `subject`, `issuer`, `not_before`, `not_after` | parsed metadata |
-| `created_at`, `updated_at` | audit |
+| `private_key_ciphertext` | TEXT, the `pkg/encryption` payload; **encrypted at rest**; NULL for every other usage; never returned by any API |
+| `key_algorithm` | parsed metadata for listings |
+
+`usage` therefore takes `upstream` (default), `client` or `identity`. Every bundle the controller builds
+filters by exact usage, so an identity never enters the upstream trust bundle or the client-CA bundle,
+and never counts as a client authority. Names stay one namespace across all three usages.
 
 Note the PQC sizing rule (`post-quantum-cryptography.md` d.4): certificate and key columns are
 `BLOB`/`BYTEA`/`TEXT`, never `VARCHAR(512)`. An ML-DSA-65 signature is 3309 B and chains are
@@ -982,10 +982,10 @@ developer reads:
 | `POST /certificates` **(existing, extended)** | `admin` | New optional body fields: `usage` (`upstream` default, `client`) says where the certificate lands; `role: relay` (with `usage: client`) marks a front proxy's authority as allowed to relay certificates in a header (§3.1.3). Omit both and the call behaves exactly as today |
 | `GET /certificates` **(existing, extended)** | `admin, developer` | New optional `?usage=` filter; each item carries `usage`, `role`, `isLeaf` and, for `client`, `referencedByApis`. Developers read it to select authorities for `accept` |
 | `DELETE /certificates/{id}` **(existing, extended)** | `admin` | For `usage = client` rows the S19 and S8 refusals apply (`409`) |
-| `POST /gateway-identities` | `admin` | Add a certificate + key the gateway presents to backends |
-| `PUT /gateway-identities/{id}` | `admin` | Rotate one |
-| `GET /gateway-identities` | `admin, developer` | List — **never returns `privateKey`, for any role** |
-| `DELETE /gateway-identities/{id}` | `admin` | Remove one |
+| `POST /certificates` with `usage: identity` **(existing, extended)** | `admin` | Add a certificate chain + `privateKey` the gateway presents to backends; the response and every read omit the key |
+| `PUT /certificates/{id}` **(new operation)** | `admin` | Rotate an identity (certificate + key together); refused for any other usage |
+| `GET /certificates?usage=identity` **(existing, extended)** | `admin, developer` | List identities — **never returns `privateKey`, for any role**; items carry `keyAlgorithm`, `chainLength`, `referencedByApis` |
+| `DELETE /certificates/{id}` for an identity | `admin` | S19 refusal (`409`) when a deployed upstream names it in `tls.identity` |
 | `GET /tls/handshake-failures` | `admin` | TLS failures that happened before a certificate could be evaluated and so never became HTTP requests |
 | `POST /rest-apis/{handle}/upstreams/{name}/tls-test` | `admin, developer` | Verify an upstream definition's TLS end to end. Scoped to the API because definition names are unique per API, not per gateway |
 
@@ -1079,7 +1079,7 @@ policy `i`", and the real response carries the actual numbers.
 | `tls` on an `http://` target | `spec.upstreamDefinitions[d].upstreams[u].url` | `tls` is configured but this target is `http://`; every target of a definition with `tls` must be `https://` |
 | `tls` on an inline upstream | `spec.upstream.main.tls` | `tls` is not supported on an inline upstream; move it to `upstreamDefinitions` and reference it |
 
-**`400` on `POST /certificates` (with `usage: client`) and `POST`/`PUT /gateway-identities`** — `field`
+**`400` on `POST /certificates` (with `usage: client` or `usage: identity`) and `PUT /certificates/{id}`** — `field`
 is a top-level request property. Rows marked † apply only when `usage` is `client`; an `upstream`
 upload keeps today's validation.
 
@@ -1094,7 +1094,11 @@ upload keeps today's validation.
 | non-PEM or malformed | `certificate` | the value is not a PEM-encoded certificate |
 | cert/key mismatch | `privateKey` | the private key does not match the certificate |
 | encrypted private key | `privateKey` | passphrase-protected private keys are not supported; upload an unencrypted key (it is encrypted at rest by the gateway) |
-| certificate or key absent (identity) | `certificate` / `privateKey` | both `certificate` and `privateKey` are required |
+| certificate or key absent (identity) | `certificate` / `privateKey` | both `certificate` and `privateKey` are required for `usage: identity` |
+| `privateKey` given with another usage | `privateKey` | `privateKey` applies only to `usage: identity` certificates |
+| `PUT` on a non-identity row | `usage` | only `usage: identity` certificates can be updated; delete and re-upload other certificates |
+| `tls.identity` names a non-identity row | `spec.upstreamDefinitions[d].tls.identity` | `<name>` is not a gateway identity (`usage: identity`) |
+| `trustedCAs` names an identity row | `spec.upstreamDefinitions[d].tls.trustedCAs[k]` | `<name>` is a gateway identity (`usage: identity`); `trustedCAs` takes `usage: upstream` certificates |
 | invalid `name` | `name` | `name` may contain only letters, digits, `.`, `_` and `-` |
 
 **`409`** — `message` states the conflict and the remedy. When the conflict is a reference, each
@@ -1125,7 +1129,7 @@ reference and whose `message` names the API:
 `id`, `state` and timestamps; its OpenAPI schema is named `ResourceStatus`. That object gains
 `warnings`, an optional read-only array of `{code, field, message}` — in the example below it is
 `status.warnings`. It is present only when non-empty and absent otherwise (§8.16). The
-`POST /certificates` and `POST`/`PUT /gateway-identities` responses have no `status` object,
+`POST /certificates` and `PUT /certificates/{id}` responses have no `status` object,
 so on those the same `warnings` array sits at the top level. Every warning is also written to the
 controller log at `WARN` with the same `code`.
 
@@ -1155,7 +1159,7 @@ configuration key, consistent with §5.3 — and applies to every pooled authori
 
 | Channel | Mechanism | Who sees it |
 |---|---|---|
-| Pull | `CERT_EXPIRES_SOON` in `warnings[]` on `GET /certificates`, `GET /gateway-identities`, and on the deploy response of any API that names the entry | whoever lists or deploys |
+| Pull | `CERT_EXPIRES_SOON` in `warnings[]` on `GET /certificates` (every usage), and on the deploy response of any API that names the entry | whoever lists or deploys |
 | Log | one `WARN` line per entry per day while inside the horizon, carrying the code, the entry name and `notAfter` | whoever reads controller logs |
 | Metric | the existing gauge `certificate_expiry_seconds{cert_id, cert_name}` (`pkg/metrics/metrics.go:305`, declared today but never set) is set to the entry's `notAfter` for every pooled authority and identity, alongside the `/certificates` entries it was declared for | operators alerting in Prometheus, e.g. `certificate_expiry_seconds - time() < 30*86400` |
 
@@ -1596,7 +1600,7 @@ The tests that would catch a regression into a vulnerability. Not optional.
 - **Trust-store enumeration**: within the policy layer, "known authority / unknown thumbprint" and
   "known authority / wrong SAN" are indistinguishable in body **and timing**. Unknown-authority is
   not comparable — it fails at TLS by design.
-- **Key disclosure sweep**: the private key appears in none of `GET /gateway-identities` (admin or
+- **Key disclosure sweep**: the private key appears in none of `GET /certificates?usage=identity` (admin or
   developer), the config dump, controller logs at debug level, the xDS snapshot, or analytics.
 - **Privilege**: `developer` cannot create, modify or delete pool entries or identities; cannot read
   a private key; **can** read enough to select.
@@ -1791,29 +1795,31 @@ present (there is none).
 behaviour; named in any deployed `tls.trustedCAs` → **`409`** listing the APIs (S19), a check the
 endpoint does not perform today and must once `trustedCAs` exists.
 
-**`POST /gateway-identities`** (admin)
+**`POST /certificates` with `usage: identity`** (admin)
 
 | Payload | Result |
 |---|---|
-| cert + matching key | `201`; response has metadata, **no key** |
-| cert chain (leaf + intermediates) + key | `201` |
+| cert + matching key | `201`; response has metadata (`keyAlgorithm`, `chainLength`), **no key** |
+| cert chain (leaf + intermediates) + key | `201`, `chainLength` = number of certificates |
 | cert and key **mismatch** | `400` |
-| cert only / key only | `400` |
-| **encrypted** private key (`ENCRYPTED PRIVATE KEY` or `Proc-Type: 4,ENCRYPTED`) | **`400`** — "passphrase-protected private keys are not supported; upload an unencrypted key (it is encrypted at rest by the gateway)". Detected by PEM header so the message is specific, not a generic parse failure. PFX/PKCS#12 likewise unsupported in v1 |
+| cert only / key only | `400` — both are required for `usage: identity` |
+| `privateKey` sent with `usage: client` or `upstream` | `400` — `privateKey` applies only to `usage: identity` |
+| **encrypted** private key (`ENCRYPTED PRIVATE KEY` or `Proc-Type: 4,ENCRYPTED`) | **`400`** — "passphrase-protected private keys are not supported; upload an unencrypted key (it is encrypted at rest by the gateway)". Detected by PEM header so the message is specific. PFX/PKCS#12 likewise unsupported in v1 |
 | cert **expired** | `400` |
-| cert has an EKU extension **without** `clientAuth` | `201` **with warning** — "certificate does not assert the clientAuth extended key usage; some backends will reject it". Shown in the response and in `GET`. The gateway presents it regardless; the check is the backend's. No EKU extension at all → no warning (RFC 5280: absent means unrestricted) |
-| duplicate `name` | `409` |
+| cert has an EKU extension **without** `clientAuth` | `201` **with warning** `IDENTITY_NO_CLIENTAUTH_EKU`. No EKU extension at all → no warning (RFC 5280: absent means unrestricted) |
+| duplicate `name` (any usage) | `409` |
 | `developer` | `403` |
 
-**`GET /gateway-identities`** — `admin` and `developer`; **`privateKey` absent for every role** (S17);
+**`GET /certificates?usage=identity`** — `admin` and `developer`; **`privateKey` absent for every role** (S17);
 assert by schema, not by inspection.
 
-**`PUT /gateway-identities/{id}`** — same payload rules; `200` includes
+**`PUT /certificates/{id}`** — identity rows only, same payload rules; `200` includes
 `pooledConnectionsUsingPrevious`; referencing upstreams continue on old material until connections
-close.
+close. On any other usage → `400`.
 
-**`DELETE /gateway-identities/{id}`** — unreferenced → `204`; named by any deployed upstream's
-`tls.identity` → `409` listing the APIs (S19).
+**`DELETE /certificates/{id}`** of an identity — unreferenced → today's `200`; named by any deployed
+upstream's `tls.identity` → `409` listing the APIs (S19). An identity never counts as a client
+authority for the S8 last-authority rule.
 
 ### 8.14 Ordering scenarios — sequences where order changes the outcome
 
@@ -1852,8 +1858,8 @@ identity.
 | # | Given | Sequence | Why |
 |---|---|---|---|
 | O12 | no identity named `I` | 1. developer deploys an upstream definition with `tls.identity: I` → **`400`**, `field = spec.upstreamDefinitions[0].tls.identity` 2. admin adds `I` → `201` 3. developer redeploys → `201` | S18 on the outbound side, same rule as O1. |
-| O13 | identity `I` exists, upstream deployed with `tls.identity: I`, backend connections pooled | 1. admin `PUT /gateway-identities/I` with a renewed cert and key → `200`, `pooledConnectionsUsingPrevious: N` 2. **new** backend connections present the new certificate 3. pooled connections finish on the old one and are not dropped | G6: rotation without dropping in-flight requests. |
-| O14 | upstream deployed with `tls.identity: I` | 1. admin `DELETE /gateway-identities/I` → **`409`**, `errors[]` lists the API and `field = spec.upstreamDefinitions[0].tls.identity` | S19 on the outbound side, same rule as O6. |
+| O13 | identity `I` exists, upstream deployed with `tls.identity: I`, backend connections pooled | 1. admin `PUT /certificates/{id of I}` with a renewed cert and key → `200`, `pooledConnectionsUsingPrevious: N` 2. **new** backend connections present the new certificate 3. pooled connections finish on the old one and are not dropped | G6: rotation without dropping in-flight requests. |
+| O14 | upstream deployed with `tls.identity: I` | 1. admin `DELETE /certificates/{id of I}` → **`409`**, `errors[]` lists the API and `field = spec.upstreamDefinitions[0].tls.identity` | S19 on the outbound side, same rule as O6. |
 | O23 | as O13 | 1. admin rotates `I` twice before the pool drains 2. connections may be holding any of the three certificates; every one stays valid for its lifetime; no connection is dropped | Each SDS secret version is independent; Envoy never tears down a pool on a secret update. |
 
 **Group 4 — restart, resync and concurrency (S8, §3.2.4, GO-AUTH-011)**
@@ -2056,7 +2062,7 @@ risk — see §3.2.4 on D8's blast radius.*
 
 **M2 and M3 run in parallel after M1.**
 
-**M2 — Outbound.** `gw_gateway_identity`, `Upstream.tls`, per-upstream trust, management API.
+**M2 — Outbound.** identity rows on `certificates`, `Upstream.tls`, per-upstream trust, management API.
 No SDK, proto or policy-repo coupling. Larger than it looks: per-upstream *trust* has no data model
 today — `SecretNameUpstreamCA` is a single hard-coded constant serving one flat bundle — so G5 needs
 N validation-context secrets, a per-cluster reference replacing that constant, and the snapshot

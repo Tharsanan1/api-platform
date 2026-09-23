@@ -112,7 +112,7 @@ upstreamDefinitions:
     upstreams:
       - url: https://billing.partner.example.com
     tls:
-      identity: partner-billing-id        # what we present  → /gateway-identities
+      identity: partner-billing-id        # what we present  → /certificates (usage: identity)
       trustedCAs: [partner-billing-ca]    # who we accept    → /certificates (usage: upstream), replaces the gateway bundle
       verifyHostName: true                # default
 upstream:
@@ -126,8 +126,8 @@ operation. Identities are uploaded once by the admin, stored encrypted, delivere
 as `Secret_TlsCertificate`, and never returned by any read:
 
 ```
-POST /api/management/v1/gateway-identities
-{ "name": "partner-billing-id", "certificate": "…", "privateKey": "…" }
+POST /api/management/v1/certificates
+{ "name": "partner-billing-id", "usage": "identity", "certificate": "…", "privateKey": "…" }
 ```
 
 Two existing violations are fixed on the way: the listener's private key currently travels inline
@@ -139,12 +139,12 @@ becomes a startup failure.
 | Endpoint | Roles | New or extended |
 |---|---|---|
 | `POST/GET/DELETE /certificates` | admin write, developer read | **extended**: `usage`, `role`, `?usage=`; omit both and behaviour is unchanged |
-| `POST/PUT/GET/DELETE /gateway-identities` | admin write, developer read | new; `GET` never returns the key |
+| `POST /certificates` with `usage: identity`, `PUT /certificates/{id}` | admin write, developer read | **extended**: identities are certificate rows with an encrypted key; no read ever returns the key |
 | `GET /tls/handshake-failures` | admin | new; pre-certificate TLS failures, which never become requests |
 | `POST /rest-apis/{handle}/upstreams/{name}/tls-test` | admin, developer | new; one handshake to the backend with the definition's `tls`, result as a closed enum |
 
 Data model: two additive defaulted columns on the shipped `certificates` table (`usage`, `role`)
-with a guarded per-dialect `ALTER`; one new table `gw_gateway_identity`. No other TOML besides the
+plus `private_key_ciphertext` and `key_algorithm` for identities, all with a guarded per-dialect `ALTER`; no new table. No other TOML besides the
 header block above.
 
 ## Guarantees the tests defend

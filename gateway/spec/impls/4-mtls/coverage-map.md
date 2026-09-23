@@ -142,3 +142,12 @@ Decisions taken while writing slice 2 tests: unknown-parameter message is `unkno
   additive migration this feature ships (schema 4 → 5).
 - `Properties.source` values are `handshake`, `header`, `bypass` (the slice 3 tests said `connection`;
   corrected to the spec's wording).
+
+### Decision taken at the start of slice 5
+
+- **Gateway identities are certificate rows (`usage: identity`), not a separate endpoint or table.**
+  The product owner chose to extend the pattern already used for the pool: `POST /certificates` with
+  `usage: identity` and a `privateKey`; `PUT /certificates/{id}` rotates an identity and is refused for
+  other usages; the key lives in `private_key_ciphertext` (encrypted) on the same table, inside the one
+  additive migration; `tls.identity` names such a row. The spec, discussion text, design doc and
+  diagram were updated to match.

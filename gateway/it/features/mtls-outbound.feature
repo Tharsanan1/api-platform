@@ -23,8 +23,8 @@ Feature: Presenting a gateway identity to backends that require a client certifi
   trust exactly the authority that backend uses
   So that partner services requiring mutual TLS can sit behind the gateway
 
-  A gateway identity (certificate chain plus private key) is uploaded once; the key is encrypted at
-  rest and never returned. An upstream definition names the identity to present and, optionally,
+  A gateway identity (certificate chain plus private key) is uploaded once through the certificates
+  endpoint with usage "identity"; the key is encrypted at rest and never returned. An upstream definition names the identity to present and, optionally,
   the authorities to trust for that backend in place of the gateway-wide bundle. The test stack runs
   three TLS backends: mtls-backend-a accepts client certificates from partner A's authority,
   mtls-backend-b from partner B's, and mtls-backend-wronghost serves a certificate whose name does
@@ -41,6 +41,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     Then the response status should be 201
     And the JSON response field "status" should be "success"
     And the JSON response field "name" should be "out-identity-a"
+    And the JSON response field "usage" should be "identity"
     And the JSON response should have field "id"
     And the JSON response should have field "subject"
     And the JSON response should have field "issuer"
@@ -49,13 +50,13 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     And the JSON response field "privateKey" should not exist
     And the response body should not contain "PRIVATE KEY"
     And the JSON response field "warnings" should not exist
-    When I send a GET request to the "gateway-controller" service at "/gateway-identities"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=identity"
     Then the response status should be 200
     And the response body should contain "out-identity-a"
     And the response body should not contain "PRIVATE KEY"
     And the response body should not contain "privateKey"
     Given I authenticate using basic auth as "developer"
-    When I send a GET request to the "gateway-controller" service at "/gateway-identities"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=identity"
     Then the response status should be 200
     And the response body should contain "out-identity-a"
     And the response body should not contain "privateKey"
@@ -74,7 +75,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     And the JSON response field "warnings" should not exist
 
   Scenario Outline: Uploads that could never work are refused
-    When I upload to the gateway identities endpoint the body:
+    When I upload to the certificates endpoint the identity body:
       """
       <body>
       """
@@ -84,13 +85,14 @@ Feature: Presenting a gateway identity to backends that require a client certifi
 
     Examples:
       | body                                                                                                                                 | field       | message                                                                                                                     |
-      | {"name":"out-bad","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{key "key-mismatch"}}"}                                    | privateKey  | the private key does not match the certificate                                                                              |
-      | {"name":"out-bad","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{encryptedkey "gw-identity-a"}}"}                          | privateKey  | passphrase-protected private keys are not supported; upload an unencrypted key (it is encrypted at rest by the gateway)     |
-      | {"name":"out-bad","certificate":"{{pem "gw-identity-a"}}"}                                                                           | privateKey  | both certificate and privateKey are required                                                                                |
-      | {"name":"out-bad","privateKey":"{{key "gw-identity-a"}}"}                                                                            | certificate | both certificate and privateKey are required                                                                                |
-      | {"name":"out-bad","certificate":"{{pem "client-expired"}}","privateKey":"{{key "client-expired"}}"}                                  | certificate | the certificate expired on {{notafter "client-expired"}}                                                                    |
-      | {"name":"out bad","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{key "gw-identity-a"}}"}                                    | name        | name may contain only letters, digits, ., _ and -                                                                           |
-      | {"name":"out-bad","certificate":"not a certificate","privateKey":"{{key "gw-identity-a"}}"}                                          | certificate | the value is not a PEM-encoded certificate                                                                                  |
+      | {"name":"out-bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{key "key-mismatch"}}"}                                    | privateKey  | the private key does not match the certificate                                                                              |
+      | {"name":"out-bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{encryptedkey "gw-identity-a"}}"}                          | privateKey  | passphrase-protected private keys are not supported; upload an unencrypted key (it is encrypted at rest by the gateway)     |
+      | {"name":"out-bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}"}                                                                           | privateKey  | both certificate and privateKey are required for usage: identity                                                            |
+      | {"name":"out-bad","usage":"client","certificate":"{{pem "ca-a"}}","privateKey":"{{key "gw-identity-a"}}"}                                             | privateKey  | privateKey applies only to usage: identity certificates                                                                     |
+      | {"name":"out-bad","usage":"identity","privateKey":"{{key "gw-identity-a"}}"}                                                                            | certificate | both certificate and privateKey are required for usage: identity                                                            |
+      | {"name":"out-bad","usage":"identity","certificate":"{{pem "client-expired"}}","privateKey":"{{key "client-expired"}}"}                                  | certificate | the certificate expired on {{notafter "client-expired"}}                                                                    |
+      | {"name":"out bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{key "gw-identity-a"}}"}                                    | name        | name may contain only letters, digits, ., _ and -                                                                           |
+      | {"name":"out-bad","usage":"identity","certificate":"not a certificate","privateKey":"{{key "gw-identity-a"}}"}                                          | certificate | the value is not a PEM-encoded certificate                                                                                  |
 
   Scenario: A duplicate identity name is a conflict
     Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
@@ -110,7 +112,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
     When I delete the gateway identity named "out-identity-a"
     Then the response should be successful
-    When I send a GET request to the "gateway-controller" service at "/gateway-identities"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=identity"
     Then the response body should not contain "out-identity-a"
 
   # ==================== THE TLS BLOCK AT DEPLOY TIME ====================
@@ -205,6 +207,37 @@ Feature: Presenting a gateway identity to backends that require a client certifi
       """
     Then the response status should be 400
     And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.trustedCAs[0]" with message "out-client-authority is a client authority (usage: client); trustedCAs takes usage: upstream certificates"
+
+  Scenario: Only an identity can be presented, and an identity is not backend trust
+    Given the certificate fixture "ca-a" is pooled as "out-client-authority" with usage "client"
+    And the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: out-refused-api
+      spec:
+        displayName: Outbound Refused API
+        version: v1.0
+        context: /out-refused/$version
+        upstreamDefinitions:
+          - name: partner
+            upstreams:
+              - url: https://mtls-backend-a:8443
+            tls:
+              identity: out-client-authority
+              trustedCAs: [out-identity-a]
+        upstream:
+          main:
+            ref: partner
+        operations:
+          - method: GET
+            path: /anything
+      """
+    Then the response status should be 400
+    And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.identity" with message "out-client-authority is not a gateway identity (usage: identity)"
+    And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.trustedCAs[0]" with message "out-identity-a is a gateway identity (usage: identity); trustedCAs takes usage: upstream certificates"
 
   Scenario: Disabling hostname verification deploys with a warning
     Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
@@ -457,6 +490,18 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     When I send a GET request to "http://localhost:8080/out-partner/v1.0/anything"
     Then the response status code should be 200
     And the response header "X-Client-Subject" should contain "gateway-a"
+
+  Scenario: An identity is rotated in place, and only identities can be updated
+    Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
+    And the certificate fixture "backend-ca" is pooled as "out-backend-ca"
+    When I update the gateway identity "out-identity-a" with the fixture "gw-identity-via-intermediate" and its chain
+    Then the response status should be 200
+    And the JSON response field "chainLength" should be 2
+    And the JSON response should have field "pooledConnectionsUsingPrevious"
+    And the response body should not contain "PRIVATE KEY"
+    When I update the certificate "out-backend-ca" with the identity fixture "gw-identity-a"
+    Then the response status should be 400
+    And the response should list a validation error for field "usage" with message "only usage: identity certificates can be updated; delete and re-upload other certificates"
 
   # ==================== REFERENCES AND THE TLS TEST ====================
 

@@ -42,6 +42,7 @@ import (
 	"math/big"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 )
@@ -223,6 +224,36 @@ func writeAll(dir string, i *issued) {
 	writeChainIfAny(dir, i)
 }
 
+// writeEncryptedKey produces "<name>.encrypted.key": fixture i's private key
+// re-encoded as a passphrase-protected PKCS#8 key
+// (-----BEGIN ENCRYPTED PRIVATE KEY-----), consumed by upload-validation tests
+// that must reject a passphrase-protected key before ever needing to decrypt
+// it. Prefers shelling out to `openssl pkcs8` (crypto/x509 has no PKCS#8
+// encryptor); if openssl isn't on PATH or the invocation fails, falls back to
+// wrapping the existing plaintext key's DER bytes in a PEM block carrying the
+// "ENCRYPTED PRIVATE KEY" type header — not a genuine
+// EncryptedPrivateKeyInfo, but sufficient for a header-based rejection check.
+func writeEncryptedKey(dir string, i *issued, passphrase string) {
+	keyPath := filepath.Join(dir, i.name+".key")
+	outPath := filepath.Join(dir, i.name+".encrypted.key")
+
+	if opensslPath, err := exec.LookPath("openssl"); err == nil {
+		cmd := exec.Command(opensslPath, "pkcs8", "-topk8", "-v2", "aes-256-cbc",
+			"-passout", "pass:"+passphrase, "-in", keyPath, "-out", outPath)
+		if out, err := cmd.CombinedOutput(); err == nil {
+			manifest[i.name+".encrypted"] = manifest[i.name]
+			return
+		} else {
+			fmt.Fprintf(os.Stderr, "mtls-pki: openssl pkcs8 encryption failed for %s, falling back to a header-only fixture: %s\n", i.name, out)
+		}
+	}
+
+	der, err := x509.MarshalPKCS8PrivateKey(i.key)
+	check(err)
+	writeFile(dir, i.name+".encrypted.key", pem.EncodeToMemory(&pem.Block{Type: "ENCRYPTED PRIVATE KEY", Bytes: der}))
+	manifest[i.name+".encrypted"] = manifest[i.name]
+}
+
 func main() {
 	dir, err := os.Getwd()
 	check(err)
@@ -298,6 +329,10 @@ func main() {
 	}))
 	backendCA := track(issue("backend-ca", issueOpts{
 		subject: pkix.Name{CommonName: "Backend Root CA"},
+		isCA:    true,
+	}))
+	backendCAB := track(issue("backend-ca-b", issueOpts{
+		subject: pkix.Name{CommonName: "Backend CA B"},
 		isCA:    true,
 	}))
 
@@ -425,13 +460,42 @@ func main() {
 		dnsSANs: []string{"mock-openapi-https", "localhost", "sample-backend"},
 		ekus:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}))
-	track(issue("gw-identity-a", issueOpts{
+	track(issue("backend-server-a", issueOpts{
+		subject: pkix.Name{CommonName: "backend-server-a"},
+		parent:  backendCA,
+		dnsSANs: []string{"mtls-backend-a", "localhost"},
+		ekus:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}))
+	track(issue("backend-server-b", issueOpts{
+		subject: pkix.Name{CommonName: "backend-server-b"},
+		parent:  backendCAB,
+		dnsSANs: []string{"mtls-backend-b"},
+		ekus:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}))
+	track(issue("backend-server-wronghost", issueOpts{
+		subject: pkix.Name{CommonName: "backend-server-wronghost"},
+		parent:  backendCA,
+		dnsSANs: []string{"not-this-host.test"},
+		ekus:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}))
+	track(issue("backend-server-strict", issueOpts{
+		subject: pkix.Name{CommonName: "backend-server-strict"},
+		parent:  backendCAB,
+		dnsSANs: []string{"mtls-strict-backend"},
+		ekus:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}))
+	gwIdentityA := track(issue("gw-identity-a", issueOpts{
 		subject: pkix.Name{CommonName: "gateway-a"},
 		parent:  caA,
 	}))
+	writeEncryptedKey(dir, gwIdentityA, "test")
 	track(issue("gw-identity-b", issueOpts{
 		subject: pkix.Name{CommonName: "gateway-b"},
-		parent:  caA,
+		parent:  caB,
+	}))
+	track(issue("gw-identity-via-intermediate", issueOpts{
+		subject: pkix.Name{CommonName: "gateway-via-intermediate"},
+		parent:  caAIntermediate,
 	}))
 	track(issue("gw-identity-no-eku", issueOpts{
 		subject: pkix.Name{CommonName: "gw-identity-no-eku"},

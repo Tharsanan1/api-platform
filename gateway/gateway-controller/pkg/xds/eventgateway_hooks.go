@@ -91,9 +91,14 @@ func (t *Translator) CreateRoutePerTopic(apiId, apiName, apiVersion, context, me
 	return t.createRoutePerTopic(apiId, apiName, apiVersion, context, method, channelName, clusterName, vhost, apiKind, projectID)
 }
 
-// CreateCluster exposes createCluster for use by EventGatewayXDSHooks implementations.
+// CreateCluster exposes createCluster for use by EventGatewayXDSHooks
+// implementations. This exported signature is intentionally unchanged by
+// createCluster's tlsOpts/error addition: a WebSub hub cluster never carries
+// a tls block, so calling with nil tlsOpts means the error return is always
+// nil here — nothing outside this module needs to change.
 func (t *Translator) CreateCluster(name string, upstreamURL *url.URL, upstreamCerts map[string][]byte, connectTimeout *time.Duration) *cluster.Cluster {
-	return t.createCluster(name, upstreamURL, upstreamCerts, connectTimeout)
+	c, _ := t.createCluster(name, upstreamURL, upstreamCerts, connectTimeout, nil, "")
+	return c
 }
 
 // ExtractTemplateHandle exposes extractTemplateHandle for use by EventGatewayXDSHooks implementations.

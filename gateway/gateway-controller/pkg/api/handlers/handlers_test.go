@@ -797,6 +797,16 @@ func (m *MockStorage) DeleteCertificate(id string) error {
 	return errors.New("certificate not found")
 }
 
+func (m *MockStorage) UpdateCertificate(cert *models.StoredCertificate) error {
+	for i, c := range m.certs {
+		if c.UUID == cert.UUID {
+			m.certs[i] = cert
+			return nil
+		}
+	}
+	return errors.New("certificate not found")
+}
+
 func (m *MockStorage) GetDB() *sql.DB {
 	return nil
 }

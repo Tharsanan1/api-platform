@@ -61,12 +61,22 @@ const (
 	mtlsListenerProbeInterval = 500 * time.Millisecond
 )
 
-// mtlsPemPlaceholder and mtlsKeyPlaceholder match {{pem "name"}} / {{key "name"}}
-// template markers inside a docstring request body.
+// mtlsPemPlaceholder, mtlsKeyPlaceholder and mtlsEncryptedKeyPlaceholder match
+// {{pem "name"}} / {{key "name"}} / {{encryptedkey "name"}} template markers
+// inside a docstring request body.
 var (
-	mtlsPemPlaceholder = regexp.MustCompile(`\{\{pem "([^"]+)"\}\}`)
-	mtlsKeyPlaceholder = regexp.MustCompile(`\{\{key "([^"]+)"\}\}`)
+	mtlsPemPlaceholder          = regexp.MustCompile(`\{\{pem "([^"]+)"\}\}`)
+	mtlsKeyPlaceholder          = regexp.MustCompile(`\{\{key "([^"]+)"\}\}`)
+	mtlsEncryptedKeyPlaceholder = regexp.MustCompile(`\{\{encryptedkey "([^"]+)"\}\}`)
 )
+
+// mtlsNotAfterPlaceholder matches {{notafter "name"}} template markers,
+// expanded to fixture "name"'s certificate NotAfter timestamp (RFC3339,
+// matching resources/mtls-pki/manifest.json's notAfter format). Used both
+// inside docstring request bodies (via resolveTemplates) and inside plain
+// step-argument strings such as an Examples table's expected message column
+// (via resolveNotAfterTemplates).
+var mtlsNotAfterPlaceholder = regexp.MustCompile(`\{\{notafter "([^"]+)"\}\}`)
 
 // mtlsThumbprintPlaceholder matches {{thumbprint "name"}} template markers
 // inside a docstring request body, expanded to fixture "name"'s SHA-256
@@ -87,6 +97,11 @@ type mtlsSteps struct {
 	jwtSteps  *JWTSteps
 
 	uploadedNames []string
+
+	// uploadedIdentityNames tracks every gateway identity name this scenario
+	// attempted to upload (features/mtls-outbound.feature), cleaned up
+	// separately from uploadedNames (certificates) — see cleanupIdentities.
+	uploadedIdentityNames []string
 }
 
 // RegisterMTLSSteps registers step definitions for the client certificate
@@ -97,6 +112,7 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 
 	ctx.Before(func(c context.Context, sc *godog.Scenario) (context.Context, error) {
 		m.uploadedNames = nil
+		m.uploadedIdentityNames = nil
 		return c, nil
 	})
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
@@ -105,8 +121,11 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 		// depends on), so the APIs this scenario deployed must be gone first.
 		// Delete them here explicitly instead of relying on the order godog
 		// runs After hooks in; a second deletion by the API steps' own hook
-		// is a harmless 404.
+		// is a harmless 404. Gateway identities are deleted next — after APIs
+		// (which may reference them) but before certificates (which are
+		// independent of identities).
 		cleanupDeployedAPIs(m.state, m.httpSteps)
+		m.cleanupIdentities()
 		m.cleanup()
 		return c, nil
 	})
@@ -121,6 +140,17 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^the certificate fixture "([^"]*)" is pooled as "([^"]*)"$`, m.pooledFixtureNoUsage)
 	ctx.Step(`^I upload to the certificates endpoint the body:$`, m.uploadRawBody)
 	ctx.Step(`^I upload a certificate body of (\d+) megabytes as "([^"]*)" with usage "([^"]*)"$`, m.uploadOversizedBody)
+
+	// ---- Gateway identities (features/mtls-outbound.feature) ----
+	// A gateway identity is a certificate pooled via /certificates with
+	// usage: "identity"; see the "Gateway identities" section below.
+	ctx.Step(`^I upload the gateway identity fixture "([^"]*)" with its chain as "([^"]*)"$`, m.uploadGatewayIdentityFixtureWithChain)
+	ctx.Step(`^I upload the gateway identity fixture "([^"]*)" as "([^"]*)"$`, m.uploadGatewayIdentityFixture)
+	ctx.Step(`^the gateway identity fixture "([^"]*)" is stored as "([^"]*)"$`, m.gatewayIdentityFixtureIsStored)
+	ctx.Step(`^I upload to the certificates endpoint the identity body:$`, m.uploadGatewayIdentityRawBody)
+	ctx.Step(`^I delete the gateway identity named "([^"]*)"$`, m.deleteGatewayIdentityNamed)
+	ctx.Step(`^I update the gateway identity "([^"]*)" with the fixture "([^"]*)" and its chain$`, m.updateGatewayIdentityWithFixtureAndChain)
+	ctx.Step(`^I update the certificate "([^"]*)" with the identity fixture "([^"]*)"$`, m.updateCertificateWithIdentityFixture)
 
 	// ---- Deploying/updating with fixture-derived values ----
 	ctx.Step(`^I deploy this API configuration with fixture values:$`, m.deployWithFixtureValues)
@@ -200,8 +230,10 @@ func (m *mtlsSteps) parseFixtureCert(fixture string) (*x509.Certificate, error) 
 	return x509.ParseCertificate(block.Bytes)
 }
 
-// resolveTemplates replaces {{pem "name"}} / {{key "name"}} markers with the
-// JSON-string-escaped contents of the named fixture file.
+// resolveTemplates replaces {{pem "name"}} / {{key "name"}} /
+// {{encryptedkey "name"}} / {{notafter "name"}} markers with the
+// JSON-string-escaped contents (or, for notafter, value) of the named
+// fixture.
 func (m *mtlsSteps) resolveTemplates(body string) (string, error) {
 	var firstErr error
 
@@ -230,8 +262,32 @@ func (m *mtlsSteps) resolveTemplates(body string) (string, error) {
 		})
 	}
 
+	substituteNotAfter := func(input string) string {
+		return mtlsNotAfterPlaceholder.ReplaceAllStringFunc(input, func(match string) string {
+			sub := mtlsNotAfterPlaceholder.FindStringSubmatch(match)
+			fixture := sub[1]
+			value, err := m.notAfterOf(fixture)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return match
+			}
+			escaped, err := json.Marshal(value)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("failed to encode notAfter for fixture %q: %w", fixture, err)
+				}
+				return match
+			}
+			return string(escaped[1 : len(escaped)-1])
+		})
+	}
+
 	body = substitute(mtlsPemPlaceholder, ".crt", body)
 	body = substitute(mtlsKeyPlaceholder, ".key", body)
+	body = substitute(mtlsEncryptedKeyPlaceholder, ".encrypted.key", body)
+	body = substituteNotAfter(body)
 	if firstErr != nil {
 		return "", firstErr
 	}
@@ -269,6 +325,43 @@ func (m *mtlsSteps) resolveThumbprintTemplates(body string) (string, error) {
 			return match
 		}
 		return thumb
+	})
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return resolved, nil
+}
+
+// notAfterOf returns fixture "name"'s certificate NotAfter timestamp,
+// formatted as RFC3339 in UTC — matching resources/mtls-pki/generate.go's
+// manifest.json notAfter field.
+func (m *mtlsSteps) notAfterOf(fixture string) (string, error) {
+	cert, err := m.parseFixtureCert(fixture)
+	if err != nil {
+		return "", err
+	}
+	return cert.NotAfter.UTC().Format(time.RFC3339), nil
+}
+
+// resolveNotAfterTemplates replaces {{notafter "name"}} markers in a plain
+// (non-JSON) string — such as an Examples table's expected validation-error
+// message — with fixture "name"'s NotAfter timestamp. Unlike resolveTemplates'
+// use of the same placeholder inside a docstring body, no JSON escaping is
+// applied here since the caller is comparing against plain text, not
+// embedding into a JSON document.
+func (m *mtlsSteps) resolveNotAfterTemplates(s string) (string, error) {
+	var firstErr error
+	resolved := mtlsNotAfterPlaceholder.ReplaceAllStringFunc(s, func(match string) string {
+		sub := mtlsNotAfterPlaceholder.FindStringSubmatch(match)
+		fixture := sub[1]
+		value, err := m.notAfterOf(fixture)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			return match
+		}
+		return value
 	})
 	if firstErr != nil {
 		return "", firstErr
@@ -456,6 +549,282 @@ func (m *mtlsSteps) uploadOversizedBody(megabytes int, name, usage string) error
 	return m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: string(bodyBytes)})
 }
 
+// ============ Gateway identities (features/mtls-outbound.feature) ============
+//
+// A gateway identity is not a separate resource: it is a certificate pooled
+// through the existing /certificates endpoint with usage: "identity" and a
+// privateKey field alongside certificate. These steps talk to /certificates
+// throughout; the only thing identity-specific is filtering the list by
+// ?usage=identity so a certificate and an identity that happen to share
+// nothing else in common are still resolved unambiguously by name.
+
+func (m *mtlsSteps) recordUploadedIdentity(name string) {
+	m.uploadedIdentityNames = append(m.uploadedIdentityNames, name)
+}
+
+// uploadGatewayIdentityRaw POSTs {name, usage: "identity", certificate,
+// privateKey} to /certificates, reading the certificate from
+// fixture+certExt (".crt" for a bare leaf, ".chain.crt" for a leaf plus its
+// intermediate chain) and the private key from fixture+".key".
+func (m *mtlsSteps) uploadGatewayIdentityRaw(fixture, name, certExt string) error {
+	m.recordUploadedIdentity(name)
+
+	certPEM, err := m.readFixtureFile(fixture, certExt)
+	if err != nil {
+		return err
+	}
+	keyPEM, err := m.readFixtureFile(fixture, ".key")
+	if err != nil {
+		return err
+	}
+
+	body := map[string]any{
+		"name":        name,
+		"usage":       "identity",
+		"certificate": string(certPEM),
+		"privateKey":  string(keyPEM),
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to encode gateway identity upload body: %w", err)
+	}
+
+	m.httpSteps.SetHeader("Content-Type", "application/json")
+	return m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: string(bodyBytes)})
+}
+
+func (m *mtlsSteps) uploadGatewayIdentityFixture(fixture, name string) error {
+	return m.uploadGatewayIdentityRaw(fixture, name, ".crt")
+}
+
+func (m *mtlsSteps) uploadGatewayIdentityFixtureWithChain(fixture, name string) error {
+	return m.uploadGatewayIdentityRaw(fixture, name, ".chain.crt")
+}
+
+// gatewayIdentityFixtureIsStored uploads fixture and fails unless the
+// gateway accepted it (status 201) — the "Given" precondition form used by
+// scenarios that need a stored identity but aren't themselves testing the
+// upload response.
+func (m *mtlsSteps) gatewayIdentityFixtureIsStored(fixture, name string) error {
+	if err := m.uploadGatewayIdentityFixture(fixture, name); err != nil {
+		return err
+	}
+	resp := m.httpSteps.LastResponse()
+	if resp == nil {
+		return fmt.Errorf("expected gateway identity to be stored, but no response was received")
+	}
+	if resp.StatusCode != 201 {
+		return fmt.Errorf("expected gateway identity to be stored (status 201), got %d: %s", resp.StatusCode, string(m.httpSteps.LastBody()))
+	}
+	return nil
+}
+
+func (m *mtlsSteps) recordUploadedIdentityNameFromJSON(body string) {
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		return
+	}
+	if name, ok := parsed["name"].(string); ok && name != "" {
+		m.recordUploadedIdentity(name)
+	}
+}
+
+// uploadGatewayIdentityRawBody posts an arbitrary docstring body to
+// /certificates after expanding {{pem}}/{{key}}/{{encryptedkey}}/
+// {{notafter}} markers via the shared resolveTemplates — used by the
+// "uploads that could never work are refused" style scenarios. The
+// docstring itself carries usage: "identity" (or, for the one negative case
+// testing that privateKey is rejected on a non-identity certificate,
+// usage: "client") — this step doesn't inject usage on its own.
+func (m *mtlsSteps) uploadGatewayIdentityRawBody(body *godog.DocString) error {
+	resolved, err := m.resolveTemplates(body.Content)
+	if err != nil {
+		return err
+	}
+	m.recordUploadedIdentityNameFromJSON(resolved)
+
+	m.httpSteps.SetHeader("Content-Type", "application/json")
+	return m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: resolved})
+}
+
+// findGatewayIdentityIDByName resolves NAME to its certificate id via
+// GET /certificates?usage=identity — narrower than m.findCertificateIDByName
+// so an identity and an unrelated certificate can never be confused, even if
+// a caller reused a name across both (which the gateway itself should reject
+// as a name conflict, but the test lookup doesn't need to depend on that).
+func (m *mtlsSteps) findGatewayIdentityIDByName(name string) (string, error) {
+	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates?usage=identity"); err != nil {
+		return "", err
+	}
+	var parsed struct {
+		Certificates []map[string]any `json:"certificates"`
+	}
+	if err := json.Unmarshal(m.httpSteps.LastBody(), &parsed); err != nil {
+		return "", fmt.Errorf("failed to parse gateway identity list while resolving %q: %w", name, err)
+	}
+	for _, item := range parsed.Certificates {
+		if fmt.Sprint(item["name"]) == name {
+			return fmt.Sprint(item["id"]), nil
+		}
+	}
+	return "", fmt.Errorf("no gateway identity named %q found", name)
+}
+
+// deleteGatewayIdentityNamed resolves NAME to its id via the usage:identity
+// list endpoint and issues the DELETE — failing clearly (rather than a bare
+// 404) when the name isn't found, since a missing identity usually means an
+// earlier step in the scenario didn't create what this step expects.
+func (m *mtlsSteps) deleteGatewayIdentityNamed(name string) error {
+	id, err := m.findGatewayIdentityIDByName(name)
+	if err != nil {
+		return fmt.Errorf("failed to delete gateway identity %q: %w", name, err)
+	}
+	return m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
+}
+
+// updateGatewayIdentityWithFixtureAndChain PUTs {certificate, privateKey} —
+// the fixture's leaf+intermediate chain and matching key — to the named
+// gateway identity's existing certificate id, exercising in-place identity
+// rotation.
+func (m *mtlsSteps) updateGatewayIdentityWithFixtureAndChain(name, fixture string) error {
+	id, err := m.findGatewayIdentityIDByName(name)
+	if err != nil {
+		return fmt.Errorf("failed to update gateway identity %q: %w", name, err)
+	}
+
+	certPEM, err := m.readFixtureFile(fixture, ".chain.crt")
+	if err != nil {
+		return err
+	}
+	keyPEM, err := m.readFixtureFile(fixture, ".key")
+	if err != nil {
+		return err
+	}
+
+	body := map[string]any{
+		"certificate": string(certPEM),
+		"privateKey":  string(keyPEM),
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to encode gateway identity update body: %w", err)
+	}
+
+	m.httpSteps.SetHeader("Content-Type", "application/json")
+	return m.httpSteps.SendPUTToService("gateway-controller", "/certificates/"+id, &godog.DocString{Content: string(bodyBytes)})
+}
+
+// updateCertificateWithIdentityFixture PUTs an identity-shaped body
+// ({certificate, privateKey} from fixture, with no usage field) to the named
+// (non-identity) certificate's id — used to assert that only usage: identity
+// certificates accept an update at all, regardless of what the update body
+// contains.
+func (m *mtlsSteps) updateCertificateWithIdentityFixture(name, fixture string) error {
+	id, err := m.findCertificateIDByName(name)
+	if err != nil {
+		return fmt.Errorf("failed to update certificate %q: %w", name, err)
+	}
+
+	certPEM, err := m.readFixtureFile(fixture, ".crt")
+	if err != nil {
+		return err
+	}
+	keyPEM, err := m.readFixtureFile(fixture, ".key")
+	if err != nil {
+		return err
+	}
+
+	body := map[string]any{
+		"certificate": string(certPEM),
+		"privateKey":  string(keyPEM),
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to encode certificate update body: %w", err)
+	}
+
+	m.httpSteps.SetHeader("Content-Type", "application/json")
+	return m.httpSteps.SendPUTToService("gateway-controller", "/certificates/"+id, &godog.DocString{Content: string(bodyBytes)})
+}
+
+// cleanupDeleteRetryBudget/Interval bound deleteRetryingConflict: the
+// certificate/identity referential-integrity check consults the
+// controller's in-memory config store, which can still show a
+// just-deleted API for a moment after cleanupDeployedAPIs' own delete call
+// has already returned — it converges asynchronously. Retrying a 409 for a
+// few seconds absorbs that window; anything else (including 404, already
+// removed) is treated as done.
+const (
+	cleanupDeleteRetryBudget   = 5 * time.Second
+	cleanupDeleteRetryInterval = 250 * time.Millisecond
+)
+
+// deleteRetryingConflict deletes the /certificates/{id} row (a plain
+// certificate or a gateway identity — same endpoint either way), retrying
+// while the delete returns 409 up to cleanupDeleteRetryBudget, then giving
+// up. Best-effort throughout, like the cleanup functions that call it: this
+// is scenario teardown, not an assertion, so the final outcome is never
+// checked.
+func (m *mtlsSteps) deleteRetryingConflict(id string) {
+	deadline := time.Now().Add(cleanupDeleteRetryBudget)
+	for {
+		_ = m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
+		resp := m.httpSteps.LastResponse()
+		if resp == nil || resp.StatusCode != http.StatusConflict {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(cleanupDeleteRetryInterval)
+	}
+}
+
+// cleanupIdentities deletes every gateway identity name this scenario
+// attempted to upload, authenticating as admin. Best-effort, mirroring
+// mtlsSteps.cleanup's certificate cleanup below: a name that was never
+// actually stored, or already removed by the scenario itself, is silently
+// skipped. Must run after cleanupDeployedAPIs (identities may be referenced
+// by a deployed API's tls block) and before cleanup (other certificates are
+// independent of identities) — see RegisterMTLSSteps' After hook. Kept as a
+// separate pass over /certificates?usage=identity, rather than folded into
+// cleanup's unfiltered pass, purely to preserve that ordering.
+func (m *mtlsSteps) cleanupIdentities() {
+	if len(m.uploadedIdentityNames) == 0 {
+		return
+	}
+
+	admin, ok := m.state.Config.Users["admin"]
+	if !ok {
+		return
+	}
+	creds := base64.StdEncoding.EncodeToString([]byte(admin.Username + ":" + admin.Password))
+	m.httpSteps.SetHeader("Authorization", "Basic "+creds)
+
+	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates?usage=identity"); err != nil {
+		return
+	}
+	var parsed struct {
+		Certificates []map[string]any `json:"certificates"`
+	}
+	if err := json.Unmarshal(m.httpSteps.LastBody(), &parsed); err != nil {
+		return
+	}
+
+	idByName := make(map[string]string, len(parsed.Certificates))
+	for _, item := range parsed.Certificates {
+		idByName[fmt.Sprint(item["name"])] = fmt.Sprint(item["id"])
+	}
+
+	for _, name := range m.uploadedIdentityNames {
+		id, ok := idByName[name]
+		if !ok {
+			continue
+		}
+		m.deleteRetryingConflict(id)
+	}
+}
+
 // ============ Listing assertions ============
 //
 // Listing has no dedicated step: the feature file lists via the existing
@@ -622,6 +991,10 @@ func (m *mtlsSteps) validationErrors() ([]map[string]any, error) {
 }
 
 func (m *mtlsSteps) validationErrorWithMessage(field, message string) error {
+	message, err := m.resolveNotAfterTemplates(message)
+	if err != nil {
+		return err
+	}
 	errs, err := m.validationErrors()
 	if err != nil {
 		return err
@@ -1145,7 +1518,10 @@ func (m *mtlsSteps) cleanup() {
 			continue
 		}
 		// Best-effort: ignore the outcome, including 404s for a certificate
-		// already removed by the scenario itself.
-		_ = m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
+		// already removed by the scenario itself; a transient 409 (the
+		// referential-integrity check racing config-store convergence) is
+		// retried by deleteRetryingConflict rather than given up on
+		// immediately.
+		m.deleteRetryingConflict(id)
 	}
 }

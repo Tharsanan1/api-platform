@@ -366,6 +366,14 @@ type Storage interface {
 	// Returns an error if the certificate does not exist.
 	DeleteCertificate(id string) error
 
+	// UpdateCertificate replaces an existing certificate's material
+	// (certificate bytes, private key ciphertext/algorithm, derived
+	// metadata). Used only for usage: identity rotation (PUT
+	// /certificates/{id}); the name and usage are immutable.
+	//
+	// Returns an error if the certificate does not exist.
+	UpdateCertificate(cert *models.StoredCertificate) error
+
 	// SaveSecret persists a new encrypted secret.
 	//
 	// Returns an error if a secret with the same handle already exists.

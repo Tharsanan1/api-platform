@@ -374,10 +374,27 @@ func main() {
 	// Initialize xDS snapshot manager with router config
 	snapshotManager := xds.NewSnapshotManager(configStore, log, &cfg.Router, db, cfg)
 
+	// Refuse to start if the certificate store failed to load (see
+	// go-network-service-hardening.md / GO-AUTH-011): a degraded cert store
+	// would silently drop the upstream trust bundle and the ability to
+	// present any gateway identity, rather than fail loudly.
+	if translator := snapshotManager.GetTranslator(); translator != nil {
+		if err := translator.CertStoreInitError(); err != nil {
+			log.Error("Refusing to start: certificate store failed to initialize", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}
+
 	// Initialize SDS secret manager if custom certificates are configured
 	var sdsSecretManager *xds.SDSSecretManager
 	translator := snapshotManager.GetTranslator()
 	if translator != nil && translator.GetCertStore() != nil {
+		// Wire the encryption provider manager so a gateway identity's
+		// private key can be decrypted when building its SDS secret (nil
+		// when no encryption provider is configured — GetGatewayIdentityMaterial
+		// then fails closed rather than serve an undecrypted key).
+		translator.GetCertStore().SetEncryptionManager(encryptionProviderManager)
+
 		// Use the same cache and node ID as the main xDS to ensure Envoy can fetch secrets
 		sdsSecretManager = xds.NewSDSSecretManager(
 			translator.GetCertStore(),
@@ -569,6 +586,7 @@ func main() {
 	policyValidator.SetMtlsAuthValidator(config.NewMtlsAuthValidator(db, cfg.Router.HTTPSEnabled).
 		SetHeaderTrustAny(cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny))
 	validator.SetPolicyValidator(policyValidator)
+	validator.SetUpstreamTLSValidator(config.NewUpstreamTLSValidator(db))
 
 	// Build the single shared outbound *http.Client used by every control-plane /
 	// platform-API / on-prem-APIM call this process makes. Built once, here, and injected
@@ -704,6 +722,10 @@ func main() {
 		log.Error("Failed to create API server", slog.Any("error", err))
 		os.Exit(1)
 	}
+	// Wire the encryption provider manager so gateway-identity private keys
+	// can be encrypted at rest (nil when no encryption provider is
+	// configured — upload/update is then refused fail-closed).
+	apiServer.SetEncryptionManager(encryptionProviderManager)
 
 	// Load immutable gateway artifacts from the filesystem (no-op when immutable mode is disabled).
 	if err := igw.LoadArtifacts(log); err != nil {
@@ -967,8 +989,11 @@ func generateAuthConfig(config *config.Config) (commonmodels.AuthConfig, error) 
 
 		"GET /certificates":         {"admin", "developer"},
 		"POST /certificates":        {"admin"},
+		"PUT /certificates/{id}":    {"admin"},
 		"DELETE /certificates/{id}": {"admin"},
 		"POST /certificates/reload": {"admin"},
+
+		"POST /rest-apis/{id}/upstreams/{name}/tls-test": {"admin", "developer"},
 
 		"GET /policies": {"admin", "developer"},
 

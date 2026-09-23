@@ -449,6 +449,10 @@ func (m *mockStorageForDeletion) GetCertificateByName(name string) (*models.Stor
 	return nil, storage.ErrNotFound
 }
 
+func (m *mockStorageForDeletion) UpdateCertificate(cert *models.StoredCertificate) error {
+	return nil
+}
+
 // LLMProviderTemplate methods (not used in deletion tests but required by interface)
 func (m *mockStorageForDeletion) SaveLLMProviderTemplate(template *models.StoredLLMProviderTemplate) error {
 	return nil

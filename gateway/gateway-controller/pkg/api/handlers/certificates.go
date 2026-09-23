@@ -36,6 +36,8 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/gatewayidentity"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/utils"
@@ -91,27 +93,31 @@ func (t *certExpiryWarnThrottle) shouldLog(certUUID string, now time.Time) bool 
 type UploadCertificateRequest struct {
 	Certificate string                   `json:"certificate" binding:"required"` // PEM-encoded certificate
 	Name        string                   `json:"name" binding:"required"`        // Unique certificate name
-	Usage       string                   `json:"usage"`                          // "upstream" (default) or "client"
+	Usage       string                   `json:"usage"`                          // "upstream" (default), "client" or "identity"
 	Role        string                   `json:"role"`                           // "client" (default) or "relay"; usage: client only
 	Match       *models.CertificateMatch `json:"match,omitempty"`                // Only valid for role: relay
+	PrivateKey  string                   `json:"privateKey,omitempty"`           // Required (and only valid) for usage: identity
 }
 
 // CertificateResponse represents a certificate information response
 type CertificateResponse struct {
-	ID               string                   `json:"id"`
-	Name             string                   `json:"name"`
-	Subject          string                   `json:"subject,omitempty"`
-	Issuer           string                   `json:"issuer,omitempty"`
-	NotAfter         string                   `json:"notAfter,omitempty"`
-	Count            int                      `json:"count"` // Number of certs in file
-	Usage            string                   `json:"usage"`
-	Role             string                   `json:"role,omitempty"`
-	Match            *models.CertificateMatch `json:"match,omitempty"`
-	IsLeaf           bool                     `json:"isLeaf"`
-	Warnings         []clientca.Warning       `json:"warnings,omitempty"`
-	ReferencedByApis *int                     `json:"referencedByApis,omitempty"`
-	Message          string                   `json:"message,omitempty"`
-	Status           string                   `json:"status"` // success, error
+	ID                             string                   `json:"id"`
+	Name                           string                   `json:"name"`
+	Subject                        string                   `json:"subject,omitempty"`
+	Issuer                         string                   `json:"issuer,omitempty"`
+	NotAfter                       string                   `json:"notAfter,omitempty"`
+	Count                          int                      `json:"count"` // Number of certs in file
+	Usage                          string                   `json:"usage"`
+	Role                           string                   `json:"role,omitempty"`
+	Match                          *models.CertificateMatch `json:"match,omitempty"`
+	IsLeaf                         bool                     `json:"isLeaf"`
+	KeyAlgorithm                   string                   `json:"keyAlgorithm,omitempty"`                   // Only present for usage: identity
+	ChainLength                    int                      `json:"chainLength,omitempty"`                    // Only present for usage: identity
+	PooledConnectionsUsingPrevious *int                     `json:"pooledConnectionsUsingPrevious,omitempty"` // Only present on PUT (rotation) responses
+	Warnings                       []clientca.Warning       `json:"warnings,omitempty"`
+	ReferencedByApis               *int                     `json:"referencedByApis,omitempty"`
+	Message                        string                   `json:"message,omitempty"`
+	Status                         string                   `json:"status"` // success, error
 }
 
 // ListCertificatesResponse represents the response for listing certificates
@@ -135,6 +141,11 @@ type certUploadValidation struct {
 	// on it; when combined with other field errors it is folded into the
 	// same errors[] list instead.
 	legacyUpstreamCertErr error
+
+	// identityBundle holds the inspected certificate chain + private key
+	// for a usage: identity upload (nil unless usage is identity and both
+	// certificate and privateKey passed inspection).
+	identityBundle *gatewayidentity.Bundle
 }
 
 func (v *certUploadValidation) addFieldError(field, message string) {
@@ -228,17 +239,20 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 
 	// Extract certificate metadata and count for the response/storage record.
 	var (
-		subject, issuer string
-		notBefore       time.Time
-		notAfter        time.Time
-		count           int
-		isLeaf          bool
-		warnings        []clientca.Warning
+		subject, issuer      string
+		notBefore            time.Time
+		notAfter             time.Time
+		count                int
+		isLeaf               bool
+		warnings             []clientca.Warning
+		keyAlgorithm         string
+		privateKeyCiphertext string
 	)
 
 	certData := []byte(req.Certificate)
 
-	if effectiveUsage == models.CertificateUsageClient {
+	switch effectiveUsage {
+	case models.CertificateUsageClient:
 		subject = bundle.Identity.Subject.String()
 		issuer = bundle.Identity.Issuer.String()
 		notBefore = bundle.Identity.NotBefore
@@ -246,7 +260,38 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		count = len(bundle.Certificates)
 		isLeaf = bundle.IsLeaf
 		warnings = bundle.Warnings
-	} else {
+	case models.CertificateUsageIdentity:
+		ib := validation.identityBundle
+		subject = ib.Leaf.Subject.String()
+		issuer = ib.Leaf.Issuer.String()
+		notBefore = ib.Leaf.NotBefore
+		notAfter = ib.Leaf.NotAfter
+		count = len(ib.Chain)
+		isLeaf = !ib.Leaf.IsCA
+		keyAlgorithm = ib.KeyAlgorithm
+		for _, warn := range ib.Warnings {
+			warnings = append(warnings, clientca.Warning{Code: warn.Code, Field: warn.Field, Message: warn.Message})
+		}
+
+		if s.encryptionManager == nil {
+			log.Error("Cannot store gateway identity: no encryption provider configured")
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+				"status":  "error",
+				"message": "gateway identity storage is not available",
+			})
+			return
+		}
+		ciphertext, err := s.encryptPrivateKey(req.PrivateKey)
+		if err != nil {
+			log.Error("Failed to encrypt gateway identity private key", slog.Any("error", err))
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+				"status":  "error",
+				"message": "failed to store gateway identity",
+			})
+			return
+		}
+		privateKeyCiphertext = ciphertext
+	default:
 		var err error
 		subject, issuer, notBefore, notAfter, err = s.extractCertificateMetadata(certData)
 		if err != nil {
@@ -294,27 +339,32 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 
 	// Create certificate model
 	cert := &models.StoredCertificate{
-		UUID:        certID,
-		Name:        req.Name,
-		Certificate: certData,
-		Subject:     subject,
-		Issuer:      issuer,
-		NotBefore:   notBefore,
-		NotAfter:    notAfter,
-		CertCount:   count,
-		Usage:       effectiveUsage,
-		Role:        effectiveRole,
-		Match:       req.Match,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		UUID:                 certID,
+		Name:                 req.Name,
+		Certificate:          certData,
+		Subject:              subject,
+		Issuer:               issuer,
+		NotBefore:            notBefore,
+		NotAfter:             notAfter,
+		CertCount:            count,
+		Usage:                effectiveUsage,
+		Role:                 effectiveRole,
+		Match:                req.Match,
+		PrivateKeyCiphertext: privateKeyCiphertext,
+		KeyAlgorithm:         keyAlgorithm,
+		CreatedAt:            time.Now(),
+		UpdatedAt:            time.Now(),
 	}
 
 	// Save to database
 	if err := s.db.SaveCertificate(cert); err != nil {
 		if storage.IsConflictError(err) {
 			message := fmt.Sprintf("a certificate named %s already exists", req.Name)
-			if effectiveUsage == models.CertificateUsageClient {
+			switch effectiveUsage {
+			case models.CertificateUsageClient:
 				message = fmt.Sprintf("a client-CA authority named %s already exists", req.Name)
+			case models.CertificateUsageIdentity:
+				message = fmt.Sprintf("a gateway identity named %s already exists", req.Name)
 			}
 			httputil.WriteJSON(w, http.StatusConflict, map[string]any{
 				"status":  "error",
@@ -400,30 +450,199 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 			resp.Match = req.Match
 		}
 	}
+	if effectiveUsage == models.CertificateUsageIdentity {
+		resp.KeyAlgorithm = keyAlgorithm
+		resp.ChainLength = count
+	}
 
 	httputil.WriteJSON(w, http.StatusCreated, resp)
 }
 
+// encryptPrivateKey encrypts a usage: identity upload's raw PEM private key
+// bytes and marshals the result for storage. Reused by upload and update.
+func (s *APIServer) encryptPrivateKey(privateKeyPEM string) (string, error) {
+	payload, err := s.encryptionManager.Encrypt([]byte(privateKeyPEM))
+	if err != nil {
+		return "", err
+	}
+	return encryption.MarshalPayload(payload), nil
+}
+
+// UpdateCertificate rotates a usage: identity certificate's chain and
+// private key in place, keeping its name intact. Refused for any other
+// usage.
+// PUT /certificates/{id}
+func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id string) {
+	correlationID := middleware.GetCorrelationID(r)
+	log := s.logger.With(slog.String("correlation_id", correlationID))
+
+	existing, err := s.db.GetCertificate(id)
+	if err != nil {
+		httputil.WriteJSON(w, http.StatusNotFound, map[string]any{
+			"status":  "error",
+			"message": "certificate not found",
+		})
+		return
+	}
+
+	if existing.Usage != models.CertificateUsageIdentity {
+		fieldErrors := []api.ValidationError{{
+			Field:   stringPtr("usage"),
+			Message: stringPtr("only usage: identity certificates can be updated; delete and re-upload other certificates"),
+		}}
+		httputil.WriteJSON(w, http.StatusBadRequest, api.ErrorResponse{
+			Status:  "error",
+			Message: certificateUploadInvalidMessage,
+			Errors:  &fieldErrors,
+		})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxCertificateUploadBytes)
+
+	var req UploadCertificateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			httputil.WriteJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+				"status":  "error",
+				"message": "the request body is too large",
+			})
+			return
+		}
+		httputil.WriteJSON(w, http.StatusBadRequest, api.ErrorResponse{
+			Status:  "error",
+			Message: "invalid request body",
+		})
+		return
+	}
+	// Name/usage/role/match are immutable on rotation — force them to the
+	// existing row's shape so validateCertificateUpload validates only the
+	// certificate+key pair, regardless of what the caller sent.
+	req.Name = existing.Name
+	req.Usage = models.CertificateUsageIdentity
+	req.Role = ""
+	req.Match = nil
+
+	validation, _, _, _ := s.validateCertificateUpload(&req)
+	if validation.hasProblems() {
+		fieldErrors := validation.fieldErrors
+		httputil.WriteJSON(w, http.StatusBadRequest, api.ErrorResponse{
+			Status:  "error",
+			Message: certificateUploadInvalidMessage,
+			Errors:  &fieldErrors,
+		})
+		return
+	}
+
+	if s.encryptionManager == nil {
+		log.Error("Cannot store gateway identity: no encryption provider configured")
+		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"status":  "error",
+			"message": "gateway identity storage is not available",
+		})
+		return
+	}
+	ciphertext, err := s.encryptPrivateKey(req.PrivateKey)
+	if err != nil {
+		log.Error("Failed to encrypt gateway identity private key", slog.Any("error", err))
+		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"status":  "error",
+			"message": "failed to store gateway identity",
+		})
+		return
+	}
+
+	ib := validation.identityBundle
+	updated := &models.StoredCertificate{
+		UUID:                 existing.UUID,
+		Name:                 existing.Name,
+		Certificate:          []byte(req.Certificate),
+		Subject:              ib.Leaf.Subject.String(),
+		Issuer:               ib.Leaf.Issuer.String(),
+		NotBefore:            ib.Leaf.NotBefore,
+		NotAfter:             ib.Leaf.NotAfter,
+		CertCount:            len(ib.Chain),
+		Usage:                models.CertificateUsageIdentity,
+		PrivateKeyCiphertext: ciphertext,
+		KeyAlgorithm:         ib.KeyAlgorithm,
+		UpdatedAt:            time.Now(),
+	}
+
+	if err := s.db.UpdateCertificate(updated); err != nil {
+		log.Error("Failed to update certificate", slog.String("id", id), slog.Any("error", err))
+		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"status":  "error",
+			"message": "failed to update certificate",
+		})
+		return
+	}
+
+	// Identity rows never enter the upstream trust/system bundle, so
+	// certStore.Reload() is a no-op for them — still called for parity with
+	// the upload/delete paths. The SDS snapshot update is what actually
+	// matters: it rebuilds this identity's gateway_identity:<name> secret
+	// from the new certificate/key.
+	if translator := s.snapshotManager.GetTranslator(); translator != nil && translator.GetCertStore() != nil {
+		if err := translator.GetCertStore().Reload(); err != nil {
+			log.Warn("Failed to reload certificate store after identity rotation", slog.Any("error", err))
+		}
+	}
+
+	if err := s.snapshotManager.UpdateSnapshot(context.Background(), correlationID); err != nil {
+		log.Error("Failed to update SDS snapshot after certificate update", slog.Any("error", err))
+		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"status":  "error",
+			"message": "certificate updated but failed to update SDS",
+		})
+		return
+	}
+
+	zero := 0
+	var warnings []clientca.Warning
+	for _, warn := range ib.Warnings {
+		warnings = append(warnings, clientca.Warning{Code: warn.Code, Field: warn.Field, Message: warn.Message})
+	}
+
+	resp := CertificateResponse{
+		ID:                             updated.UUID,
+		Name:                           updated.Name,
+		Subject:                        updated.Subject,
+		Issuer:                         updated.Issuer,
+		NotAfter:                       updated.NotAfter.Format("2006-01-02 15:04:05"),
+		Count:                          updated.CertCount,
+		Usage:                          models.CertificateUsageIdentity,
+		IsLeaf:                         !ib.Leaf.IsCA,
+		KeyAlgorithm:                   updated.KeyAlgorithm,
+		ChainLength:                    updated.CertCount,
+		PooledConnectionsUsingPrevious: &zero,
+		Warnings:                       warnings,
+		Message:                        "Certificate updated and SDS updated successfully",
+		Status:                         "success",
+	}
+	httputil.WriteJSON(w, http.StatusOK, resp)
+}
+
 // validateCertificateUpload validates every request-level field on a
-// certificate upload and, when usage is (or defaults to) upstream/client,
-// validates the certificate content itself. All problems that can be
-// determined independently of one another are collected together so the
-// caller can report them in a single 400.
+// certificate upload and, depending on usage, validates the certificate
+// content itself (usage: client), the certificate+key pair as a unit
+// (usage: identity), or the legacy upstream-certificate path. All problems
+// that can be determined independently of one another are collected
+// together so the caller can report them in a single 400.
 //
 // It returns the accumulated validation result, the effective usage/role
 // (defaulted when the request omitted them), and — for usage: client — the
-// inspected Bundle (nil when validation failed or usage is upstream).
+// inspected client-CA Bundle (nil otherwise). For usage: identity, the
+// inspected certificate+key bundle is on v.identityBundle instead.
 func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*certUploadValidation, string, string, *clientca.Bundle) {
 	v := &certUploadValidation{}
 
 	nameProvided := req.Name != ""
 	certProvided := req.Certificate != ""
+	keyProvided := req.PrivateKey != ""
 
 	if !nameProvided {
 		v.addFieldError("name", "both name and certificate are required")
-	}
-	if !certProvided {
-		v.addFieldError("certificate", "both name and certificate are required")
 	}
 
 	if nameProvided && !certificateNamePattern.MatchString(req.Name) {
@@ -434,11 +653,28 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 	usageValid := true
 	effectiveUsage := models.CertificateUsageUpstream
 	if usageProvided {
-		if req.Usage != models.CertificateUsageUpstream && req.Usage != models.CertificateUsageClient {
-			usageValid = false
-			v.addFieldError("usage", "usage must be upstream or client")
-		} else {
+		switch req.Usage {
+		case models.CertificateUsageUpstream, models.CertificateUsageClient, models.CertificateUsageIdentity:
 			effectiveUsage = req.Usage
+		default:
+			usageValid = false
+			v.addFieldError("usage", "usage must be upstream, client or identity")
+		}
+	}
+
+	if effectiveUsage == models.CertificateUsageIdentity {
+		if !certProvided {
+			v.addFieldError("certificate", "both certificate and privateKey are required for usage: identity")
+		}
+		if !keyProvided {
+			v.addFieldError("privateKey", "both certificate and privateKey are required for usage: identity")
+		}
+	} else {
+		if !certProvided {
+			v.addFieldError("certificate", "both name and certificate are required")
+		}
+		if keyProvided {
+			v.addFieldError("privateKey", "privateKey applies only to usage: identity certificates")
 		}
 	}
 
@@ -450,7 +686,7 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 	if roleProvided {
 		if req.Role != models.CertificateRoleClient && req.Role != models.CertificateRoleRelay {
 			v.addFieldError("role", "role must be client or relay")
-		} else if usageValid && effectiveUsage == models.CertificateUsageUpstream {
+		} else if usageValid && effectiveUsage != models.CertificateUsageClient {
 			v.addFieldError("role", "role applies only to usage: client certificates")
 		} else if usageValid {
 			effectiveRole = req.Role
@@ -466,8 +702,9 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 	}
 
 	var bundle *clientca.Bundle
-	if certProvided && usageValid {
-		if effectiveUsage == models.CertificateUsageClient {
+	if usageValid {
+		switch {
+		case effectiveUsage == models.CertificateUsageClient && certProvided:
 			b, err := clientca.Inspect([]byte(req.Certificate), time.Now())
 			if err != nil {
 				var fe *clientca.FieldError
@@ -479,7 +716,19 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 			} else {
 				bundle = b
 			}
-		} else {
+		case effectiveUsage == models.CertificateUsageIdentity && certProvided && keyProvided:
+			ib, err := gatewayidentity.Inspect([]byte(req.Certificate), []byte(req.PrivateKey), time.Now())
+			if err != nil {
+				var fe *gatewayidentity.FieldError
+				if errors.As(err, &fe) {
+					v.addFieldError(fe.Field, fe.Message)
+				} else {
+					v.addFieldError("certificate", "the value is not a PEM-encoded certificate")
+				}
+			} else {
+				v.identityBundle = ib
+			}
+		case effectiveUsage == models.CertificateUsageUpstream && certProvided:
 			if _, err := s.validateCertificate([]byte(req.Certificate)); err != nil {
 				v.legacyUpstreamCertErr = err
 			}
@@ -499,10 +748,10 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 	if params.Usage != nil {
 		usageFilter = string(*params.Usage)
 	}
-	if usageFilter != "" && usageFilter != models.CertificateUsageUpstream && usageFilter != models.CertificateUsageClient {
+	if usageFilter != "" && usageFilter != models.CertificateUsageUpstream && usageFilter != models.CertificateUsageClient && usageFilter != models.CertificateUsageIdentity {
 		fieldErrors := []api.ValidationError{{
 			Field:   stringPtr("usage"),
-			Message: stringPtr("usage must be upstream or client"),
+			Message: stringPtr("usage must be upstream, client or identity"),
 		}}
 		httputil.WriteJSON(w, http.StatusBadRequest, api.ErrorResponse{
 			Status:  "error",
@@ -591,6 +840,33 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 						slog.Time("notAfter", cert.NotAfter))
 				}
 			}
+		} else if usage == models.CertificateUsageIdentity {
+			item.KeyAlgorithm = cert.KeyAlgorithm
+
+			if chain, err := gatewayidentity.ParseChain(cert.Certificate); err == nil {
+				item.ChainLength = len(chain)
+				item.IsLeaf = !chain[0].IsCA
+			} else {
+				log.Warn("Failed to parse stored gateway identity certificate chain",
+					slog.String("name", cert.Name), slog.Any("error", err))
+			}
+
+			if referencedByApis, err := s.countGatewayIdentityReferences(cert.Name); err != nil {
+				log.Warn("Failed to compute referencedByApis for gateway identity",
+					slog.String("name", cert.Name), slog.Any("error", err))
+			} else {
+				item.ReferencedByApis = &referencedByApis
+			}
+
+			if warning := clientca.ExpiryWarning(cert.NotAfter, now); warning != nil {
+				item.Warnings = []clientca.Warning{*warning}
+				if s.certExpiryWarnThrottle.shouldLog(cert.UUID, now) {
+					log.Warn("Gateway identity expiry warning",
+						slog.String("code", warning.Code),
+						slog.String("name", cert.Name),
+						slog.Time("notAfter", cert.NotAfter))
+				}
+			}
 		} else {
 			if firstCert, err := firstX509Certificate(cert.Certificate); err == nil {
 				item.IsLeaf = !firstCert.IsCA
@@ -651,8 +927,24 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 		if role == "" {
 			role = models.CertificateRoleClient
 		}
-		if preDeleteCert.Usage == models.CertificateUsageClient && role != models.CertificateRoleRelay {
+		usage := preDeleteCert.Usage
+		if usage == "" {
+			usage = models.CertificateUsageUpstream
+		}
+		if usage == models.CertificateUsageClient && role != models.CertificateRoleRelay {
 			if errResp, statusCode, blocked := s.checkClientAuthorityDeletable(preDeleteCert); blocked {
+				httputil.WriteJSON(w, statusCode, errResp)
+				return
+			}
+		}
+		if usage == models.CertificateUsageUpstream {
+			if errResp, statusCode, blocked := s.checkUpstreamCertificateDeletable(preDeleteCert); blocked {
+				httputil.WriteJSON(w, statusCode, errResp)
+				return
+			}
+		}
+		if usage == models.CertificateUsageIdentity {
+			if errResp, statusCode, blocked := s.checkGatewayIdentityDeletable(preDeleteCert); blocked {
 				httputil.WriteJSON(w, statusCode, errResp)
 				return
 			}
@@ -777,18 +1069,47 @@ func (s *APIServer) ReloadCertificates(w http.ResponseWriter, r *http.Request) {
 // nil s.db (not wired, e.g. some unit tests) is not treated as an error —
 // it simply yields no configs, consistent with there being nothing to check.
 func (s *APIServer) deployedRestAPIConfigs() ([]*models.StoredConfig, error) {
-	if s.db == nil {
-		return nil, nil
-	}
-	configs, err := s.db.GetAllConfigsByKind(string(models.KindRestApi))
-	if err != nil {
-		return nil, err
-	}
-	deployed := make([]*models.StoredConfig, 0, len(configs))
-	for _, cfg := range configs {
-		if cfg.DesiredState == models.StateDeployed {
-			deployed = append(deployed, cfg)
+	seen := make(map[string]*models.StoredConfig)
+
+	if s.db != nil {
+		configs, err := s.db.GetAllConfigsByKind(string(models.KindRestApi))
+		if err != nil {
+			return nil, err
 		}
+		for _, cfg := range configs {
+			if cfg.DesiredState == models.StateDeployed {
+				seen[cfg.UUID] = cfg
+			}
+		}
+	}
+
+	// Also consult the in-memory ConfigStore, deduped by UUID with the
+	// database results above. The two sources converge asynchronously (the
+	// event-hub listener applies a database-committed change to the
+	// in-memory store on its own schedule), so a referential-integrity
+	// check that reads only one of them races: a delete already committed
+	// to the database can still be reachable through an in-memory-only
+	// deployed config for a short window (or vice versa, a deploy visible
+	// in memory before its database write lands). Treating a reference
+	// found in EITHER source as live is what closes that window — reading
+	// only the database is exactly what let a gateway-identity delete
+	// through while an API's upstreamDefinitions[].tls.identity still
+	// named it in the not-yet-converged in-memory store, which then broke
+	// SDS secret generation for that API on the next snapshot.
+	if s.store != nil {
+		for _, cfg := range s.store.GetAllByKind(string(models.KindRestApi)) {
+			if cfg.DesiredState != models.StateDeployed {
+				continue
+			}
+			if _, ok := seen[cfg.UUID]; !ok {
+				seen[cfg.UUID] = cfg
+			}
+		}
+	}
+
+	deployed := make([]*models.StoredConfig, 0, len(seen))
+	for _, cfg := range seen {
+		deployed = append(deployed, cfg)
 	}
 	return deployed, nil
 }
@@ -942,6 +1263,110 @@ func (s *APIServer) checkClientAuthorityDeletable(cert *models.StoredCertificate
 	}
 	message := fmt.Sprintf("cannot remove the last client-CA authority while %s %s mtls-auth; add a replacement first or remove those APIs",
 		pluralDeployedAPIs(len(attachRefs)), verb)
+	return api.ErrorResponse{Status: "error", Message: message, Errors: &errs}, http.StatusConflict, true
+}
+
+// checkUpstreamCertificateDeletable reports whether a usage: upstream
+// certificate (cert) can be removed right now: refused when some deployed
+// API's upstreamDefinitions[].tls.trustedCAs still names it explicitly by
+// name. A deployed-config read failure fails closed (500) rather than
+// silently proceeding as though nothing referenced it.
+func (s *APIServer) checkUpstreamCertificateDeletable(cert *models.StoredCertificate) (api.ErrorResponse, int, bool) {
+	restAPIs, err := s.deployedRestAPIConfigs()
+	if err != nil {
+		s.logger.Error("Failed to read deployed RestApi configurations for upstream-certificate referential-integrity check",
+			slog.String("certificate", cert.Name), slog.Any("error", err))
+		return api.ErrorResponse{Status: "error", Message: "Failed to verify certificate references"},
+			http.StatusInternalServerError, true
+	}
+
+	var refs []clientAuthorityReference
+	for _, cfg := range restAPIs {
+		restCfg, ok := cfg.Configuration.(api.RestAPI)
+		if !ok {
+			continue
+		}
+		paths := config.NamedTLSTrustedCAFieldPaths(&restCfg, cert.Name)
+		if len(paths) == 0 {
+			continue
+		}
+		refs = append(refs, clientAuthorityReference{apiHandle: cfg.Handle, fieldPath: paths[0]})
+	}
+	if len(refs) == 0 {
+		return api.ErrorResponse{}, 0, false
+	}
+
+	errs := make([]api.ValidationError, len(refs))
+	for i, ref := range refs {
+		errs[i] = api.ValidationError{
+			Field:   stringPtr(ref.fieldPath),
+			Message: stringPtr(fmt.Sprintf("referenced by API '%s'", ref.apiHandle)),
+		}
+	}
+	message := fmt.Sprintf("certificate '%s' is named by %s; remove those references first",
+		cert.Name, pluralDeployedAPIs(len(refs)))
+	return api.ErrorResponse{Status: "error", Message: message, Errors: &errs}, http.StatusConflict, true
+}
+
+// countGatewayIdentityReferences counts the deployed RestApi configurations
+// whose upstreamDefinitions[].tls.identity explicitly names identityName.
+func (s *APIServer) countGatewayIdentityReferences(identityName string) (int, error) {
+	restAPIs, err := s.deployedRestAPIConfigs()
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, cfg := range restAPIs {
+		restCfg, ok := cfg.Configuration.(api.RestAPI)
+		if !ok {
+			continue
+		}
+		if len(config.NamedTLSIdentityFieldPaths(&restCfg, identityName)) > 0 {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// checkGatewayIdentityDeletable reports whether a usage: identity
+// certificate (cert) can be removed right now: refused when some deployed
+// API's upstreamDefinitions[].tls.identity still names it. A deployed-config
+// read failure fails closed (500) rather than silently proceeding as though
+// nothing referenced it.
+func (s *APIServer) checkGatewayIdentityDeletable(cert *models.StoredCertificate) (api.ErrorResponse, int, bool) {
+	restAPIs, err := s.deployedRestAPIConfigs()
+	if err != nil {
+		s.logger.Error("Failed to read deployed RestApi configurations for gateway-identity referential-integrity check",
+			slog.String("identity", cert.Name), slog.Any("error", err))
+		return api.ErrorResponse{Status: "error", Message: "Failed to verify gateway identity references"},
+			http.StatusInternalServerError, true
+	}
+
+	var refs []clientAuthorityReference
+	for _, cfg := range restAPIs {
+		restCfg, ok := cfg.Configuration.(api.RestAPI)
+		if !ok {
+			continue
+		}
+		paths := config.NamedTLSIdentityFieldPaths(&restCfg, cert.Name)
+		if len(paths) == 0 {
+			continue
+		}
+		refs = append(refs, clientAuthorityReference{apiHandle: cfg.Handle, fieldPath: paths[0]})
+	}
+	if len(refs) == 0 {
+		return api.ErrorResponse{}, 0, false
+	}
+
+	errs := make([]api.ValidationError, len(refs))
+	for i, ref := range refs {
+		errs[i] = api.ValidationError{
+			Field:   stringPtr(ref.fieldPath),
+			Message: stringPtr(fmt.Sprintf("referenced by API '%s'", ref.apiHandle)),
+		}
+	}
+	message := fmt.Sprintf("gateway identity '%s' is named by %s; remove those references first",
+		cert.Name, pluralDeployedAPIs(len(refs)))
 	return api.ErrorResponse{Status: "error", Message: message, Errors: &errs}, http.StatusConflict, true
 }
 

@@ -181,7 +181,7 @@ Feature: Client certificate authority pool
       }
       """
     Then the response status should be 400
-    And the response should list a validation error for field "usage" with message "usage must be upstream or client"
+    And the response should list a validation error for field "usage" with message "usage must be upstream, client or identity"
 
   Scenario: An unknown role is rejected
     When I upload to the certificates endpoint the body:

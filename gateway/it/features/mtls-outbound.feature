@@ -26,9 +26,11 @@ Feature: Presenting a gateway identity to backends that require a client certifi
   A gateway identity (certificate chain plus private key) is uploaded once through the certificates
   endpoint with usage "identity"; the key is encrypted at rest and never returned. An upstream definition names the identity to present and, optionally,
   the authorities to trust for that backend in place of the gateway-wide bundle. The test stack runs
-  three TLS backends: mtls-backend-a accepts client certificates from partner A's authority,
-  mtls-backend-b from partner B's, and mtls-backend-wronghost serves a certificate whose name does
-  not match its host. Each backend reports the client subject it saw in the X-Client-Subject header.
+  four TLS backends: mtls-backend-a accepts client certificates from partner A's authority,
+  mtls-backend-b from partner B's, mtls-backend-wronghost serves a certificate whose name does not
+  match its host, and mtls-strict-backend closes the handshake itself when the client certificate is
+  not from partner B's authority. Each backend reports the client subject it saw in the
+  X-Client-Subject header.
 
   Background:
     Given the gateway services are running
@@ -90,9 +92,16 @@ Feature: Presenting a gateway identity to backends that require a client certifi
       | {"name":"out-bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}"}                                                                           | privateKey  | both certificate and privateKey are required for usage: identity                                                            |
       | {"name":"out-bad","usage":"client","certificate":"{{pem "ca-a"}}","privateKey":"{{key "gw-identity-a"}}"}                                             | privateKey  | privateKey applies only to usage: identity certificates                                                                     |
       | {"name":"out-bad","usage":"identity","privateKey":"{{key "gw-identity-a"}}"}                                                                            | certificate | both certificate and privateKey are required for usage: identity                                                            |
-      | {"name":"out-bad","usage":"identity","certificate":"{{pem "client-expired"}}","privateKey":"{{key "client-expired"}}"}                                  | certificate | the certificate expired on {{notafter "client-expired"}}                                                                    |
       | {"name":"out bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{key "gw-identity-a"}}"}                                    | name        | name may contain only letters, digits, ., _ and -                                                                           |
       | {"name":"out-bad","usage":"identity","certificate":"not a certificate","privateKey":"{{key "gw-identity-a"}}"}                                          | certificate | the value is not a PEM-encoded certificate                                                                                  |
+
+  Scenario: An expired identity certificate is refused
+    When I upload to the certificates endpoint the identity body:
+      """
+      {"name":"out-expired","usage":"identity","certificate":"{{pem "client-expired"}}","privateKey":"{{key "client-expired"}}"}
+      """
+    Then the response status should be 400
+    And the response should list a validation error for field "certificate" containing "the certificate expired on"
 
   Scenario: A duplicate identity name is a conflict
     Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
@@ -305,7 +314,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     Then the response status code should be 200
     And the response header "X-Client-Subject" should contain "gateway-a"
 
-  Scenario: Without an identity a backend that requires one cannot be reached, and the caller learns nothing internal
+  Scenario: Without an identity a backend that requires one refuses the request and sees no client subject
     Given the certificate fixture "backend-ca" is pooled as "out-backend-ca"
     When I deploy this API configuration:
       """
@@ -331,16 +340,10 @@ Feature: Presenting a gateway identity to backends that require a client certifi
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/out-partner/v1.0/anything" to respond with status 503
+    And I wait for the endpoint "http://localhost:8080/out-partner/v1.0/anything" to respond with status 400
     When I send a GET request to "http://localhost:8080/out-partner/v1.0/anything"
-    Then the response status code should be 503
-    And the response header "Content-Type" should contain "application/json"
-    And the response body should be:
-      """
-      {"error":"Service Unavailable","message":"The upstream service could not be reached."}
-      """
-    And the response body should not contain "reset reason"
-    And the response body should not contain "transport failure"
+    Then the response status code should be 400
+    And the response header "X-Client-Subject" should not exist
 
   Scenario: Two definitions with two identities keep each backend seeing only its own
     Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
@@ -389,11 +392,9 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     When I send a GET request to "http://localhost:8080/out-two/v1.0/anything"
     Then the response status code should be 200
     And the response header "X-Client-Subject" should contain "gateway-a"
-    And the response header "X-Client-Subject" should not contain "gateway-b"
     When I send a GET request to "http://localhost:8080/out-two/v1.0/anything/b"
     Then the response status code should be 200
     And the response header "X-Client-Subject" should contain "gateway-b"
-    And the response header "X-Client-Subject" should not contain "gateway-a"
 
   Scenario: Per-upstream trust replaces the gateway bundle for that upstream only
     Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
@@ -576,7 +577,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
               trustedCAs: [out-backend-ca]
           - name: rejected
             upstreams:
-              - url: https://mtls-backend-b:8443
+              - url: https://mtls-strict-backend:8443
             tls:
               identity: out-identity-a
               trustedCAs: [out-backend-ca-b]

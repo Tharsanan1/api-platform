@@ -40,6 +40,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/apikeyxds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/controlplane"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/lazyresourcexds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policyxds"
@@ -86,6 +87,20 @@ type APIServer struct {
 	// required in NewAPIServer or in tests constructing an APIServer literal
 	// directly.
 	certExpiryWarnThrottle certExpiryWarnThrottle
+
+	// encryptionManager encrypts a gateway identity's private key at rest.
+	// Set post-construction via SetEncryptionManager (mirroring
+	// SnapshotManager.SetSDSSecretManager) so existing callers/tests
+	// constructing an APIServer without encryption configured are
+	// unaffected; nil means gateway-identity upload/update is refused
+	// (fail-closed — a key must never be persisted unencrypted).
+	encryptionManager *encryption.ProviderManager
+}
+
+// SetEncryptionManager wires the encryption provider manager used to
+// encrypt a gateway identity's private key before it is persisted.
+func (s *APIServer) SetEncryptionManager(mgr *encryption.ProviderManager) {
+	s.encryptionManager = mgr
 }
 
 // NewAPIServer creates a new API server with dependencies

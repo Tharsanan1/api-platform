@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 )
@@ -66,6 +67,23 @@ type CertStore struct {
 	combinedCerts  []byte
 	db             storage.Storage
 	mu             sync.RWMutex // Protects combinedCerts from concurrent access
+
+	// encryptionManager decrypts a gateway identity's private key when
+	// building its SDS secret. Set post-construction via
+	// SetEncryptionManager (mirroring SDSSecretManager's
+	// SetDownstreamListenerCert) so existing callers/tests that never
+	// touch gateway identities are unaffected; nil makes
+	// GetGatewayIdentityMaterial fail closed rather than serve an
+	// undecryptable (or worse, still-encrypted) key.
+	encryptionManager *encryption.ProviderManager
+}
+
+// SetEncryptionManager wires the encryption provider manager used to
+// decrypt a gateway identity's private key ciphertext.
+func (cs *CertStore) SetEncryptionManager(mgr *encryption.ProviderManager) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.encryptionManager = mgr
 }
 
 // NewCertStore creates a new certificate store
@@ -342,6 +360,75 @@ func (cs *CertStore) GetClientCABundle() ([]byte, error) {
 
 	var buf bytes.Buffer
 	for _, cert := range certs {
+		buf.Write(cert.Certificate)
+		if !bytes.HasSuffix(cert.Certificate, []byte("\n")) {
+			buf.WriteString("\n")
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+// GetGatewayIdentityMaterial resolves a gateway identity by name — a
+// certificates row with usage: identity — to its PEM certificate chain
+// (leaf first) and decrypted private key PEM, for inlining into the
+// identity's own SDS TlsCertificate secret. Returns an error — never a
+// decrypted-but-still-encrypted or partial result — when the row cannot be
+// found, is not usage: identity, no encryption manager is configured, or
+// decryption fails.
+func (cs *CertStore) GetGatewayIdentityMaterial(name string) (certChainPEM []byte, privateKeyPEM []byte, err error) {
+	cert, err := cs.db.GetCertificateByName(name)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gateway identity %q not found: %w", name, err)
+	}
+	if cert.Usage != models.CertificateUsageIdentity {
+		return nil, nil, fmt.Errorf("%q is not a gateway identity (usage: identity)", name)
+	}
+
+	cs.mu.RLock()
+	mgr := cs.encryptionManager
+	cs.mu.RUnlock()
+	if mgr == nil {
+		return nil, nil, fmt.Errorf("no encryption provider configured; cannot decrypt gateway identity %q", name)
+	}
+
+	payload, err := encryption.UnmarshalPayload(cert.PrivateKeyCiphertext)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to unmarshal encrypted payload for gateway identity %q: %w", name, err)
+	}
+	plaintext, err := mgr.Decrypt(payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to decrypt private key for gateway identity %q: %w", name, err)
+	}
+
+	return cert.Certificate, plaintext, nil
+}
+
+// GetUpstreamTrustBundle concatenates the PEM certificates of the named
+// usage: upstream rows, in the given order, for a per-upstream
+// ValidationContext SDS secret. Returns an error if any named certificate
+// cannot be found — deploy-time validation (config.UpstreamTLSValidator)
+// already confirms every name exists and is usage: upstream, so a failure
+// here means the pool changed between deploy and snapshot build; fail
+// closed rather than silently build a smaller trust set than configured.
+func (cs *CertStore) GetUpstreamTrustBundle(names []string) ([]byte, error) {
+	var buf bytes.Buffer
+	for _, name := range names {
+		cert, err := cs.db.GetCertificateByName(name)
+		if err != nil {
+			return nil, fmt.Errorf("certificate %q not found: %w", name, err)
+		}
+		usage := cert.Usage
+		if usage == "" {
+			usage = models.CertificateUsageUpstream
+		}
+		if usage != models.CertificateUsageUpstream {
+			// Defense in depth: deploy-time validation already refuses a
+			// trustedCAs entry naming anything but a usage: upstream row,
+			// so this only fires if the pool changed underneath an already
+			// -deployed definition — fail closed rather than build a trust
+			// bundle out of a client authority or a gateway identity.
+			return nil, fmt.Errorf("certificate %q is not usage: upstream", name)
+		}
 		buf.Write(cert.Certificate)
 		if !bytes.HasSuffix(cert.Certificate, []byte("\n")) {
 			buf.WriteString("\n")

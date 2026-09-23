@@ -303,7 +303,7 @@ func (t *RestAPITransformer) Transform(cfg *models.StoredConfig) (*models.Runtim
 				Name:           def.Name,
 				BasePath:       basePath,
 				Endpoints:      endpoints,
-				TLS:            &models.UpstreamTLS{Enabled: tlsExists},
+				TLS:            upstreamTLSFromParams(def.Tls, tlsExists),
 				ConnectTimeout: defConnectTimeout,
 			}
 		}
@@ -526,12 +526,17 @@ func (t *RestAPITransformer) addUpstreamCluster(
 		basePath = "/"
 	}
 
-	// The connect timeout can only come from a referenced upstreamDefinition
-	// (direct-URL upstreams have no timeout field). Resolve it here so the RDC->Envoy
-	// translation applies it to this cluster instead of falling back to the global default.
+	// The connect timeout and tls block can only come from a referenced
+	// upstreamDefinition (a direct-URL upstream has neither field, and tls
+	// is refused there at deploy time — see
+	// config.UpstreamTLSValidator.ValidateRestAPI). Resolve both here so the
+	// RDC->Envoy translation applies them to this cluster instead of
+	// falling back to the global default / no client identity.
 	var connectTimeout *time.Duration
+	var refDef *api.UpstreamDefinition
 	if up != nil && up.Ref != nil && strings.TrimSpace(*up.Ref) != "" {
-		ct, terr := definitionConnectTimeout(lookupUpstreamDefinition(*up.Ref, upstreamDefinitions))
+		refDef = lookupUpstreamDefinition(*up.Ref, upstreamDefinitions)
+		ct, terr := definitionConnectTimeout(refDef)
 		if terr != nil {
 			return nil, fmt.Errorf("%s upstream: %w", upstreamName, terr)
 		}
@@ -540,13 +545,30 @@ func (t *RestAPITransformer) addUpstreamCluster(
 
 	clusterKey := fmt.Sprintf("upstream_%s_%s_%d", upstreamName, parsedURL.Hostname(), port)
 
+	var tls *map[string]interface{}
+	if refDef != nil {
+		tls = refDef.Tls
+	}
+
+	// Name mirrors the referenced definition's own name (empty for a direct
+	// URL, which cannot carry tls) so the translator can build this
+	// cluster's per-upstream validation-context SDS secret name
+	// ("upstream_ca:<api-handle>:<definition-name>") identically whether
+	// the cluster came from the definitions loop or this main/sandbox
+	// ref-duplicate.
+	defName := ""
+	if refDef != nil {
+		defName = refDef.Name
+	}
+
 	rdc.UpstreamClusters[clusterKey] = &models.UpstreamCluster{
+		Name:     defName,
 		BasePath: basePath,
 		Endpoints: []models.Endpoint{{
 			Host: parsedURL.Hostname(),
 			Port: port,
 		}},
-		TLS:            &models.UpstreamTLS{Enabled: parsedURL.Scheme == "https"},
+		TLS:            upstreamTLSFromParams(tls, parsedURL.Scheme == "https"),
 		ConnectTimeout: connectTimeout,
 	}
 
@@ -644,6 +666,25 @@ func ResolvePort(u *url.URL) int {
 		return 443
 	}
 	return 80
+}
+
+// upstreamTLSFromParams builds the runtime TLS model for one upstream
+// cluster. tls is the raw, already-validated tls block (nil when the
+// definition/upstream carried none); enabled is whether the target uses
+// https:// at all. Callers must only invoke this once the owning
+// configuration has passed config.UpstreamTLSValidator.ValidateRestAPI.
+func upstreamTLSFromParams(tls *map[string]interface{}, enabled bool) *models.UpstreamTLS {
+	if tls == nil {
+		return &models.UpstreamTLS{Enabled: enabled}
+	}
+	identity, trustedCAs, verifyHostName := config.ResolveUpstreamTLSFromParams(*tls)
+	return &models.UpstreamTLS{
+		Enabled:        enabled,
+		HasTLSBlock:    true,
+		IdentityName:   identity,
+		TrustedCANames: trustedCAs,
+		VerifyHostName: verifyHostName,
+	}
 }
 
 // SanitizeUpstreamDefinitionName replaces dots and colons for Envoy cluster name compatibility.

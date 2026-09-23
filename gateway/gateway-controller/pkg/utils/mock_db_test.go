@@ -215,7 +215,8 @@ func (m *testMockDB) ListCertificates() ([]*models.StoredCertificate, error) { r
 func (m *testMockDB) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
 	return nil, nil
 }
-func (m *testMockDB) DeleteCertificate(id string) error { return nil }
+func (m *testMockDB) DeleteCertificate(id string) error                      { return nil }
+func (m *testMockDB) UpdateCertificate(cert *models.StoredCertificate) error { return nil }
 
 func (m *testMockDB) GetDB() *sql.DB { return nil }
 func (m *testMockDB) Close() error   { return nil }

@@ -21,9 +21,12 @@ package models
 import "time"
 
 // Certificate usage values. Usage determines which trust purpose a stored
-// certificate serves: verifying upstream/backend HTTPS connections, or
-// pooling client certificate authorities for mutual TLS. The two purposes
-// never share a trust bundle (see pkg/certstore).
+// certificate serves: verifying upstream/backend HTTPS connections, pooling
+// client certificate authorities for mutual TLS, or (identity) a gateway
+// identity the gateway itself presents to a backend requiring mutual TLS.
+// The three purposes never share a trust bundle (see pkg/certstore) — a
+// usage: identity row is never treated as a trust anchor and never counts
+// toward the usage: client last-authority rule.
 const (
 	// CertificateUsageUpstream marks a certificate as backend/upstream trust
 	// (the original, pre-mTLS purpose of the /certificates endpoint).
@@ -32,6 +35,13 @@ const (
 	// CertificateUsageClient marks a certificate as a pooled client
 	// certificate authority, used to authenticate API callers over mTLS.
 	CertificateUsageClient = "client"
+
+	// CertificateUsageIdentity marks a row as a gateway identity: a
+	// certificate chain (leaf first) plus its encrypted private key
+	// (PrivateKeyCiphertext), presented by the gateway on outbound
+	// connections to a backend requiring mutual TLS. Named by
+	// upstreamDefinitions[].tls.identity.
+	CertificateUsageIdentity = "identity"
 )
 
 // Certificate role values. Role only applies to usage: client certificates
@@ -63,15 +73,26 @@ type CertificateMatch struct {
 type StoredCertificate struct {
 	UUID        string            `json:"uuid"`            // Unique UUID
 	Name        string            `json:"name"`            // Human-readable name
-	Certificate []byte            `json:"certificate"`     // PEM-encoded certificate(s)
+	Certificate []byte            `json:"certificate"`     // PEM-encoded certificate(s); leaf first for usage: identity
 	Subject     string            `json:"subject"`         // Certificate subject DN
 	Issuer      string            `json:"issuer"`          // Certificate issuer DN
 	NotBefore   time.Time         `json:"notBefore"`       // Certificate validity start
 	NotAfter    time.Time         `json:"notAfter"`        // Certificate validity end
 	CertCount   int               `json:"certCount"`       // Number of certs in bundle
-	Usage       string            `json:"usage"`           // "upstream" (default) or "client"
+	Usage       string            `json:"usage"`           // "upstream" (default), "client" or "identity"
 	Role        string            `json:"role"`            // "client" (default) or "relay"; meaningful only for usage: client
 	Match       *CertificateMatch `json:"match,omitempty"` // Only meaningful for role: relay; nil means unnarrowed
-	CreatedAt   time.Time         `json:"createdAt"`       // When uploaded
-	UpdatedAt   time.Time         `json:"updatedAt"`       // Last modified
+
+	// PrivateKeyCiphertext is the encryption package's marshalled payload
+	// (see encryption.MarshalPayload) for a usage: identity row's private
+	// key — never the plaintext, and never marshalled into any API
+	// response. Empty for every other usage.
+	PrivateKeyCiphertext string `json:"-"`
+
+	// KeyAlgorithm names a usage: identity row's leaf key algorithm (e.g.
+	// "RSA", "ECDSA", "Ed25519"). Empty for every other usage.
+	KeyAlgorithm string `json:"keyAlgorithm,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"` // When uploaded
+	UpdatedAt time.Time `json:"updatedAt"` // Last modified
 }

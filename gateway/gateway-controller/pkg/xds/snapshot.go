@@ -148,6 +148,7 @@ func (sm *SnapshotManager) UpdateSnapshot(ctx context.Context, correlationID str
 	// how the old inline-bytes path failed translation outright when it
 	// read the same files directly.
 	if sm.sdsSecretManager != nil {
+		sm.sdsSecretManager.SetUpstreamTLSSecretRefs(sm.translator.GetUpstreamTLSSecretRefs())
 		secrets, err := sm.sdsSecretManager.GetSecrets()
 		if err != nil {
 			log.Error("Failed to build SDS secrets", slog.Any("error", err))

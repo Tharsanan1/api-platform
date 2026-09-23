@@ -20,6 +20,7 @@ package handlers
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -38,6 +41,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption/aesgcm"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/testutil/pki"
@@ -1059,7 +1064,7 @@ func TestUploadCertificate_UnknownUsage_Rejected(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	entry := firstFieldError(t, w.Body.Bytes(), "usage")
-	assert.Equal(t, "usage must be upstream or client", entry["message"])
+	assert.Equal(t, "usage must be upstream, client or identity", entry["message"])
 }
 
 func TestUploadCertificate_RoleOnUpstream_Rejected(t *testing.T) {
@@ -1647,4 +1652,422 @@ func TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList(t *testing.T) 
 	require.True(t, ok)
 	require.Len(t, listDNSSANs, 1)
 	assert.Equal(t, "lb.corp.test", listDNSSANs[0])
+}
+
+// ============================================================================
+// Gateway identities: usage: identity certificates (slice 5)
+// ============================================================================
+
+// testEncryptionManager builds a real (temp-key-backed) AES-GCM provider
+// chain — usage: identity upload/update always goes through
+// s.encryptPrivateKey, so a nil encryptionManager isn't an option for these
+// tests the way it is for the rejection-only tests above.
+func testEncryptionManager(t *testing.T) *encryption.ProviderManager {
+	t.Helper()
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "v1.key")
+	key := make([]byte, aesgcm.AESKeySize)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(keyPath, key, 0600))
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	provider, err := aesgcm.NewAESGCMProvider([]aesgcm.KeyConfig{{Version: "v1", FilePath: keyPath}}, logger)
+	require.NoError(t, err)
+
+	mgr, err := encryption.NewProviderManager([]encryption.EncryptionProvider{provider}, logger)
+	require.NoError(t, err)
+	return mgr
+}
+
+// createTestAPIServerWithIdentitySupport wires both the cert store (per
+// createTestAPIServerWithCertStore's doc comment — db must already contain
+// at least one certificate) and an encryption manager, needed by every
+// usage: identity upload/update path. Mirrors cmd/controller/main.go, which
+// wires the SAME provider manager to both APIServer.SetEncryptionManager
+// (encrypt-at-write, used by Upload/UpdateCertificate) and
+// CertStore.SetEncryptionManager (decrypt-at-read, used by
+// GetGatewayIdentityMaterial — the SDS secret build and the tls-test probe).
+func createTestAPIServerWithIdentitySupport(t *testing.T, db storage.Storage) *APIServer {
+	t.Helper()
+	server := createTestAPIServerWithCertStore(t, db)
+	mgr := testEncryptionManager(t)
+	server.encryptionManager = mgr
+	if translator := server.snapshotManager.GetTranslator(); translator != nil && translator.GetCertStore() != nil {
+		translator.GetCertStore().SetEncryptionManager(mgr)
+	}
+	return server
+}
+
+// gatewayIdentityLeaf builds a self-contained (own root CA) client-auth leaf
+// suitable for a usage: identity upload — an identity's trust chain is
+// irrelevant to these tests, only that the certificate+key pair matches.
+func gatewayIdentityLeaf(t *testing.T, cn string) *pki.Entity {
+	t.Helper()
+	ca := pki.NewRootCA(t, cn+" Root CA")
+	return pki.NewLeaf(t, ca, cn)
+}
+
+// newUpdateCertHandler wraps UpdateCertificate with CorrelationIDMiddleware for testing.
+func newUpdateCertHandler(server *APIServer, certID string) http.Handler {
+	return middleware.CorrelationIDMiddleware(server.logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.UpdateCertificate(w, r, certID)
+	}))
+}
+
+func updateCertificateBody(t *testing.T, server *APIServer, certID string, reqBody UploadCertificateRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	handler := newUpdateCertHandler(server, certID)
+	bodyBytes, err := json.Marshal(reqBody)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut, "/certificates/"+certID, bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	return w
+}
+
+// restAPIConfigWithUpstreamTLS builds a minimal deployed RestApi StoredConfig
+// with one upstreamDefinitions entry named "partner" carrying a tls block —
+// identity and/or trustedCAs, whichever is non-empty — targeting an https://
+// backend. The gateway-identity/upstream-certificate referential-integrity
+// counterpart to restAPIConfigWithMtlsAuth (which covers mtls-auth accept
+// lists instead).
+func restAPIConfigWithUpstreamTLS(handle, identity string, trustedCAs ...string) *models.StoredConfig {
+	tls := map[string]interface{}{}
+	if identity != "" {
+		tls["identity"] = identity
+	}
+	if len(trustedCAs) > 0 {
+		caList := make([]interface{}, len(trustedCAs))
+		for i, c := range trustedCAs {
+			caList[i] = c
+		}
+		tls["trustedCAs"] = caList
+	}
+
+	def := management.UpstreamDefinition{
+		Name: "partner",
+		Tls:  &tls,
+		Upstreams: []struct {
+			Url    string `json:"url" yaml:"url"`
+			Weight *int   `json:"weight,omitempty" yaml:"weight,omitempty"`
+		}{{Url: "https://backend:8443"}},
+	}
+
+	cfg := management.RestAPI{
+		Kind:     management.RestAPIKindRestApi,
+		Metadata: management.Metadata{Name: handle},
+		Spec: management.APIConfigData{
+			DisplayName:         handle,
+			Version:             "v1.0",
+			Context:             "/" + handle,
+			UpstreamDefinitions: &[]management.UpstreamDefinition{def},
+			Operations: []management.Operation{
+				{Method: management.Ptr(management.OperationMethodGET), Path: management.Ptr("/resource")},
+			},
+			Upstream: struct {
+				Main    management.Upstream  `json:"main" yaml:"main"`
+				Sandbox *management.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+			}{
+				Main: management.Upstream{Ref: stringPtr("partner")},
+			},
+		},
+	}
+
+	return &models.StoredConfig{
+		UUID:          handle,
+		Kind:          models.KindRestApi,
+		Handle:        handle,
+		DisplayName:   handle,
+		Version:       "v1.0",
+		DesiredState:  models.StateDeployed,
+		Configuration: cfg,
+	}
+}
+
+// ---- Upload ----
+
+func TestUploadCertificate_UsageIdentity_Success(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
+	server := createTestAPIServerWithIdentitySupport(t, mockDB)
+
+	identity := gatewayIdentityLeaf(t, "gateway-a")
+	w := uploadCertificateBody(t, server, UploadCertificateRequest{
+		Name:        "out-identity-a",
+		Usage:       models.CertificateUsageIdentity,
+		Certificate: string(identity.PEM()),
+		PrivateKey:  string(identity.KeyPEM()),
+	})
+
+	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, models.CertificateUsageIdentity, resp["usage"])
+	assert.Equal(t, "ECDSA", resp["keyAlgorithm"])
+	assert.Equal(t, float64(1), resp["chainLength"])
+	_, hasPrivateKey := resp["privateKey"]
+	assert.False(t, hasPrivateKey, "response must never echo the private key, got %v", resp)
+	assert.NotContains(t, w.Body.String(), "PRIVATE KEY")
+}
+
+func TestUploadCertificate_PrivateKeyWithUsageClient_Rejected(t *testing.T) {
+	mockDB := NewMockStorage()
+	server := createTestAPIServerWithDB(mockDB)
+
+	identity := gatewayIdentityLeaf(t, "usage-client-with-key")
+	w := uploadCertificateBody(t, server, UploadCertificateRequest{
+		Name:        "pool-usage-client-with-key",
+		Usage:       models.CertificateUsageClient,
+		Certificate: string(identity.PEM()),
+		PrivateKey:  string(identity.KeyPEM()),
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	entry := firstFieldError(t, w.Body.Bytes(), "privateKey")
+	assert.Equal(t, "privateKey applies only to usage: identity certificates", entry["message"])
+}
+
+func TestUploadCertificate_IdentityWithoutPrivateKey_Rejected(t *testing.T) {
+	mockDB := NewMockStorage()
+	server := createTestAPIServerWithDB(mockDB)
+
+	identity := gatewayIdentityLeaf(t, "identity-without-key")
+	w := uploadCertificateBody(t, server, UploadCertificateRequest{
+		Name:        "out-identity-without-key",
+		Usage:       models.CertificateUsageIdentity,
+		Certificate: string(identity.PEM()),
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	entry := firstFieldError(t, w.Body.Bytes(), "privateKey")
+	assert.Equal(t, "both certificate and privateKey are required for usage: identity", entry["message"])
+}
+
+func TestUploadCertificate_DuplicateIdentityName_Conflict(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.saveErr = fmt.Errorf("%w: certificate with name 'out-identity-a' already exists", storage.ErrConflict)
+	// s.db.SaveCertificate fails (and the handler returns) before ever
+	// reaching the cert store/SDS snapshot machinery, so createTestAPIServerWithDB
+	// is enough here — only the encryption manager is needed, since
+	// encryptPrivateKey runs ahead of the save.
+	server := createTestAPIServerWithDB(mockDB)
+	server.encryptionManager = testEncryptionManager(t)
+
+	identity := gatewayIdentityLeaf(t, "duplicate-identity")
+	w := uploadCertificateBody(t, server, UploadCertificateRequest{
+		Name:        "out-identity-a",
+		Usage:       models.CertificateUsageIdentity,
+		Certificate: string(identity.PEM()),
+		PrivateKey:  string(identity.KeyPEM()),
+	})
+
+	require.Equal(t, http.StatusConflict, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "a gateway identity named out-identity-a already exists", resp["message"])
+}
+
+// ---- List ----
+
+func TestListCertificates_UsageIdentity_NoPrivateKeyAndReferencedByApis(t *testing.T) {
+	mockDB := NewMockStorage()
+	identity := gatewayIdentityLeaf(t, "list-identity")
+	mockDB.certs = []*models.StoredCertificate{
+		{
+			UUID: "list-identity-1", Name: "out-identity-a", Certificate: identity.PEM(),
+			Usage: models.CertificateUsageIdentity, KeyAlgorithm: "ECDSA",
+			PrivateKeyCiphertext: "aesgcm:v1:deadbeef", NotAfter: time.Now().Add(365 * 24 * time.Hour),
+		},
+	}
+	server := createTestAPIServerWithDB(mockDB)
+
+	handler := newCertListHandler(server)
+	req := httptest.NewRequest(http.MethodGet, "/certificates?usage=identity", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "PrivateKeyCiphertext")
+	assert.NotContains(t, w.Body.String(), "deadbeef")
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	items, ok := resp["certificates"].([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	item := items[0].(map[string]any)
+
+	_, hasPrivateKey := item["privateKey"]
+	assert.False(t, hasPrivateKey)
+	referenced, ok := item["referencedByApis"].(float64)
+	require.True(t, ok, "expected identity row to carry a numeric referencedByApis, got %v", item["referencedByApis"])
+	assert.Equal(t, float64(0), referenced)
+	assert.Equal(t, "ECDSA", item["keyAlgorithm"])
+}
+
+// ---- Update (rotation) ----
+
+func TestUpdateCertificate_IdentityRow_Success(t *testing.T) {
+	original := gatewayIdentityLeaf(t, "rotate-original")
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{
+		seedUpstreamCert(t),
+		{
+			UUID: "rotate-identity-1", Name: "out-identity-a", Certificate: original.PEM(),
+			Usage: models.CertificateUsageIdentity, KeyAlgorithm: "ECDSA",
+			NotAfter: time.Now().Add(365 * 24 * time.Hour),
+		},
+	}
+	server := createTestAPIServerWithIdentitySupport(t, mockDB)
+
+	rotated := gatewayIdentityLeaf(t, "rotate-new")
+	w := updateCertificateBody(t, server, "rotate-identity-1", UploadCertificateRequest{
+		Certificate: string(rotated.PEM()),
+		PrivateKey:  string(rotated.KeyPEM()),
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.NotContains(t, w.Body.String(), "PRIVATE KEY")
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	_, hasPooled := resp["pooledConnectionsUsingPrevious"]
+	assert.True(t, hasPooled, "expected pooledConnectionsUsingPrevious on a rotation response, got %v", resp)
+	_, hasPrivateKey := resp["privateKey"]
+	assert.False(t, hasPrivateKey)
+	assert.Equal(t, "out-identity-a", resp["name"], "name must stay fixed across rotation")
+
+	// The stored row itself was actually rotated to the new certificate.
+	updated, err := mockDB.GetCertificate("rotate-identity-1")
+	require.NoError(t, err)
+	assert.Equal(t, string(rotated.PEM()), string(updated.Certificate))
+}
+
+func TestUpdateCertificate_UpstreamRow_Rejected(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{
+		{UUID: "update-upstream-1", Name: "out-backend-ca", Usage: models.CertificateUsageUpstream, NotAfter: time.Now().Add(365 * 24 * time.Hour)},
+	}
+	server := createTestAPIServerWithDB(mockDB)
+
+	identity := gatewayIdentityLeaf(t, "wrong-target")
+	w := updateCertificateBody(t, server, "update-upstream-1", UploadCertificateRequest{
+		Certificate: string(identity.PEM()),
+		PrivateKey:  string(identity.KeyPEM()),
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	entry := firstFieldError(t, w.Body.Bytes(), "usage")
+	assert.Equal(t, "only usage: identity certificates can be updated; delete and re-upload other certificates", entry["message"])
+}
+
+// ---- Delete referential integrity ----
+
+func TestDeleteCertificate_IdentityNamedInUpstreamTLS_Returns409(t *testing.T) {
+	identity := gatewayIdentityLeaf(t, "del-identity")
+	target := &models.StoredCertificate{
+		UUID: "del-identity-1", Name: "out-identity-a", Certificate: identity.PEM(),
+		Usage: models.CertificateUsageIdentity, KeyAlgorithm: "ECDSA", NotAfter: time.Now().Add(365 * 24 * time.Hour),
+	}
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{target, seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithUpstreamTLS("out-partner-api", "out-identity-a")))
+
+	handler := newDeleteCertHandler(server, target.UUID)
+	req := httptest.NewRequest(http.MethodDelete, "/certificates/"+target.UUID, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "gateway identity 'out-identity-a' is named by 1 deployed API; remove those references first", resp["message"])
+	errs, ok := resp["errors"].([]any)
+	require.True(t, ok)
+	require.Len(t, errs, 1)
+	entry := errs[0].(map[string]any)
+	assert.Equal(t, "spec.upstreamDefinitions[0].tls.identity", entry["field"])
+	assert.Equal(t, "referenced by API 'out-partner-api'", entry["message"])
+
+	// Still present afterwards: the delete never reached the database.
+	_, err := mockDB.GetCertificate(target.UUID)
+	assert.NoError(t, err)
+}
+
+func TestDeleteCertificate_UpstreamRowNamedInTrustedCAs_Returns409(t *testing.T) {
+	target := &models.StoredCertificate{
+		UUID: "del-backend-ca-1", Name: "out-backend-ca", Usage: models.CertificateUsageUpstream,
+		Certificate: pki.NewRootCA(t, "Backend Trust CA").PEM(), NotAfter: time.Now().Add(365 * 24 * time.Hour),
+	}
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{target, seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithUpstreamTLS("out-partner-api", "", "out-backend-ca")))
+
+	handler := newDeleteCertHandler(server, target.UUID)
+	req := httptest.NewRequest(http.MethodDelete, "/certificates/"+target.UUID, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	errs, ok := resp["errors"].([]any)
+	require.True(t, ok)
+	require.Len(t, errs, 1)
+	entry := errs[0].(map[string]any)
+	assert.Equal(t, "spec.upstreamDefinitions[0].tls.trustedCAs[0]", entry["field"])
+}
+
+// TestCheckClientAuthorityDeletable_UnaffectedByIdentityRows_LastAuthorityStillBlocked
+// and TestDeleteCertificate_IdentityRow_AllowedWhenUnreferenced_DespiteMtlsAuthAPIDeployed
+// together cover "identity rows are excluded from the last-authority rule":
+// the client-CA last-authority check must not be satisfied (or disturbed) by
+// an identity row sharing the pool, and an identity's own delete path must
+// never apply that rule to itself at all.
+func TestCheckClientAuthorityDeletable_UnaffectedByIdentityRows_LastAuthorityStillBlocked(t *testing.T) {
+	mockDB := NewMockStorage()
+	onlyAuthority := clientAuthorityCert("ref-only-authority")
+	identity := gatewayIdentityLeaf(t, "unaffecting-identity")
+	mockDB.certs = []*models.StoredCertificate{
+		onlyAuthority,
+		{
+			UUID: "unaffecting-identity-1", Name: "ref-identity", Certificate: identity.PEM(),
+			Usage: models.CertificateUsageIdentity, NotAfter: time.Now().Add(365 * 24 * time.Hour),
+		},
+	}
+	server := createTestAPIServerWithDB(mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true))) // no accept: inherits the pool
+
+	_, _, blocked := server.checkClientAuthorityDeletable(onlyAuthority)
+
+	assert.True(t, blocked, "an identity row in the pool must not count as a replacement client-CA authority")
+}
+
+func TestDeleteCertificate_IdentityRow_AllowedWhenUnreferenced_DespiteMtlsAuthAPIDeployed(t *testing.T) {
+	clientAuth := clientAuthorityCert("ref-only-authority")
+	identity := gatewayIdentityLeaf(t, "unreferenced-identity")
+	target := &models.StoredCertificate{
+		UUID: "unreferenced-identity-1", Name: "out-identity-unreferenced", Certificate: identity.PEM(),
+		Usage: models.CertificateUsageIdentity, KeyAlgorithm: "ECDSA", NotAfter: time.Now().Add(365 * 24 * time.Hour),
+	}
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{clientAuth, target, seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+	// mtls-auth is deployed and inherits the whole client-CA pool — this must
+	// have no bearing on an unreferenced identity's own deletability.
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true)))
+
+	handler := newDeleteCertHandler(server, target.UUID)
+	req := httptest.NewRequest(http.MethodDelete, "/certificates/"+target.UUID, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 }

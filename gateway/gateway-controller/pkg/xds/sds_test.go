@@ -19,6 +19,8 @@
 package xds
 
 import (
+	"crypto/rand"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,24 +30,33 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/certstore"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption/aesgcm"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/testutil/pki"
 )
 
 // fakeSDSStorage is a minimal storage.Storage stand-in for GetSecrets tests:
-// it only overrides the two certificate-listing methods GetSecrets' call
+// it only overrides the certificate-listing/lookup methods GetSecrets' call
 // chain actually reaches (ListCertificates via LoadCertificates for the
 // upstream bundle, ListCertificatesByUsage via GetClientCABundle for the
-// client-CA pool) — any other method would nil-pointer-panic if called,
-// which is fine since neither path reaches them. Mirrors
-// pkg/certstore's own fakeCertificateStorage.
+// client-CA pool, GetCertificateByName via GetGatewayIdentityMaterial/
+// GetUpstreamTrustBundle for the mTLS-outbound secrets) — any other method
+// would nil-pointer-panic if called, which is fine since none of these paths
+// reach them. Mirrors pkg/certstore's own fakeCertificateStorage.
 type fakeSDSStorage struct {
 	storage.Storage
 	certs []*models.StoredCertificate
+	// listErr, when set, makes ListCertificates fail — used to exercise a
+	// certstore.LoadCertificates failure at Translator construction time.
+	listErr error
 }
 
 func (f *fakeSDSStorage) ListCertificates() ([]*models.StoredCertificate, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.certs, nil
 }
 
@@ -61,6 +72,45 @@ func (f *fakeSDSStorage) ListCertificatesByUsage(usage string) ([]*models.Stored
 		}
 	}
 	return filtered, nil
+}
+
+func (f *fakeSDSStorage) GetCertificateByName(name string) (*models.StoredCertificate, error) {
+	for _, cert := range f.certs {
+		if cert.Name == name {
+			return cert, nil
+		}
+	}
+	return nil, fmt.Errorf("certificate %q not found", name)
+}
+
+// testXDSEncryptionManager builds a real (temp-key-backed) AES-GCM provider
+// chain for the gateway-identity SDS-secret tests below — GetGatewayIdentityMaterial
+// decrypts via a genuine encryption.ProviderManager, not a fake.
+func testXDSEncryptionManager(t *testing.T) *encryption.ProviderManager {
+	t.Helper()
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "v1.key")
+	key := make([]byte, aesgcm.AESKeySize)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(keyPath, key, 0600))
+
+	logger := createTestLogger()
+	provider, err := aesgcm.NewAESGCMProvider([]aesgcm.KeyConfig{{Version: "v1", FilePath: keyPath}}, logger)
+	require.NoError(t, err)
+	mgr, err := encryption.NewProviderManager([]encryption.EncryptionProvider{provider}, logger)
+	require.NoError(t, err)
+	return mgr
+}
+
+// encryptForStorage mirrors handlers.APIServer.encryptPrivateKey: encrypt +
+// marshal, producing the same ciphertext-string shape stored in
+// StoredCertificate.PrivateKeyCiphertext.
+func encryptForStorage(t *testing.T, mgr *encryption.ProviderManager, plaintext []byte) string {
+	t.Helper()
+	payload, err := mgr.Encrypt(plaintext)
+	require.NoError(t, err)
+	return encryption.MarshalPayload(payload)
 }
 
 // secretsByName indexes a GetSecrets result by name for convenient lookup in
@@ -209,4 +259,126 @@ func TestCertStore_GetClientCABundle_OnlyClientRows(t *testing.T) {
 	bundleStr := string(bundle)
 	assert.Contains(t, bundleStr, string(clientCert.PEM()))
 	assert.NotContains(t, bundleStr, string(upstreamCert.PEM()))
+}
+
+// ============================================================================
+// Gateway-identity and per-upstream-trust SDS secrets (mTLS outbound, slice 5)
+// ============================================================================
+
+// TestSDSSecretManager_GetSecrets_GatewayIdentity_DecryptedKeyOnlyInSecret
+// guards the two things that matter about the gateway_identity:<name> secret:
+// it carries the DECRYPTED private key (never the ciphertext string stored
+// in the database), and that decrypted key appears in no other secret this
+// call produces.
+func TestSDSSecretManager_GetSecrets_GatewayIdentity_DecryptedKeyOnlyInSecret(t *testing.T) {
+	logger := createTestLogger()
+	identity := pki.NewSelfSignedLeaf(t, "gateway-a")
+	mgr := testXDSEncryptionManager(t)
+
+	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
+		{
+			UUID: "identity-1", Name: "out-identity-a", Certificate: identity.PEM(),
+			Usage: models.CertificateUsageIdentity, PrivateKeyCiphertext: encryptForStorage(t, mgr, identity.KeyPEM()),
+		},
+	}}
+	cs := certstore.NewCertStore(logger, db, "", "")
+	cs.SetEncryptionManager(mgr)
+
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
+	sm.SetUpstreamTLSSecretRefs([]UpstreamTLSSecretRef{{IdentityName: "out-identity-a"}})
+
+	secrets, err := sm.GetSecrets()
+	require.NoError(t, err)
+
+	byName := secretsByName(t, secrets)
+	identitySecret, ok := byName[GatewayIdentitySecretName("out-identity-a")]
+	require.True(t, ok, "expected a gateway_identity:out-identity-a secret, got %v", byName)
+
+	tlsCert, ok := identitySecret.GetType().(*tlsv3.Secret_TlsCertificate)
+	require.True(t, ok, "gateway identity secret must be a Secret_TlsCertificate, got %T", identitySecret.GetType())
+	assert.Equal(t, identity.PEM(), tlsCert.TlsCertificate.GetCertificateChain().GetInlineBytes())
+	assert.Equal(t, identity.KeyPEM(), tlsCert.TlsCertificate.GetPrivateKey().GetInlineBytes(),
+		"the secret must carry the DECRYPTED key, not the ciphertext")
+
+	// The decrypted key must not leak into any other secret in this result
+	// (e.g. the upstream_ca_bundle, which is built from a different query).
+	for name, secret := range byName {
+		if name == GatewayIdentitySecretName("out-identity-a") {
+			continue
+		}
+		serialized := secret.String()
+		assert.NotContains(t, serialized, string(identity.KeyPEM()),
+			"secret %q must not carry the gateway identity's private key", name)
+	}
+}
+
+// TestSDSSecretManager_GetSecrets_PerUpstreamTrust_ExactTrustedCAs guards that
+// the upstream_ca:<handle>:<definition> ValidationContext secret carries
+// exactly the named trustedCAs certificates — not the whole upstream pool,
+// and not a subset missing one of them.
+func TestSDSSecretManager_GetSecrets_PerUpstreamTrust_ExactTrustedCAs(t *testing.T) {
+	logger := createTestLogger()
+	trusted1 := pki.NewRootCA(t, "Per-Upstream Trusted CA 1")
+	trusted2 := pki.NewRootCA(t, "Per-Upstream Trusted CA 2")
+	excluded := pki.NewRootCA(t, "Per-Upstream Excluded CA")
+
+	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
+		{UUID: "trust-1", Name: "out-backend-ca-1", Certificate: trusted1.PEM(), Usage: models.CertificateUsageUpstream},
+		{UUID: "trust-2", Name: "out-backend-ca-2", Certificate: trusted2.PEM(), Usage: models.CertificateUsageUpstream},
+		{UUID: "trust-3", Name: "out-backend-ca-excluded", Certificate: excluded.PEM(), Usage: models.CertificateUsageUpstream},
+	}}
+	cs := certstore.NewCertStore(logger, db, "", "")
+
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
+	sm.SetUpstreamTLSSecretRefs([]UpstreamTLSSecretRef{{
+		APIHandle: "out-partner-api", DefinitionName: "partner-a",
+		TrustedCANames: []string{"out-backend-ca-1", "out-backend-ca-2"},
+	}})
+
+	secrets, err := sm.GetSecrets()
+	require.NoError(t, err)
+
+	byName := secretsByName(t, secrets)
+	secretName := UpstreamCAValidationContextSecretName("out-partner-api", "partner-a")
+	trustSecret, ok := byName[secretName]
+	require.True(t, ok, "expected secret %q, got %v", secretName, byName)
+
+	validationCtx, ok := trustSecret.GetType().(*tlsv3.Secret_ValidationContext)
+	require.True(t, ok, "expected a Secret_ValidationContext, got %T", trustSecret.GetType())
+	bundle := string(validationCtx.ValidationContext.GetTrustedCa().GetInlineBytes())
+	assert.Contains(t, bundle, string(trusted1.PEM()))
+	assert.Contains(t, bundle, string(trusted2.PEM()))
+	assert.NotContains(t, bundle, string(excluded.PEM()), "must carry exactly the named trustedCAs, not the whole upstream pool")
+}
+
+// TestSDSSecretManager_GetSecrets_PerUpstreamTrust_DedupedAcrossRefs guards
+// that two refs naming the same api handle + definition (e.g. the same
+// definition reached both directly and via upstream.main.ref) produce a
+// single secret, not a duplicate resource of the same name.
+func TestSDSSecretManager_GetSecrets_PerUpstreamTrust_DedupedAcrossRefs(t *testing.T) {
+	logger := createTestLogger()
+	trusted := pki.NewRootCA(t, "Dedup Trusted CA")
+
+	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
+		{UUID: "trust-1", Name: "out-backend-ca", Certificate: trusted.PEM(), Usage: models.CertificateUsageUpstream},
+	}}
+	cs := certstore.NewCertStore(logger, db, "", "")
+
+	sm := NewSDSSecretManager(cs, nil, "test-node", logger)
+	sm.SetUpstreamTLSSecretRefs([]UpstreamTLSSecretRef{
+		{APIHandle: "out-partner-api", DefinitionName: "partner-a", TrustedCANames: []string{"out-backend-ca"}},
+		{APIHandle: "out-partner-api", DefinitionName: "partner-a", TrustedCANames: []string{"out-backend-ca"}},
+	})
+
+	secrets, err := sm.GetSecrets()
+	require.NoError(t, err)
+
+	count := 0
+	secretName := UpstreamCAValidationContextSecretName("out-partner-api", "partner-a")
+	for _, res := range secrets {
+		if s, ok := res.(*tlsv3.Secret); ok && s.GetName() == secretName {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "expected exactly one secret resource named %q, got %d", secretName, count)
 }

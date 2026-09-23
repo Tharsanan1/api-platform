@@ -129,6 +129,7 @@ func getFeaturePaths() []string {
 		"features/mtls-auth.feature",
 		"features/mtls-pool-references.feature",
 		"features/mtls-header-relay.feature",
+		"features/mtls-outbound.feature",
 		"features/config-dump.feature",
 		"features/api-management.feature",
 		"features/api-error-responses.feature",

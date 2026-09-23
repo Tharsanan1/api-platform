@@ -63,6 +63,65 @@ type SDSSecretManager struct {
 	listenerCertPath string
 	listenerKeyPath  string
 	httpsEnabled     bool
+
+	// upstreamTLSRefs is set via SetUpstreamTLSSecretRefs before each
+	// GetSecrets call — the per-cluster mTLS wiring (gateway identity /
+	// per-upstream trust) collected by the translator for the snapshot
+	// currently being built. Kept as a field (mirroring
+	// SetDownstreamListenerCert) rather than a GetSecrets parameter so
+	// existing callers/tests exercising the unrelated secrets are unaffected.
+	upstreamTLSRefs []UpstreamTLSSecretRef
+}
+
+// UpstreamTLSSecretRef describes one upstream definition's mTLS wiring as
+// observed while translating the snapshot currently being built: which
+// gateway identity (if any) the cluster presents, and which upstream-trust
+// certificates (if any) replace the gateway-wide bundle for that definition
+// alone. Collected by the Translator (see
+// Translator.GetUpstreamTLSSecretRefs) and handed to the SDSSecretManager so
+// it builds exactly the secrets this snapshot's clusters reference.
+type UpstreamTLSSecretRef struct {
+	// IdentityName is the gateway identity to present, or "" for none.
+	IdentityName string
+	// APIHandle and DefinitionName together name the per-upstream
+	// ValidationContext secret (UpstreamCAValidationContextSecretName).
+	APIHandle      string
+	DefinitionName string
+	// TrustedCANames lists the usage: upstream certificates trusted for
+	// this one definition. Empty means "use the gateway-wide bundle" — no
+	// per-upstream secret is built for this ref.
+	TrustedCANames []string
+}
+
+// SecretNamePrefixGatewayIdentity/SecretNamePrefixUpstreamCA are the SDS
+// secret-name prefixes for per-identity TlsCertificate and per-definition
+// ValidationContext secrets (see GatewayIdentitySecretName /
+// UpstreamCAValidationContextSecretName).
+const (
+	SecretNamePrefixGatewayIdentity = "gateway_identity:"
+	SecretNamePrefixUpstreamCA      = "upstream_ca:"
+)
+
+// GatewayIdentitySecretName builds the SDS secret name carrying a gateway
+// identity's own certificate chain + decrypted private key. Keyed by name
+// (unique per gateway, like a certificate's name) rather than an internal
+// UUID, so no extra lookup is needed to name the secret.
+func GatewayIdentitySecretName(identityName string) string {
+	return SecretNamePrefixGatewayIdentity + identityName
+}
+
+// UpstreamCAValidationContextSecretName builds the SDS secret name for one
+// upstream definition's per-upstream trust bundle, scoped by API handle so
+// two APIs' same-named definitions never collide.
+func UpstreamCAValidationContextSecretName(apiHandle, definitionName string) string {
+	return SecretNamePrefixUpstreamCA + apiHandle + ":" + definitionName
+}
+
+// SetUpstreamTLSSecretRefs sets the per-cluster mTLS wiring for the snapshot
+// currently being built. Must be called before GetSecrets whenever any
+// deployed upstream definition carries a tls block.
+func (sm *SDSSecretManager) SetUpstreamTLSSecretRefs(refs []UpstreamTLSSecretRef) {
+	sm.upstreamTLSRefs = refs
 }
 
 // NewSDSSecretManager creates a new SDS secret manager
@@ -156,14 +215,24 @@ func (sm *SDSSecretManager) GetSecret() (types.Resource, error) {
 // empty client-CA pool is simply omitted, not an error (deploy-time
 // validation already refuses to attach mtls-auth against an empty pool, so a
 // snapshot that references downstream_client_ca is never expected to find
-// one empty). A lookup FAILURE is always fatal — for the client-CA pool
-// exactly as for downstream_listener_cert's cert/key files — because
-// whenever a deployed API attaches mtls-auth, the listener already
-// references that secret name; silently omitting it on error would leave
-// the listener waiting on a secret that will never arrive, with nothing
+// one empty). A lookup FAILURE on the client-CA pool or
+// downstream_listener_cert's cert/key files is fatal to the WHOLE
+// snapshot — every deployed API's listener depends on one shared
+// downstream secret, so there is no way to degrade just one API when
+// either of those is unavailable; silently omitting it would leave the
+// listener waiting on a secret that will never arrive, with nothing
 // surfacing the failure. This matches how the old inline-bytes path failed
 // snapshot generation outright when it read the listener cert/key files
 // directly (see go-network-service-hardening.md).
+//
+// A lookup FAILURE on a per-cluster gateway-identity or per-upstream trust
+// secret is different: it is scoped to skipping that ONE secret, not
+// aborting the whole snapshot (see the per-loop comments below) — an
+// identity or trust-bundle certificate can legitimately go missing out from
+// under an already-deployed API during the event-convergence window
+// between a database delete committing and this process's in-memory
+// ConfigStore catching up, and that must degrade only the one affected
+// API's cluster, never every other API in the same snapshot.
 func (sm *SDSSecretManager) GetSecrets() ([]types.Resource, error) {
 	var secrets []types.Resource
 
@@ -212,6 +281,95 @@ func (sm *SDSSecretManager) GetSecrets() ([]types.Resource, error) {
 						// peer_certificate_valid as a deny; ACCEPT_UNTRUSTED
 						// never means "verification doesn't matter".
 						TrustChainVerification: tlsv3.CertificateValidationContext_ACCEPT_UNTRUSTED,
+					},
+				},
+			})
+		}
+	}
+
+	// Gateway-identity TlsCertificate secrets: one per distinct identity
+	// name referenced by this snapshot's clusters (deduped so an identity
+	// shared by several definitions/APIs is only built once).
+	//
+	// A lookup FAILURE here is deliberately NOT fatal to the whole
+	// snapshot (unlike downstream_listener_cert/downstream_client_ca
+	// below, which every deployed API's listener depends on). An identity
+	// can go missing out from under an already-deployed API during the
+	// event-convergence window between a database-committed delete and
+	// this process's in-memory ConfigStore catching up — aborting
+	// snapshot generation entirely in that case would break every OTHER
+	// API in the same snapshot, not just the one missing its identity.
+	// Instead: log at Error and skip building this one secret. The
+	// referencing cluster's TlsCertificateSdsSecretConfigs still names
+	// it, so Envoy leaves that cluster's connections warming/failing
+	// (the sterile 503 mapping applies) rather than silently falling back
+	// to no identity or no validation, which would be a silent security
+	// downgrade for that API alone — everything else in the snapshot is
+	// unaffected.
+	if sm.certStore != nil {
+		seenIdentities := make(map[string]bool, len(sm.upstreamTLSRefs))
+		for _, ref := range sm.upstreamTLSRefs {
+			if ref.IdentityName == "" || seenIdentities[ref.IdentityName] {
+				continue
+			}
+			seenIdentities[ref.IdentityName] = true
+
+			certChain, privateKey, err := sm.certStore.GetGatewayIdentityMaterial(ref.IdentityName)
+			if err != nil {
+				sm.logger.Error("Failed to load gateway identity material for SDS secret; skipping this secret only",
+					slog.String("identity", ref.IdentityName), slog.Any("error", err))
+				continue
+			}
+			secrets = append(secrets, &tlsv3.Secret{
+				Name: GatewayIdentitySecretName(ref.IdentityName),
+				Type: &tlsv3.Secret_TlsCertificate{
+					TlsCertificate: &tlsv3.TlsCertificate{
+						CertificateChain: &core.DataSource{
+							Specifier: &core.DataSource_InlineBytes{InlineBytes: certChain},
+						},
+						PrivateKey: &core.DataSource{
+							Specifier: &core.DataSource_InlineBytes{InlineBytes: privateKey},
+						},
+					},
+				},
+			})
+		}
+
+		// Per-upstream trust ValidationContext secrets: one per definition
+		// that sets trustedCAs (replacing the gateway-wide bundle for that
+		// definition only). Deduped by secret name — a definition referenced
+		// both via upstreamDefinitions and as the main/sandbox slot's ref
+		// target produces two UpstreamCluster entries for the same
+		// definition, which must not become two Secret resources of the
+		// same name in one snapshot. A lookup failure here is likewise
+		// non-fatal to the snapshot, for the same convergence-window reason
+		// as gateway identities above — skip only this one secret.
+		seenValidationContexts := make(map[string]bool, len(sm.upstreamTLSRefs))
+		for _, ref := range sm.upstreamTLSRefs {
+			if len(ref.TrustedCANames) == 0 {
+				continue
+			}
+			secretName := UpstreamCAValidationContextSecretName(ref.APIHandle, ref.DefinitionName)
+			if seenValidationContexts[secretName] {
+				continue
+			}
+			seenValidationContexts[secretName] = true
+
+			bundle, err := sm.certStore.GetUpstreamTrustBundle(ref.TrustedCANames)
+			if err != nil {
+				sm.logger.Error("Failed to load per-upstream trust bundle for SDS secret; skipping this secret only",
+					slog.String("api_handle", ref.APIHandle),
+					slog.String("definition", ref.DefinitionName),
+					slog.Any("error", err))
+				continue
+			}
+			secrets = append(secrets, &tlsv3.Secret{
+				Name: secretName,
+				Type: &tlsv3.Secret_ValidationContext{
+					ValidationContext: &tlsv3.CertificateValidationContext{
+						TrustedCa: &core.DataSource{
+							Specifier: &core.DataSource_InlineBytes{InlineBytes: bundle},
+						},
 					},
 				},
 			})

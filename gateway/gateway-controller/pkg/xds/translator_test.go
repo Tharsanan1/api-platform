@@ -19,6 +19,7 @@
 package xds
 
 import (
+	"fmt"
 	"math"
 	"net/url"
 	"regexp"
@@ -29,6 +30,7 @@ import (
 
 	accesslog "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tracev3 "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
@@ -2550,7 +2552,8 @@ func TestTranslator_CreateUpstreamTLSContext_SDSViaADS(t *testing.T) {
 	// init, which calls LoadCertificates against a real db.Storage.
 	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
 
-	tlsContext := translator.createUpstreamTLSContext(nil, "example.com")
+	tlsContext, err := translator.createUpstreamTLSContext(nil, "example.com", nil, "")
+	require.NoError(t, err)
 	require.NotNil(t, tlsContext)
 
 	combinedCtx := tlsContext.CommonTlsContext.GetCombinedValidationContext()
@@ -2571,16 +2574,231 @@ func TestTranslator_CreateUpstreamTLSContext(t *testing.T) {
 	translator := NewTranslator(logger, routerCfg, nil, cfg)
 
 	// Test with no certificate
-	tlsContext := translator.createUpstreamTLSContext(nil, "example.com")
+	tlsContext, err := translator.createUpstreamTLSContext(nil, "example.com", nil, "")
+	require.NoError(t, err)
 	assert.NotNil(t, tlsContext)
 	assert.Equal(t, "example.com", tlsContext.Sni)
 	assert.Equal(t, []string{"X25519", "P-256"}, tlsContext.CommonTlsContext.TlsParams.EcdhCurves)
 
 	// Test with certificate
 	certPem := []byte("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----")
-	tlsContextWithCert := translator.createUpstreamTLSContext(certPem, "secure.example.com")
+	tlsContextWithCert, err := translator.createUpstreamTLSContext(certPem, "secure.example.com", nil, "")
+	require.NoError(t, err)
 	assert.NotNil(t, tlsContextWithCert)
 	assert.Equal(t, "secure.example.com", tlsContextWithCert.Sni)
+}
+
+// ============================================================================
+// Outbound mTLS: gateway identity + per-upstream trust (slice 5)
+// ============================================================================
+
+// noInlineBytesAnywhere walks every DataSource-bearing field this TLS context
+// can carry and asserts none of them is a DataSource_InlineBytes — the
+// identity's certificate/key and the per-upstream trust bundle must both
+// arrive exclusively via SDS (see go-control-plane-xds-security.md directive
+// 3), never inlined into this Cluster resource.
+func assertNoInlineBytesAnywhere(t *testing.T, tlsCtx *tlsv3.UpstreamTlsContext) {
+	t.Helper()
+	common := tlsCtx.GetCommonTlsContext()
+	for _, tc := range common.GetTlsCertificates() {
+		_, isInline := tc.GetCertificateChain().GetSpecifier().(*core.DataSource_InlineBytes)
+		assert.False(t, isInline, "TlsCertificates must never carry inline_bytes")
+	}
+	if vc := common.GetValidationContext(); vc != nil {
+		_, isInline := vc.GetTrustedCa().GetSpecifier().(*core.DataSource_InlineBytes)
+		assert.False(t, isInline, "ValidationContext.TrustedCa must never carry inline_bytes when a tls block is configured")
+	}
+	if combined := common.GetCombinedValidationContext(); combined != nil {
+		_, isInline := combined.GetDefaultValidationContext().GetTrustedCa().GetSpecifier().(*core.DataSource_InlineBytes)
+		assert.False(t, isInline, "CombinedValidationContext.DefaultValidationContext.TrustedCa must never carry inline_bytes")
+	}
+}
+
+func TestTranslator_CreateUpstreamTLSContextWithMTLS_IdentityAndTrust_VerifyHostNameTrue(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.Upstream.TLS.DisableSslVerification = false // the SAN-matching/validation-context branch is gated on this
+	cfg := testConfig()
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+
+	tlsOpts := &models.UpstreamTLS{
+		HasTLSBlock:    true,
+		IdentityName:   "out-identity-a",
+		TrustedCANames: []string{"out-backend-ca"},
+		VerifyHostName: true,
+	}
+	validationSecretName := UpstreamCAValidationContextSecretName("out-partner-api", "partner-a")
+
+	tlsCtx, err := translator.createUpstreamTLSContext(nil, "mtls-backend-a", tlsOpts, validationSecretName)
+	require.NoError(t, err)
+	require.NotNil(t, tlsCtx)
+
+	assert.Equal(t, "mtls-backend-a", tlsCtx.Sni, "SNI must be set to the target host")
+
+	// Identity presented via SDS, named gateway_identity:<name>.
+	sdsConfigs := tlsCtx.CommonTlsContext.GetTlsCertificateSdsSecretConfigs()
+	require.Len(t, sdsConfigs, 1)
+	assert.Equal(t, GatewayIdentitySecretName("out-identity-a"), sdsConfigs[0].GetName())
+
+	// Per-upstream trust via the CombinedValidationContext's SDS secret,
+	// named upstream_ca:<handle>:<definition>.
+	combined := tlsCtx.CommonTlsContext.GetCombinedValidationContext()
+	require.NotNil(t, combined)
+	assert.Equal(t, validationSecretName, combined.GetValidationContextSdsSecretConfig().GetName())
+
+	// verifyHostName true -> a DNS SAN matcher on the target host.
+	sanMatchers := combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()
+	require.Len(t, sanMatchers, 1)
+	assert.Equal(t, tlsv3.SubjectAltNameMatcher_DNS, sanMatchers[0].GetSanType())
+	assert.Equal(t, "mtls-backend-a", sanMatchers[0].GetMatcher().GetExact())
+
+	assertNoInlineBytesAnywhere(t, tlsCtx)
+}
+
+func TestTranslator_CreateUpstreamTLSContextWithMTLS_VerifyHostNameFalse_NoSANMatcher(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.Upstream.TLS.DisableSslVerification = false
+	cfg := testConfig()
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+
+	tlsOpts := &models.UpstreamTLS{
+		HasTLSBlock:    true,
+		IdentityName:   "out-identity-a",
+		TrustedCANames: []string{"out-backend-ca"},
+		VerifyHostName: false,
+	}
+	validationSecretName := UpstreamCAValidationContextSecretName("out-partner-api", "partner-a")
+
+	tlsCtx, err := translator.createUpstreamTLSContext(nil, "mtls-backend-wronghost", tlsOpts, validationSecretName)
+	require.NoError(t, err)
+	require.NotNil(t, tlsCtx)
+
+	combined := tlsCtx.CommonTlsContext.GetCombinedValidationContext()
+	require.NotNil(t, combined)
+	assert.Empty(t, combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames(),
+		"verifyHostName: false must produce no SAN matcher at all")
+
+	assertNoInlineBytesAnywhere(t, tlsCtx)
+}
+
+// TestTranslator_CreateUpstreamTLSContextWithMTLS_IPAddressTarget_UsesIPMatcher
+// guards that hostname verification against an IP-literal target uses an
+// IP_ADDRESS SAN matcher (and no SNI, which is meaningless for a bare IP),
+// not a DNS matcher.
+func TestTranslator_CreateUpstreamTLSContextWithMTLS_IPAddressTarget_UsesIPMatcher(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.Upstream.TLS.DisableSslVerification = false
+	cfg := testConfig()
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	// A validation context object only exists to attach a SAN matcher to
+	// when one of the trust branches actually fires; a non-nil cert store
+	// (the general SDS-via-ADS bundle) is the simplest way to get one here,
+	// mirroring TestTranslator_CreateUpstreamTLSContext_SDSViaADS.
+	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
+
+	tlsOpts := &models.UpstreamTLS{HasTLSBlock: true, VerifyHostName: true}
+	tlsCtx, err := translator.createUpstreamTLSContext(nil, "10.0.0.5", tlsOpts, "")
+	require.NoError(t, err)
+
+	assert.Empty(t, tlsCtx.Sni, "SNI is not meaningful for an IP-literal target")
+	combined := tlsCtx.CommonTlsContext.GetCombinedValidationContext()
+	sanMatchers := combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()
+	require.Len(t, sanMatchers, 1)
+	assert.Equal(t, tlsv3.SubjectAltNameMatcher_IP_ADDRESS, sanMatchers[0].GetSanType())
+}
+
+// TestTranslator_CreateUpstreamTLSContextWithMTLS_NoTLSBlock_Unchanged guards
+// that a definition with no tls block at all (tlsOpts nil) produces a TLS
+// context byte-identical in shape to createUpstreamTLSContext — no identity
+// SDS reference, and hostname verification/trust falls back to the
+// router-wide defaults rather than anything cluster-specific.
+func TestTranslator_CreateUpstreamTLSContextWithMTLS_NoTLSBlock_Unchanged(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.Upstream.TLS.DisableSslVerification = false
+	cfg := testConfig()
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+
+	withNilOpts, err := translator.createUpstreamTLSContext(nil, "plain-backend.example.com", nil, "")
+	require.NoError(t, err)
+	viaPlainHelper, err := translator.createUpstreamTLSContext(nil, "plain-backend.example.com", nil, "")
+	require.NoError(t, err)
+
+	assert.Empty(t, withNilOpts.CommonTlsContext.GetTlsCertificateSdsSecretConfigs(),
+		"a definition without tls must never reference a gateway identity secret")
+	assert.Equal(t, viaPlainHelper.Sni, withNilOpts.Sni)
+	assert.Equal(t,
+		viaPlainHelper.CommonTlsContext.GetCombinedValidationContext().GetValidationContextSdsSecretConfig().GetName(),
+		withNilOpts.CommonTlsContext.GetCombinedValidationContext().GetValidationContextSdsSecretConfig().GetName(),
+		"trust must fall back to the router-wide default, exactly as before tls blocks existed")
+}
+
+// TestTranslator_CollectUpstreamTLSSecretRefs guards that only a cluster
+// whose upstream definition carried an explicit, non-empty tls block (an
+// identity and/or trustedCAs) contributes an UpstreamTLSSecretRef — a
+// definition with no tls block, a nil TLS altogether, or an empty `tls: {}`
+// block must produce none, leaving those clusters unaffected (no SDS wiring
+// at all).
+func TestTranslator_CollectUpstreamTLSSecretRefs(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	cfg := testConfig()
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+
+	rdc := &models.RuntimeDeployConfig{
+		Metadata: models.Metadata{Handle: "out-partner-api"},
+		UpstreamClusters: map[string]*models.UpstreamCluster{
+			"with-tls": {
+				Name: "partner-a",
+				TLS: &models.UpstreamTLS{
+					Enabled: true, HasTLSBlock: true,
+					IdentityName: "out-identity-a", TrustedCANames: []string{"out-backend-ca"}, VerifyHostName: true,
+				},
+			},
+			"no-tls-block": {
+				Name: "partner-b",
+				TLS:  &models.UpstreamTLS{Enabled: true, HasTLSBlock: false},
+			},
+			"nil-tls": {
+				Name: "partner-c",
+			},
+			"empty-tls-block": {
+				Name: "partner-d",
+				TLS:  &models.UpstreamTLS{Enabled: true, HasTLSBlock: true}, // tls: {} — no identity, no trustedCAs
+			},
+		},
+	}
+
+	translator.collectUpstreamTLSSecretRefs(rdc)
+	refs := translator.GetUpstreamTLSSecretRefs()
+
+	require.Len(t, refs, 1, "only the definition with an actual identity/trustedCAs should produce a ref, got %+v", refs)
+	assert.Equal(t, "out-identity-a", refs[0].IdentityName)
+	assert.Equal(t, "out-partner-api", refs[0].APIHandle)
+	assert.Equal(t, "partner-a", refs[0].DefinitionName)
+	assert.Equal(t, []string{"out-backend-ca"}, refs[0].TrustedCANames)
+}
+
+// TestNewTranslator_CertStoreInitFailure_SurfacesViaCertStoreInitError
+// guards go-network-service-hardening.md/authentication_authorization.md
+// GO-AUTH-011's fail-closed contract: a certstore.LoadCertificates failure at
+// construction time must surface via CertStoreInitError(), while GetCertStore()
+// still returns a non-nil store — main() must check the error explicitly
+// rather than infer failure from a nil store, which this never produces.
+func TestNewTranslator_CertStoreInitFailure_SurfacesViaCertStoreInitError(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.Upstream.TLS.CustomCertsPath = t.TempDir()
+	routerCfg.Upstream.TLS.TrustedCertPath = "" // no system-cert fallback either
+	cfg := testConfig()
+
+	db := &fakeSDSStorage{listErr: fmt.Errorf("boom")}
+	translator := NewTranslator(logger, routerCfg, db, cfg)
+
+	require.Error(t, translator.CertStoreInitError())
+	assert.NotNil(t, translator.GetCertStore(), "the store itself must still be non-nil even though its load failed")
 }
 
 func TestTranslator_ResolveUpstreamCluster_SimpleURL(t *testing.T) {
@@ -2661,7 +2879,8 @@ func TestTranslator_CreateCluster(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			parsedURL, err := parseURL(tt.urlStr)
 			require.NoError(t, err)
-			cluster := translator.createCluster(tt.clusterNm, parsedURL, tt.certs, nil)
+			cluster, err := translator.createCluster(tt.clusterNm, parsedURL, tt.certs, nil, nil, "")
+			require.NoError(t, err)
 			if tt.hasCluster {
 				assert.NotNil(t, cluster)
 				assert.Equal(t, tt.clusterNm, cluster.Name)
@@ -2702,6 +2921,55 @@ func TestTranslator_CreateListener_PerConnectionBufferLimitBytes(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, listener)
 	assert.Equal(t, uint32(2097152), listener.GetPerConnectionBufferLimitBytes().GetValue())
+}
+
+// TestTranslator_CreateListener_LocalReplyConfig_SterileUF503Body guards
+// error-handling.md's sterile-response contract for an upstream connection
+// failure (Envoy's UF response flag): both the HTTP and HTTPS listener's HCM
+// must carry the exact fixed JSON body — never Envoy's own generated reason
+// text ("reset reason", "transport failure reason", etc.) — and this must
+// hold independent of which upstream/definition failed, since createListener
+// applies it once, shared by both listeners.
+func TestTranslator_CreateListener_LocalReplyConfig_SterileUF503Body(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.HTTPSEnabled = true
+	routerCfg.HTTPSPort = 8443
+	routerCfg.Upstream.TLS.DisableSslVerification = false
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
+
+	for _, isHTTPS := range []bool{false, true} {
+		lis, _, err := translator.createListener(nil, isHTTPS)
+		require.NoError(t, err, "isHTTPS=%v", isHTTPS)
+		manager := extractHCM(t, lis)
+
+		require.NotNil(t, manager.LocalReplyConfig, "isHTTPS=%v", isHTTPS)
+		require.Len(t, manager.LocalReplyConfig.Mappers, 1, "isHTTPS=%v", isHTTPS)
+		mapper := manager.LocalReplyConfig.Mappers[0]
+
+		assert.Equal(t, sterile503Body, mapper.GetBody().GetInlineString(), "isHTTPS=%v", isHTTPS)
+		assert.Equal(t, "application/json", mapper.GetBodyFormatOverride().GetContentType(), "isHTTPS=%v", isHTTPS)
+		assert.Equal(t, "%LOCAL_REPLY_BODY%", mapper.GetBodyFormatOverride().GetTextFormat(),
+			"no other command operator (upstream host, reset reason, etc.) may be interpolated, isHTTPS=%v", isHTTPS)
+
+		andFilter := mapper.GetFilter().GetAndFilter()
+		require.NotNil(t, andFilter, "isHTTPS=%v", isHTTPS)
+		require.Len(t, andFilter.Filters, 2, "isHTTPS=%v", isHTTPS)
+		var hasUFFlag, hasStatus503 bool
+		for _, f := range andFilter.Filters {
+			if rf := f.GetResponseFlagFilter(); rf != nil && len(rf.Flags) == 1 && rf.Flags[0] == "UF" {
+				hasUFFlag = true
+			}
+			if sf := f.GetStatusCodeFilter(); sf != nil && sf.GetComparison().GetValue().GetDefaultValue() == 503 {
+				hasStatus503 = true
+			}
+		}
+		assert.True(t, hasUFFlag, "expected a response-flag filter on UF, isHTTPS=%v", isHTTPS)
+		assert.True(t, hasStatus503, "expected a status-code filter on 503, isHTTPS=%v", isHTTPS)
+	}
 }
 
 // TestTranslator_CreateDownstreamTLSContext_ListenerCertViaSDS guards that the
@@ -3053,7 +3321,8 @@ func TestProcessEndpoint_PeerHostnameMetadata(t *testing.T) {
 		u, err := url.Parse("http://backend.default.svc.cluster.local:8080/v1")
 		require.NoError(t, err)
 
-		endpoints, tsm := translator.processEndpoint(u, nil)
+		endpoints, tsm, err := translator.processEndpoint(u, nil, nil, "")
+		require.NoError(t, err)
 		require.Len(t, endpoints, 1)
 		lb := endpoints[0].GetLbEndpoints()[0]
 
@@ -3067,7 +3336,8 @@ func TestProcessEndpoint_PeerHostnameMetadata(t *testing.T) {
 		u, err := url.Parse("https://api.example.com/v1")
 		require.NoError(t, err)
 
-		endpoints, tsm := translator.processEndpoint(u, nil)
+		endpoints, tsm, err := translator.processEndpoint(u, nil, nil, "")
+		require.NoError(t, err)
 		require.Len(t, endpoints, 1)
 		lb := endpoints[0].GetLbEndpoints()[0]
 
@@ -3097,7 +3367,8 @@ func TestCreateWeightedCluster_TLS(t *testing.T) {
 	}
 
 	t.Run("https weighted upstream gets per-endpoint TLS transport sockets", func(t *testing.T) {
-		c := translator.createWeightedCluster("upstream_secure", endpoints, &models.UpstreamTLS{Enabled: true}, nil)
+		c, err := translator.createWeightedCluster("upstream_secure", endpoints, &models.UpstreamTLS{Enabled: true}, nil, "")
+		require.NoError(t, err)
 		require.NotNil(t, c)
 
 		// One transport socket match per endpoint, each carrying a TLS transport socket.
@@ -3134,7 +3405,8 @@ func TestCreateWeightedCluster_TLS(t *testing.T) {
 		}
 		// Both nil TLS and explicitly-disabled TLS must produce a plain cluster.
 		for _, tls := range []*models.UpstreamTLS{nil, {Enabled: false}} {
-			c := translator.createWeightedCluster("upstream_plain", plain, tls, nil)
+			c, err := translator.createWeightedCluster("upstream_plain", plain, tls, nil, "")
+			require.NoError(t, err)
 			require.NotNil(t, c)
 			assert.Empty(t, c.GetTransportSocketMatches(),
 				"plaintext weighted upstream must not get transport socket matches")
@@ -3164,7 +3436,8 @@ func TestCreateWeightedCluster_PeerHostnameMetadata(t *testing.T) {
 	}
 
 	t.Run("each endpoint carries its own hostname, distinct from its siblings", func(t *testing.T) {
-		c := translator.createWeightedCluster("upstream_secure", endpoints, &models.UpstreamTLS{Enabled: true}, nil)
+		c, err := translator.createWeightedCluster("upstream_secure", endpoints, &models.UpstreamTLS{Enabled: true}, nil, "")
+		require.NoError(t, err)
 		require.NotNil(t, c)
 
 		lbs := c.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()
@@ -3179,7 +3452,8 @@ func TestCreateWeightedCluster_PeerHostnameMetadata(t *testing.T) {
 	})
 
 	t.Run("plaintext weighted endpoints still get hostname metadata", func(t *testing.T) {
-		c := translator.createWeightedCluster("upstream_plain", endpoints, nil, nil)
+		c, err := translator.createWeightedCluster("upstream_plain", endpoints, nil, nil, "")
+		require.NoError(t, err)
 		require.NotNil(t, c)
 
 		lbs := c.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()
@@ -3502,12 +3776,14 @@ func TestSnapshotReferencesSDSSecret(t *testing.T) {
 	require.NoError(t, err)
 	listeners := []types.Resource{httpsListener}
 
-	weightedCluster := translator.createWeightedCluster(
+	weightedCluster, err := translator.createWeightedCluster(
 		"upstream-cluster",
 		[]models.Endpoint{{Host: "backend.example.com", Port: 8443}},
 		&models.UpstreamTLS{Enabled: true},
 		nil,
+		"",
 	)
+	require.NoError(t, err)
 	clusters := []types.Resource{weightedCluster}
 
 	assert.True(t, SnapshotReferencesSDSSecret(nil, listeners, SecretNameDownstreamClientCA),

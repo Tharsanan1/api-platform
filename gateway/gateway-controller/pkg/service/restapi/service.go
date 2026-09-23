@@ -224,6 +224,15 @@ func (s *RestAPIService) ResolveMtlsAuthForResponse(cfg api.RestAPI) (api.RestAP
 	return v.ResolveMtlsAuthForResponse(cfg)
 }
 
+// ResolveUpstreamTLSWarnings computes TLS_VERIFY_HOSTNAME_DISABLED and
+// TLS_IDENTITY_EXPIRED for every upstreamDefinitions tls block on cfg, for a
+// successful deploy response. Callers must only invoke this after the
+// configuration has already passed deploy-time validation.
+func (s *RestAPIService) ResolveUpstreamTLSWarnings(cfg api.RestAPI) []clientca.Warning {
+	v := config.NewUpstreamTLSValidator(s.db)
+	return v.ResolveWarnings(cfg)
+}
+
 func (s *RestAPIService) validateArtifactConflicts(kind, currentID, displayName, version, handle string) error {
 	existingByNameVersion, err := s.db.GetConfigByKindNameAndVersion(kind, displayName, version)
 	if err == nil {

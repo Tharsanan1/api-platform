@@ -205,12 +205,14 @@ func (h *RestAPIHandler) buildDeployResponse(sourceConfig any, stored *models.St
 	switch cfg := sourceConfig.(type) {
 	case api.RestAPI:
 		resolved, warnings := h.service.ResolveMtlsAuthForResponse(cfg)
+		warnings = append(warnings, h.service.ResolveUpstreamTLSWarnings(resolved)...)
 		return buildRestAPIResourceResponseWithWarnings(resolved, stored, warnings)
 	case *api.RestAPI:
 		if cfg == nil {
 			return buildResourceResponseFromStored(sourceConfig, stored)
 		}
 		resolved, warnings := h.service.ResolveMtlsAuthForResponse(*cfg)
+		warnings = append(warnings, h.service.ResolveUpstreamTLSWarnings(resolved)...)
 		return buildRestAPIResourceResponseWithWarnings(resolved, stored, warnings)
 	default:
 		return buildResourceResponseFromStored(sourceConfig, stored)

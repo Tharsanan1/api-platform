@@ -346,6 +346,62 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /rest-apis/{id}/upstreams/{name}/tls-test:
+    post:
+      summary: Probe an upstream definition's TLS handshake
+      description: >
+        Dial the deployed upstream definition's first target once with the
+        identity, trust set and hostname-verification setting it is
+        configured with, complete (or fail) the TLS handshake, and report
+        the outcome. No HTTP request is made to the backend. The request
+        body is ignored.
+      operationId: testUpstreamTLS
+      x-basicauth-roles: [admin, developer]
+      tags:
+        - Rest API Management
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Unique public identifier of the deployed API
+          schema:
+            type: string
+          example: out-tls-test-api
+        - name: name
+          in: path
+          required: true
+          description: Name of the upstream definition to probe
+          schema:
+            type: string
+          example: good
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: >
+            The probe always returns 200 — the handshake outcome is carried
+            in the `result` field, not the HTTP status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamTLSTestResponse"
+        "404":
+          description: RestAPI or upstream definition not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /rest-apis/{id}/api-keys/{apiKeyName}/regenerate:
     post:
       summary: Regenerate API key for an API
@@ -949,6 +1005,57 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /certificates/{id}:
+    put:
+      summary: Rotate a gateway identity's certificate and key
+      description: >
+        Replace a usage: identity certificate's chain and private key in
+        place, keeping its name and references intact. Refused for any
+        other usage. Triggers an SDS snapshot update so newly-dialed
+        upstream connections use the new identity.
+      operationId: updateCertificate
+      x-basicauth-roles: [admin]
+      tags:
+        - Certificate Management
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the certificate to replace
+          schema:
+            type: string
+          example: 550e8400-e29b-41d4-a716-446655440000
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CertificateUploadRequest"
+      responses:
+        "200":
+          description: Certificate rotated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CertificateResponse"
+        "400":
+          description: Invalid update (bad certificate/key, or the certificate is not usage identity)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
     delete:
       summary: Delete a certificate
       description: Delete a certificate from the Gateway. The change is applied dynamically without restarting the Gateway.
@@ -3123,6 +3230,24 @@ components:
                 minimum: 0
                 maximum: 100
                 example: 80
+        tls:
+          type: object
+          description: >
+            Optional mutual-TLS presentation and trust for this backend.
+            `identity` (string) names a gateway identity — a certificate
+            uploaded to POST /certificates with usage: identity — to
+            present on the connection. `trustedCAs` (array of string)
+            lists usage: upstream certificates to trust for this backend
+            in place of the gateway-wide trust bundle; omit to use the
+            gateway bundle. `verifyHostName` (boolean, default true)
+            controls SAN/hostname verification against the target. Every
+            target in a definition carrying `tls` must use https://.
+            Unknown keys are rejected at deploy time.
+          additionalProperties: true
+          example:
+            identity: partner-identity
+            trustedCAs: [partner-ca]
+            verifyHostName: true
 
     UpstreamTimeout:
       type: object
@@ -3179,6 +3304,15 @@ components:
             `auto` delegates host rewriting to Envoy, which rewrites the Host header
             using the upstream cluster host. `manual` disables automatic rewriting
             and expects explicit configuration.
+        tls:
+          type: object
+          description: >
+            Not supported on an inline upstream (a `url`-based main/sandbox
+            entry) — tls is only valid on an upstreamDefinitions entry,
+            referenced here via `ref`. Declared so a tls block accidentally
+            placed here is captured and explicitly rejected at deploy time,
+            rather than silently dropped by the request binder.
+          additionalProperties: true
 
     Operation:
       type: object
@@ -5151,9 +5285,12 @@ components:
           type: string
           description: |
             Whether this certificate is used to verify upstream/backend HTTPS
-            connections (the default), or pooled as a client certificate
-            authority used to authenticate mutual-TLS callers.
-          enum: [ upstream, client ]
+            connections (the default), pooled as a client certificate
+            authority used to authenticate mutual-TLS callers, or (identity)
+            a gateway identity — a certificate chain (leaf first) plus its
+            private key that the gateway presents to a backend requiring
+            mutual TLS on outbound connections.
+          enum: [ upstream, client, identity ]
           default: upstream
           example: upstream
         role:
@@ -5174,6 +5311,18 @@ components:
             authenticated as this relay entry can make a relayed header
             believed. Omit to accept any connection presenting a certificate
             from this authority, with no further narrowing.
+        privateKey:
+          type: string
+          writeOnly: true
+          description: >
+            Required (and only valid) when usage is identity: a PEM-encoded,
+            unencrypted private key matching the leaf certificate
+            (RSA/ECDSA/Ed25519, PKCS#8/PKCS#1/SEC1). Encrypted at rest by
+            the gateway; never returned by any response.
+          example: |
+            -----BEGIN PRIVATE KEY-----
+            MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC...
+            -----END PRIVATE KEY-----
 
     CertificateMatch:
       type: object
@@ -5222,8 +5371,8 @@ components:
           example: 1
         usage:
           type: string
-          description: Whether this is upstream/backend trust or a pooled client certificate authority.
-          enum: [ upstream, client ]
+          description: Whether this is upstream/backend trust, a pooled client certificate authority, or a gateway identity.
+          enum: [ upstream, client, identity ]
           example: upstream
         role:
           type: string
@@ -5238,6 +5387,18 @@ components:
           type: boolean
           description: True when the identity certificate is not itself a certificate authority (pooled as a one-member authority).
           example: false
+        keyAlgorithm:
+          type: string
+          description: Only present for usage identity. The leaf private key's algorithm (RSA, ECDSA or Ed25519).
+          example: RSA
+        chainLength:
+          type: integer
+          description: Only present for usage identity. Number of certificates in the uploaded chain.
+          example: 1
+        pooledConnectionsUsingPrevious:
+          type: integer
+          description: Only present on a PUT (rotation) response. Number of already-pooled upstream connections still presenting the previous identity (0 when not observable).
+          example: 0
         warnings:
           type: array
           description: Non-fatal findings about the upload (e.g. leaf certificate, not yet valid). Omitted when there are none.
@@ -5245,7 +5406,7 @@ components:
             $ref: "#/components/schemas/CertificateWarning"
         referencedByApis:
           type: integer
-          description: Number of APIs referencing this client certificate authority. Only present for usage client.
+          description: Number of deployed APIs referencing this certificate — a client authority (accept/pool) or a gateway identity (upstreamDefinitions[].tls.identity). Only present for usage client or identity.
           example: 0
         message:
           type: string
@@ -5276,6 +5437,48 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CertificateResponse"
+
+    UpstreamTLSTestBackend:
+      type: object
+      properties:
+        subject:
+          type: string
+        issuer:
+          type: string
+        notAfter:
+          type: string
+          format: date-time
+        trustedBy:
+          type: string
+          description: The trustedCAs row name whose certificate anchored the chain, or "gateway bundle".
+          example: out-backend-ca
+        hostnameMatches:
+          type: boolean
+
+    UpstreamTLSTestResponse:
+      type: object
+      properties:
+        upstream:
+          type: string
+          description: The upstream definition name this probe was run against.
+          example: partner-a
+        target:
+          type: string
+          description: The definition's first target URL.
+          example: https://mtls-backend-a:8443
+        identityPresented:
+          type: string
+          nullable: true
+          description: The gateway identity name presented, or null if the definition names none.
+        backend:
+          $ref: "#/components/schemas/UpstreamTLSTestBackend"
+        result:
+          type: string
+          enum: [ OK, UNTRUSTED_BACKEND, HOSTNAME_MISMATCH, BACKEND_REJECTED_IDENTITY, CONNECT_FAILED ]
+        detail:
+          type: string
+          nullable: true
+          description: Raw TLS error string, or null.
         totalCount:
           type: integer
           description: Total number of certificate files

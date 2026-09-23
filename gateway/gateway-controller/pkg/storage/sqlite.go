@@ -111,12 +111,16 @@ func (s *SQLiteStorage) initSchema() error {
 	return nil
 }
 
-// migrateSchemaV4ToV5 adds the certificates.usage, certificates.role and
-// certificates.match_json columns (nullable-free/defaulted, except
-// match_json which is nullable with no default — NULL means "unnarrowed")
-// to an already-provisioned database at schema version 4, then advances
+// migrateSchemaV4ToV5 adds the certificates.usage, certificates.role,
+// certificates.match_json, certificates.private_key_ciphertext and
+// certificates.key_algorithm columns (nullable-free/defaulted, except
+// match_json/private_key_ciphertext/key_algorithm which are nullable with
+// no default — NULL means "unnarrowed" / "not a usage: identity row") to an
+// already-provisioned database at schema version 4, then advances
 // user_version to 5. This is additive only: no existing column is retyped,
-// widened, or renamed.
+// widened, or renamed. private_key_ciphertext/key_algorithm hold a gateway
+// identity's (usage: identity) encrypted private key and its algorithm;
+// both stay NULL for every other usage.
 func (s *SQLiteStorage) migrateSchemaV4ToV5() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -134,6 +138,12 @@ func (s *SQLiteStorage) migrateSchemaV4ToV5() error {
 	}
 	if _, err := tx.Exec(`ALTER TABLE certificates ADD COLUMN match_json TEXT`); err != nil {
 		return fmt.Errorf("failed to add certificates.match_json column: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE certificates ADD COLUMN private_key_ciphertext TEXT`); err != nil {
+		return fmt.Errorf("failed to add certificates.private_key_ciphertext column: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE certificates ADD COLUMN key_algorithm TEXT`); err != nil {
+		return fmt.Errorf("failed to add certificates.key_algorithm column: %w", err)
 	}
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
 		return fmt.Errorf("failed to set schema version: %w", err)

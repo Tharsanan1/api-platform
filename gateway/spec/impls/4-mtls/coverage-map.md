@@ -151,3 +151,44 @@ Decisions taken while writing slice 2 tests: unknown-parameter message is `unkno
   other usages; the key lives in `private_key_ciphertext` (encrypted) on the same table, inside the one
   additive migration; `tls.identity` names such a row. The spec, discussion text, design doc and
   diagram were updated to match.
+
+### Finding during slice 5
+
+- **The upstream URL validators have no SSRF guard today.** The spec (§5.2.4, ssrf-prevention rule)
+  assumed a shared private-address/metadata check the TLS test could reuse. None exists in
+  `api_validator.go`, `mcp_validator.go` or `llm_validator.go`; they check syntax only. The TLS test
+  dials through a new shared helper (`pkg/config/upstream_ssrf.go`). Retrofitting the deploy-time
+  validators would add a live DNS lookup to every deploy and is a separate decision; tracked as a
+  follow-up, not part of this feature.
+
+## Slice 5 — outbound: identities, upstream tls block, per-upstream trust, sterile 503, TLS test (§3.2, §5.2.4, §8.5, §8.12, §8.13 identity rows, S17, S18, S19)
+
+| Spec case | Test |
+|---|---|
+| §8.13 identity upload rows (cert+key, chain, mismatch, cert/key only, encrypted key, expired, EKU warning, duplicate, developer 403) | IT mtls-outbound: identity scenarios and the refusal outline; UT gatewayidentity, handlers |
+| S17 key never returned (any role) | IT: *An identity is uploaded with its key and the key is never returned*; UT schema-by-key assertions |
+| §8.13 PUT rotation, refused for other usages | IT: *An identity is rotated in place…*; UT |
+| §8.12 tls block rows: omitted, `{}`, identity missing/not identity, trustedCAs missing/empty/client/identity, http target, mixed targets, inline upstream, unknown key, verifyHostName warning | IT refusal outline, inline scenario, usage-mismatch scenario, warning scenario; UT upstream_tls_validator (incl. TLS_IDENTITY_EXPIRED) |
+| §8.5 identity presented and accepted | IT: *The gateway presents the named identity and the backend accepts it* |
+| §8.5 identity removed → sterile failure | IT: per-upstream trust and hostname scenarios (503 body); no-identity case returns the backend's own 400 because nginx completes the handshake and refuses at HTTP level |
+| §8.5 two definitions, two identities, never crossed | IT: *Two definitions with two identities keep each backend seeing only its own* |
+| §8.5 per-upstream trustedCAs replaces the bundle | IT: *Per-upstream trust replaces the gateway bundle for that upstream only* |
+| §8.5 verifyHostName true rejects, false connects | IT: *Hostname verification is on by default…* |
+| §8.5 rotation: pooled connections finish on old material | UT only (`pooledConnectionsUsingPrevious` reported as 0; not observable in the IT stack) |
+| S19 identity / trust certificate named by a deployed upstream → 409 | IT: *An identity or trust certificate named by a deployed upstream cannot be removed*; UT |
+| §5.2.4 tls-test results OK, UNTRUSTED_BACKEND, HOSTNAME_MISMATCH, BACKEND_REJECTED_IDENTITY, CONNECT_FAILED; developer allowed | IT: *The TLS test reports what a handshake to the upstream would do* (strict Go backend for the rejection); UT probe against in-test TLS servers |
+| §3.2.6 sterile 503 body for UF | IT per-upstream trust scenario; UT LocalReplyConfig on both listeners |
+| §3.2.5 cert-store fail-open → startup failure | UT `CertStoreInitError` surfaced from NewTranslator; main refuses to start |
+| §3.2.3 key never inline in xDS; encrypted at rest | UT sds (key only inside the identity secret), translator (no inline_bytes) |
+| §8.5 several targets under one definition | UT translator (same identity secret per endpoint) |
+
+### Decisions taken in slice 5
+
+- A missing identity or trust row for a referenced cluster degrades only that cluster (its secret is
+  skipped and Envoy leaves it warming, sterile 503); listener cert and client-CA bundle failures stay
+  fatal to the snapshot.
+- Referential-integrity checks consult both the database and the in-memory store.
+- The TLS test dials through the repo's shared `netguard` policy, which blocks loopback; a backend
+  bound to loopback reports `CONNECT_FAILED`.
+- An identity that cannot be loaded makes the TLS test return a sterile 500 rather than dialling
+  without a certificate.

@@ -126,6 +126,7 @@ func getFeaturePaths() []string {
 		"features/certificates.feature",
 		"features/mtls-client-ca-pool.feature",
 		"features/mtls-listener.feature",
+		"features/mtls-auth.feature",
 		"features/config-dump.feature",
 		"features/api-management.feature",
 		"features/api-error-responses.feature",
@@ -361,7 +362,7 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 		RegisterSecretSteps(ctx, testState, httpSteps)
 		RegisterTemplateSteps(ctx, testState, httpSteps)
 		RegisterDPToCPSteps(ctx, testState)
-		RegisterMTLSSteps(ctx, testState, httpSteps)
+		RegisterMTLSSteps(ctx, testState, httpSteps, jwtSteps)
 	}
 
 	// Register common HTTP and assertion steps

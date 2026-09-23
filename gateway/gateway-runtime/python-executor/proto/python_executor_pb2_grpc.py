@@ -5,7 +5,7 @@ import warnings
 
 from proto import python_executor_pb2 as proto_dot_python__executor__pb2
 
-GRPC_GENERATED_VERSION = '1.76.0'
+GRPC_GENERATED_VERSION = '1.84.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -25,7 +25,7 @@ if _version_not_supported:
     )
 
 
-class PythonExecutorServiceStub(object):
+class PythonExecutorServiceStub:
     """PythonExecutorService defines the gRPC contract between the Go policy engine
     and the Python executor process.
     """
@@ -58,7 +58,7 @@ class PythonExecutorServiceStub(object):
                 _registered_method=True)
 
 
-class PythonExecutorServiceServicer(object):
+class PythonExecutorServiceServicer:
     """PythonExecutorService defines the gRPC contract between the Go policy engine
     and the Python executor process.
     """
@@ -120,7 +120,7 @@ def add_PythonExecutorServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class PythonExecutorService(object):
+class PythonExecutorService:
     """PythonExecutorService defines the gRPC contract between the Go policy engine
     and the Python executor process.
     """

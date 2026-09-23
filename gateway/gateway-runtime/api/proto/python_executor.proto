@@ -202,12 +202,32 @@ message DownstreamRequest {
   string scheme = 5;
 }
 
+// DownstreamTLS carries the connection-level TLS/mTLS facts Envoy reported for
+// this request via ext_proc request attributes (connection.*). All fields
+// reflect the leaf certificate only.
+message DownstreamTLS {
+  bool mtls = 1;
+  string sha256_thumbprint = 2;
+  string subject_dn = 3;
+  string first_uri_san = 4;
+  string first_dns_san = 5;
+  string peer_certificate_pem = 6;
+  string tls_version = 7;
+  string requested_server_name = 8;
+  // peer_cert_valid is Envoy's own X.509 verification verdict
+  // (connection.peer_certificate_valid). optional so its absence (the
+  // gateway never populated this attribute) is representable and distinct
+  // from an explicit false verdict.
+  optional bool peer_cert_valid = 9;
+}
+
 // DownstreamContext identifies the downstream client and carries a snapshot of
 // the client request. Absent on older gateways — new policies must treat an
 // unset field as "not available" and fall back to legacy validation against
 // the mutable headers.
 message DownstreamContext {
   DownstreamRequest request = 1;
+  DownstreamTLS tls = 2;
 }
 
 // UpstreamRequestContext identifies the route's resolved upstream target during

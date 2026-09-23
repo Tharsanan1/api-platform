@@ -136,6 +136,17 @@ func (h *HTTPSteps) SetHeader(name, value string) {
 	h.headers[name] = value
 }
 
+// Header returns the persistent header value set for subsequent requests, if any.
+func (h *HTTPSteps) Header(name string) (string, bool) {
+	v, ok := h.headers[name]
+	return v, ok
+}
+
+// RemoveHeader removes a persistent header so it is no longer sent on subsequent requests.
+func (h *HTTPSteps) RemoveHeader(name string) {
+	delete(h.headers, name)
+}
+
 // SendPOSTToService sends a POST request to a named service with body
 func (h *HTTPSteps) SendPOSTToService(serviceName, path string, body *godog.DocString) error {
 	return h.iSendPOSTToServiceWithBody(serviceName, path, body)

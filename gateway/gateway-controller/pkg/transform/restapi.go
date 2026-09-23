@@ -43,6 +43,24 @@ type RestAPITransformer struct {
 	systemConfig      *config.Config
 	policyDefinitions map[string]models.PolicyDefinition
 	latestVersions    map[string]string // pre-computed policyName -> latest full semver
+
+	// mtlsCertStore is the client certificate authority pool lookup used to
+	// resolve mtls-auth's accept list into certificate material at
+	// chain-build time (see injectMtlsInternalParams in mtls_internal.go).
+	// Nil until SetMtlsCertificateStore is called — a setter rather than a
+	// constructor parameter so existing NewRestAPITransformer call sites
+	// (including tests) are unaffected; injection is simply skipped while
+	// unset.
+	mtlsCertStore config.MtlsAuthCertificateStore
+}
+
+// SetMtlsCertificateStore wires the client-CA pool lookup used to resolve
+// mtls-auth's accept list at chain-build time. Called once from cmd/controller
+// (and from NewLLMTransformer, which owns its own RestAPITransformer) with the
+// same storage.Storage already threaded to every other consumer of the
+// certificate pool.
+func (t *RestAPITransformer) SetMtlsCertificateStore(store config.MtlsAuthCertificateStore) {
+	t.mtlsCertStore = store
 }
 
 // NewRestAPITransformer creates a new RestAPITransformer.
@@ -439,6 +457,12 @@ func (t *RestAPITransformer) buildPolicyChain(
 			result = append(result, convertAPIPolicyToSDK(opPol, policyv1alpha.LevelRoute, versionutil.MajorVersion(resolved)))
 		}
 	}
+
+	// The policy engine has no database access, so every mtls-auth instance in
+	// this chain gets handed its resolved certificate material here, at
+	// chain-build time — see mtls_internal.go. No-op when mtlsCertStore is
+	// unset or the chain has no mtls-auth instance.
+	injectMtlsInternalParams(result, t.mtlsCertStore)
 
 	return result
 }

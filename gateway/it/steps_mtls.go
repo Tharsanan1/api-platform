@@ -21,9 +21,11 @@ package it
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -58,25 +60,17 @@ const (
 	mtlsListenerProbeInterval = 500 * time.Millisecond
 )
 
-// mtlsListenerAPINames lists every API name the mtls-listener feature
-// deploys via the existing "I deploy this API configuration:" step. Nothing
-// in this codebase tracks deployed API names generically, so the
-// after-scenario cleanup below removes these fixed names directly instead —
-// deleting a name that was never deployed in a given scenario is a no-op
-// (404, ignored).
-var mtlsListenerAPINames = []string{
-	"mtls-listener-api",
-	"plain-neighbour-api",
-	"mtls-refused-api",
-	"mtls-warned-api",
-}
-
 // mtlsPemPlaceholder and mtlsKeyPlaceholder match {{pem "name"}} / {{key "name"}}
 // template markers inside a docstring request body.
 var (
 	mtlsPemPlaceholder = regexp.MustCompile(`\{\{pem "([^"]+)"\}\}`)
 	mtlsKeyPlaceholder = regexp.MustCompile(`\{\{key "([^"]+)"\}\}`)
 )
+
+// mtlsThumbprintPlaceholder matches {{thumbprint "name"}} template markers
+// inside a docstring request body, expanded to fixture "name"'s SHA-256
+// thumbprint (64 lowercase hex characters of the certificate's DER bytes).
+var mtlsThumbprintPlaceholder = regexp.MustCompile(`\{\{thumbprint "([^"]+)"\}\}`)
 
 // mtlsSteps holds scenario-scoped bookkeeping for the client-certificate-
 // authority-pool step definitions: every certificate name this scenario
@@ -89,25 +83,29 @@ var (
 type mtlsSteps struct {
 	state     *TestState
 	httpSteps *steps.HTTPSteps
+	jwtSteps  *JWTSteps
 
 	uploadedNames []string
 }
 
 // RegisterMTLSSteps registers step definitions for the client certificate
-// authority pool feature (features/mtls-client-ca-pool.feature).
-func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) {
-	m := &mtlsSteps{state: state, httpSteps: httpSteps}
+// authority pool feature (features/mtls-client-ca-pool.feature) and the
+// client-certificate-authentication feature (features/mtls-auth.feature).
+func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps, jwtSteps *JWTSteps) {
+	m := &mtlsSteps{state: state, httpSteps: httpSteps, jwtSteps: jwtSteps}
 
 	ctx.Before(func(c context.Context, sc *godog.Scenario) (context.Context, error) {
 		m.uploadedNames = nil
 		return c, nil
 	})
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
-		// Delete any API deployed by this scenario before cleaning up pooled
-		// certificates: an mtls-auth deployment can reference a pooled
-		// authority, so removing the API first avoids leaving that ordering
-		// to chance if the scenario failed before its own cleanup step ran.
-		m.cleanupDeployedAPIs()
+		// Every API this scenario deployed (tracked generically in
+		// steps_api.go, regardless of which deploy step or feature it went
+		// through) is already deleted by the time this hook runs:
+		// RegisterAPISteps registers its own After hook ahead of this one in
+		// suite_test.go, and godog runs After hooks in registration order.
+		// So it's safe to clean up pooled certificates here without
+		// separately deleting the referencing API ourselves.
 		m.cleanup()
 		return c, nil
 	})
@@ -121,6 +119,9 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^the certificate fixture "([^"]*)" is pooled as "([^"]*)"$`, m.pooledFixtureNoUsage)
 	ctx.Step(`^I upload to the certificates endpoint the body:$`, m.uploadRawBody)
 	ctx.Step(`^I upload a certificate body of (\d+) megabytes as "([^"]*)" with usage "([^"]*)"$`, m.uploadOversizedBody)
+
+	// ---- Deploying with fixture-derived values ----
+	ctx.Step(`^I deploy this API configuration with fixture values:$`, m.deployWithFixtureValues)
 
 	// ---- Listing assertions ----
 	// Listing itself is done via the existing generic
@@ -153,6 +154,8 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and its chain$`, m.getWithClientCertificateAndChain)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)"$`, m.getWithClientCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with no client certificate$`, m.getWithNoClientCertificate)
+	ctx.Step(`^I send a GET request to "([^"]*)" with the JWT token and client certificate "([^"]*)"$`, m.getWithJWTTokenAndClientCertificate)
+	ctx.Step(`^I send a GET request to "([^"]*)" with the JWT token and no client certificate$`, m.getWithJWTTokenAndNoClientCertificate)
 
 	// ---- Client authority pool state ----
 	ctx.Step(`^the client authority pool is empty$`, m.clientAuthorityPoolIsEmpty)
@@ -225,6 +228,56 @@ func (m *mtlsSteps) resolveTemplates(body string) (string, error) {
 		return "", firstErr
 	}
 	return body, nil
+}
+
+// thumbprintOf returns fixture "name"'s SHA-256 thumbprint: 64 lowercase hex
+// characters over the certificate's DER bytes, matching both what
+// resources/mtls-pki/manifest.json records and what the mtls-auth policy's
+// own thumbprint field expects.
+func (m *mtlsSteps) thumbprintOf(fixture string) (string, error) {
+	cert, err := m.parseFixtureCert(fixture)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// resolveThumbprintTemplates replaces {{thumbprint "name"}} markers with
+// fixture "name"'s SHA-256 thumbprint. Unlike resolveTemplates' {{pem}}/
+// {{key}} substitution, the replacement is a bare hex string — it needs no
+// JSON escaping, since a hex thumbprint contains no characters a YAML or
+// JSON string would need to escape.
+func (m *mtlsSteps) resolveThumbprintTemplates(body string) (string, error) {
+	var firstErr error
+	resolved := mtlsThumbprintPlaceholder.ReplaceAllStringFunc(body, func(match string) string {
+		sub := mtlsThumbprintPlaceholder.FindStringSubmatch(match)
+		fixture := sub[1]
+		thumb, err := m.thumbprintOf(fixture)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			return match
+		}
+		return thumb
+	})
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return resolved, nil
+}
+
+// deployWithFixtureValues expands {{thumbprint "name"}} markers in the
+// docstring and then deploys it exactly like the plain "I deploy this API
+// configuration:" step — sharing deployAPIConfiguration (steps_api.go) so
+// the deployed API's name is tracked for cleanup the same way.
+func (m *mtlsSteps) deployWithFixtureValues(body *godog.DocString) error {
+	resolved, err := m.resolveThumbprintTemplates(body.Content)
+	if err != nil {
+		return err
+	}
+	return deployAPIConfiguration(m.state, m.httpSteps, resolved)
 }
 
 // ============ Uploading ============
@@ -724,6 +777,58 @@ func (m *mtlsSteps) getWithNoClientCertificate(url string) error {
 	return m.httpSteps.SendRequestWithClient(m.tlsClientNoCertificate(), http.MethodGet, url)
 }
 
+// requireJWTToken guards the two steps below exactly like steps_jwt.go's own
+// "with the JWT token" steps do, so the failure mode (call the token-fetch
+// step first) is identical whether or not a client certificate is involved.
+func (m *mtlsSteps) requireJWTToken() error {
+	if m.jwtSteps == nil || m.jwtSteps.currentToken == "" {
+		return fmt.Errorf("no JWT token available - call 'I get a JWT token from the mock JWKS server' first")
+	}
+	return nil
+}
+
+// getWithJWTTokenAndClientCertificate combines the existing JWT-bearer
+// Authorization header (steps_jwt.go) with a per-request client-certificate
+// TLS client (above): the header is a persistent header applied by
+// HTTPSteps.SendRequestWithClient, so setting it here and delegating to
+// getWithClientCertificate carries both credentials on the same request.
+func (m *mtlsSteps) getWithJWTTokenAndClientCertificate(url, name string) error {
+	if err := m.requireJWTToken(); err != nil {
+		return err
+	}
+	restore := m.useBearerTokenForOneRequest()
+	defer restore()
+	return m.getWithClientCertificate(url, name)
+}
+
+// useBearerTokenForOneRequest sets the Authorization header to the current JWT for
+// the next request only and returns a function that restores whatever Authorization
+// header was in place before (typically the scenario's basic-auth credentials), so a
+// token never leaks into a later request that must be sent without one.
+func (m *mtlsSteps) useBearerTokenForOneRequest() func() {
+	previous, had := m.httpSteps.Header("Authorization")
+	m.httpSteps.SetHeader("Authorization", "Bearer "+m.jwtSteps.currentToken)
+	return func() {
+		if had {
+			m.httpSteps.SetHeader("Authorization", previous)
+		} else {
+			m.httpSteps.RemoveHeader("Authorization")
+		}
+	}
+}
+
+// getWithJWTTokenAndNoClientCertificate is the same pairing as above without
+// a client certificate — used to assert that the JWT alone isn't sufficient
+// where an mtls-auth policy is also attached.
+func (m *mtlsSteps) getWithJWTTokenAndNoClientCertificate(url string) error {
+	if err := m.requireJWTToken(); err != nil {
+		return err
+	}
+	restore := m.useBearerTokenForOneRequest()
+	defer restore()
+	return m.getWithNoClientCertificate(url)
+}
+
 // ============ Client authority pool state ============
 
 // clientAuthorityPoolIsEmpty empties the client-usage certificate pool by
@@ -839,25 +944,11 @@ func (m *mtlsSteps) deleteCertificateNamed(name string) error {
 }
 
 // ============ Cleanup ============
-
-// cleanupDeployedAPIs deletes every fixed API name the mtls-listener feature
-// deploys, authenticating as admin, so a scenario that fails before its own
-// "I delete the API ..." step still leaves the gateway clean. Deleting a name
-// that was never deployed in this run is a no-op (404, ignored) — this
-// cleanup runs for every scenario registered through RegisterMTLSSteps, not
-// only mtls-listener ones.
-func (m *mtlsSteps) cleanupDeployedAPIs() {
-	admin, ok := m.state.Config.Users["admin"]
-	if !ok {
-		return
-	}
-	creds := base64.StdEncoding.EncodeToString([]byte(admin.Username + ":" + admin.Password))
-	m.httpSteps.SetHeader("Authorization", "Basic "+creds)
-
-	for _, name := range mtlsListenerAPINames {
-		_ = m.httpSteps.SendDELETEToService("gateway-controller", "/rest-apis/"+name)
-	}
-}
+//
+// API cleanup itself now lives in steps_api.go's cleanupDeployedAPIs, driven
+// by generic per-scenario tracking rather than a fixed name list — see
+// RegisterMTLSSteps' After hook above for why running this after that one is
+// safe.
 
 // cleanup deletes every certificate name this scenario attempted to upload,
 // authenticating as admin regardless of which role the scenario last used

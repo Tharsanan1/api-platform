@@ -60,6 +60,18 @@ from apip_sdk_core import (
     UpstreamResponseContext,
 )
 
+# DownstreamTLS is only present in apip_sdk_core once the mTLS SDK change is
+# released; the executor image currently installs whatever PYTHON_SDK_SOURCE
+# resolves to (PyPI by default, pinned in requirements.txt), which may still
+# be an older, pre-mTLS release. Guard the import so the executor keeps
+# working against that published SDK too — when the symbol isn't there,
+# _to_python_downstream below just leaves DownstreamContext.tls unset rather
+# than failing to import at all.
+try:
+    from apip_sdk_core import DownstreamTLS
+except ImportError:  # pragma: no cover - exercised via the monkeypatch test
+    DownstreamTLS = None
+
 
 class Translator:
     """Translates between protobuf messages and Python SDK types."""
@@ -415,16 +427,40 @@ class Translator:
         is unset (older gateways) so policies can detect absence and fall back."""
         if not proto_ctx.HasField(field_name):
             return None
-        request = getattr(proto_ctx, field_name).request
-        return DownstreamContext(
-            request=DownstreamRequest(
+        downstream = getattr(proto_ctx, field_name)
+        request = downstream.request
+        downstream_kwargs = {
+            "request": DownstreamRequest(
                 headers=Translator._to_python_headers(request.headers),
                 path=request.path,
                 method=request.method,
                 authority=request.authority,
                 scheme=request.scheme,
             ),
-        )
+        }
+        # DownstreamTLS is None when the installed apip_sdk_core predates the
+        # mTLS SDK change (see the guarded import above) — in that case
+        # DownstreamContext itself has no `tls` parameter to accept, so the
+        # kwarg is omitted entirely rather than passed as None.
+        if DownstreamTLS is not None and downstream.HasField("tls"):
+            proto_tls = downstream.tls
+            downstream_kwargs["tls"] = DownstreamTLS(
+                mtls=proto_tls.mtls,
+                sha256_thumbprint=proto_tls.sha256_thumbprint,
+                subject_dn=proto_tls.subject_dn,
+                first_uri_san=proto_tls.first_uri_san,
+                first_dns_san=proto_tls.first_dns_san,
+                peer_certificate_pem=proto_tls.peer_certificate_pem,
+                tls_version=proto_tls.tls_version,
+                requested_server_name=proto_tls.requested_server_name,
+                # peer_cert_valid is `optional bool` on the wire — HasField
+                # distinguishes "the gateway never populated this attribute"
+                # (None, treat as deny) from an explicit False verdict.
+                peer_cert_valid=(
+                    proto_tls.peer_cert_valid if proto_tls.HasField("peer_cert_valid") else None
+                ),
+            )
+        return DownstreamContext(**downstream_kwargs)
 
     @staticmethod
     def _to_python_request_upstream(

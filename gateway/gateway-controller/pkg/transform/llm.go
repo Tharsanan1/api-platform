@@ -46,9 +46,12 @@ func NewLLMTransformer(
 	policyDefinitions map[string]models.PolicyDefinition,
 	policyVersionResolver utils.PolicyVersionResolver,
 ) *LLMTransformer {
+	restTransformer := NewRestAPITransformer(routerConfig, systemConfig, policyDefinitions)
+	restTransformer.SetMtlsCertificateStore(db)
+
 	return &LLMTransformer{
 		llmTransformer:  utils.NewLLMProviderTransformer(store, db, routerConfig, policyVersionResolver),
-		restTransformer: NewRestAPITransformer(routerConfig, systemConfig, policyDefinitions),
+		restTransformer: restTransformer,
 		store:           store,
 	}
 }

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from executor.translator import Translator
 import proto.python_executor_pb2 as proto
@@ -102,6 +103,97 @@ class TranslatorTest(unittest.TestCase):
         self.assertIsNotNone(response_ctx.upstream)
         self.assertIsNotNone(response_ctx.upstream.response)
         self.assertEqual(503, response_ctx.upstream.response.status_code)
+
+    def test_downstream_tls_translation_peer_cert_valid_tristate(self):
+        """DownstreamTLS field-for-field mapping, and specifically the
+        peer_cert_valid tri-state: unset (the gateway never populated Envoy's
+        verdict — a policy must treat this as deny, never as "valid"),
+        explicit False, and explicit True must all come through distinctly."""
+        shared = self.translator.to_python_shared_context(proto.SharedContext())
+
+        def downstream_with_tls(tls_kwargs):
+            request_proto = proto.RequestContext(
+                downstream=proto.DownstreamContext(
+                    request=proto.DownstreamRequest(path="/protected", method="GET"),
+                    tls=proto.DownstreamTLS(**tls_kwargs),
+                ),
+            )
+            return self.translator.to_python_request_context(request_proto, shared).downstream
+
+        with self.subTest("peer_cert_valid unset"):
+            downstream = downstream_with_tls(
+                {
+                    "mtls": True,
+                    "sha256_thumbprint": "deadbeef",
+                    "subject_dn": "CN=client-valid",
+                    "first_uri_san": "urn:partner-a:payments",
+                    "first_dns_san": "client-valid.partner-a.test",
+                    "peer_certificate_pem": "-----BEGIN CERTIFICATE-----\nMII...\n-----END CERTIFICATE-----\n",
+                    "tls_version": "TLSv1.3",
+                    "requested_server_name": "api.example.com",
+                }
+            )
+            self.assertIsNotNone(downstream)
+            self.assertIsNotNone(downstream.tls)
+            self.assertTrue(downstream.tls.mtls)
+            self.assertEqual("deadbeef", downstream.tls.sha256_thumbprint)
+            self.assertEqual("CN=client-valid", downstream.tls.subject_dn)
+            self.assertEqual("urn:partner-a:payments", downstream.tls.first_uri_san)
+            self.assertEqual("client-valid.partner-a.test", downstream.tls.first_dns_san)
+            self.assertEqual(
+                "-----BEGIN CERTIFICATE-----\nMII...\n-----END CERTIFICATE-----\n",
+                downstream.tls.peer_certificate_pem,
+            )
+            self.assertEqual("TLSv1.3", downstream.tls.tls_version)
+            self.assertEqual("api.example.com", downstream.tls.requested_server_name)
+            self.assertIsNone(downstream.tls.peer_cert_valid)
+
+        with self.subTest("peer_cert_valid explicit False"):
+            downstream = downstream_with_tls({"mtls": True, "peer_cert_valid": False})
+            self.assertIsNotNone(downstream.tls)
+            self.assertIs(downstream.tls.peer_cert_valid, False)
+
+        with self.subTest("peer_cert_valid explicit True"):
+            downstream = downstream_with_tls({"mtls": True, "peer_cert_valid": True})
+            self.assertIsNotNone(downstream.tls)
+            self.assertIs(downstream.tls.peer_cert_valid, True)
+
+    def test_downstream_tls_translation_absent_when_gateway_did_not_populate_it(self):
+        """A DownstreamContext with no tls field at all must translate to
+        downstream.tls is None — never a zero-value DownstreamTLS — so a
+        policy can tell "no assertion" apart from "explicitly no
+        certificate" (mtls: False)."""
+        shared = self.translator.to_python_shared_context(proto.SharedContext())
+        request_proto = proto.RequestContext(
+            downstream=proto.DownstreamContext(
+                request=proto.DownstreamRequest(path="/unprotected", method="GET"),
+            ),
+        )
+        downstream = self.translator.to_python_request_context(request_proto, shared).downstream
+        self.assertIsNotNone(downstream)
+        self.assertIsNone(downstream.tls)
+
+    def test_downstream_tls_translation_tolerates_sdk_without_downstream_tls(self):
+        """The executor image may install a published apip_sdk_core that
+        predates the mTLS SDK change (requirements.txt's PyPI pin), which has
+        no DownstreamTLS symbol at all — translator.py guards that import to
+        None. Translation of a wire message carrying a tls field must then
+        skip the mapping instead of raising, on either an ImportError (no
+        symbol) or a published DownstreamContext that doesn't accept a `tls`
+        kwarg."""
+        shared = self.translator.to_python_shared_context(proto.SharedContext())
+        request_proto = proto.RequestContext(
+            downstream=proto.DownstreamContext(
+                request=proto.DownstreamRequest(path="/protected", method="GET"),
+                tls=proto.DownstreamTLS(mtls=True, peer_cert_valid=True),
+            ),
+        )
+
+        with patch("executor.translator.DownstreamTLS", None):
+            downstream = self.translator.to_python_request_context(request_proto, shared).downstream
+
+        self.assertIsNotNone(downstream)
+        self.assertIsNone(downstream.tls)
 
     def test_action_translation_preserves_current_fields(self):
         request_action = UpstreamRequestModifications(

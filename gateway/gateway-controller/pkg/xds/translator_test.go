@@ -3519,3 +3519,96 @@ func TestSnapshotReferencesSDSSecret(t *testing.T) {
 	assert.False(t, SnapshotReferencesSDSSecret(clusters, listeners, "some-unreferenced-secret"),
 		"a secret name referenced by nothing in the snapshot must report false")
 }
+
+// TestTranslator_CreateListener_ForwardClientCertDetails guards the shared
+// HCM's client-certificate forwarding config: SANITIZE_SET (never
+// APPEND_FORWARD, which would let a caller's own forged
+// x-forwarded-client-cert survive alongside Envoy's own value) and every one
+// of the five SetCurrentClientCertDetails flags explicitly true, so the
+// header mtls-auth (and the per-route stripping below) depends on is always
+// fully populated when a certificate was presented.
+func TestTranslator_CreateListener_ForwardClientCertDetails(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+
+	lis, _, err := translator.createListener(nil, false)
+	require.NoError(t, err)
+
+	manager := extractHCM(t, lis)
+	assert.Equal(t, hcm.HttpConnectionManager_SANITIZE_SET, manager.GetForwardClientCertDetails())
+
+	details := manager.GetSetCurrentClientCertDetails()
+	require.NotNil(t, details, "set_current_client_cert_details must be explicitly configured")
+	require.NotNil(t, details.GetSubject(), "subject must be explicitly set (not left as an unset wrapper)")
+	assert.True(t, details.GetSubject().GetValue())
+	assert.True(t, details.GetCert())
+	assert.True(t, details.GetChain())
+	assert.True(t, details.GetUri())
+	assert.True(t, details.GetDns())
+}
+
+// TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSAuth
+// is the per-route half of the forwarded-client-cert contract: a route whose
+// policy chain doesn't include mtls-auth must strip
+// x-forwarded-client-cert before it ever reaches that route's own backend,
+// while a route whose chain does include it must leave the header alone so
+// the policy engine (and, for an accepted certificate, the backend) can read
+// it. RequestHeadersToRemove is applied by the router filter after ext_proc,
+// so the policy engine sees the header on both routes — only the backend for
+// the non-mtls-auth route never does.
+func TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSAuth(t *testing.T) {
+	translator := createTestTranslator()
+
+	// A minimal hand-built RuntimeDeployConfig — the same level
+	// TestTranslator_TranslateRuntimeConfig_AppliesConnectTimeout and
+	// TestTranslateRuntimeConfig_PeerHostnameOnEveryEndpoint exercise —
+	// rather than routing through the full transform package (which itself
+	// imports this package, so a test-only import of it here would be a
+	// build-time import cycle). rdc.Routes and rdc.PolicyChains share the
+	// same routeKey space, exactly as createRouteFromRDC expects.
+	rdc := &models.RuntimeDeployConfig{
+		Metadata: models.Metadata{UUID: "u", Kind: "RestApi"},
+		Routes: map[string]*models.Route{
+			"plain-route": {
+				Method: "GET", Path: "/plain-api/resource", OperationPath: "/resource",
+				Upstream: models.RouteUpstream{ClusterKey: "backend"},
+			},
+			"mtls-route": {
+				Method: "GET", Path: "/mtls-api/resource", OperationPath: "/resource",
+				Upstream: models.RouteUpstream{ClusterKey: "backend"},
+			},
+		},
+		PolicyChains: map[string]*models.PolicyChain{
+			"mtls-route": {Policies: []models.Policy{{Name: "mtls-auth", Version: "v1.0.0"}}},
+			// "plain-route" deliberately has no entry at all — chainAttachesMTLSAuth
+			// must treat a route with no chain the same as one that has a chain
+			// without mtls-auth.
+		},
+		UpstreamClusters: map[string]*models.UpstreamCluster{
+			"backend": {BasePath: "/", Endpoints: []models.Endpoint{{Host: "backend.example.com", Port: 8080}}},
+		},
+	}
+
+	routes, _, err := translator.translateRuntimeConfig(rdc)
+	require.NoError(t, err)
+
+	var plainRoute, mtlsRoute *route.Route
+	for _, r := range routes {
+		switch r.GetName() {
+		case "plain-route":
+			plainRoute = r
+		case "mtls-route":
+			mtlsRoute = r
+		}
+	}
+	require.NotNil(t, plainRoute, "expected to find the plain (no mtls-auth) route")
+	require.NotNil(t, mtlsRoute, "expected to find the mtls-auth route")
+
+	assert.Contains(t, plainRoute.RequestHeadersToRemove, xfccHeaderName,
+		"a route whose chain lacks mtls-auth must strip x-forwarded-client-cert before its backend")
+	assert.NotContains(t, mtlsRoute.RequestHeadersToRemove, xfccHeaderName,
+		"a route whose chain attaches mtls-auth must not strip x-forwarded-client-cert")
+}

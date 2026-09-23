@@ -344,6 +344,13 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		slog.String("id", certID),
 		slog.String("name", req.Name))
 
+	// The client-CA pool just changed: keep every deployed mtls-auth API's
+	// policy chain current so an API that inherits the pool sees the new
+	// authority on its next request (see repushMtlsAuthDeployments).
+	if effectiveUsage == models.CertificateUsageClient {
+		s.repushMtlsAuthDeployments(log)
+	}
+
 	resp := CertificateResponse{
 		ID:       certID,
 		Name:     req.Name,
@@ -577,6 +584,12 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Best-effort: read the certificate's usage before it's gone, so we know
+	// afterwards whether the client-CA pool changed (and every mtls-auth
+	// deployment needs re-pushing) — a lookup failure here doesn't block the
+	// delete itself, which re-validates existence and reports 404 on its own.
+	preDeleteCert, _ := s.db.GetCertificate(id)
+
 	// Delete from database
 	if err := s.db.DeleteCertificate(id); err != nil {
 		log.Error("Failed to delete certificate",
@@ -614,6 +627,12 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 	}
 
 	log.Info("SDS snapshot updated after certificate deletion", slog.String("id", id))
+
+	// The client-CA pool just changed: keep every deployed mtls-auth API's
+	// policy chain current (see repushMtlsAuthDeployments).
+	if preDeleteCert != nil && preDeleteCert.Usage == models.CertificateUsageClient {
+		s.repushMtlsAuthDeployments(log)
+	}
 
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":  "success",

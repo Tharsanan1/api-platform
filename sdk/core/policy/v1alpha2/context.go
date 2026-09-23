@@ -38,6 +38,17 @@ type Body struct {
 // the client request.
 type DownstreamContext struct {
 	Request *DownstreamRequest
+
+	// TLS carries the connection-level TLS/mTLS facts the gateway observed for
+	// this request, or nil when the gateway did not populate it (a gateway
+	// released before this feature, or a listener that isn't the derived
+	// mTLS-capable HTTPS listener). Nil means "the gateway asserts nothing
+	// about this connection's certificate" — callers that need to know
+	// whether a certificate was presented MUST treat nil as authentication
+	// failure, never as "no certificate required": there is no way to
+	// distinguish "not populated" from "definitely absent" other than the
+	// pointer itself, and only the gateway can tell the two apart.
+	TLS *DownstreamTLS
 }
 
 // DownstreamRequest holds a snapshot of the request as received from the
@@ -48,6 +59,60 @@ type DownstreamRequest struct {
 	Method    string
 	Authority string
 	Scheme    string
+}
+
+// DownstreamTLS carries the connection-level TLS/mTLS facts Envoy reported for
+// this request via ext_proc request attributes (connection.*) — see
+// go-control-plane-xds-security.md and the mtls-listener feature file for how
+// the derived HTTPS listener populates these. All fields reflect the leaf
+// certificate only; a policy that needs the full SAN set or the intermediate
+// chain must parse PeerCertificatePEM (and, for the chain, the forwarded
+// X-Forwarded-Client-Cert header) itself.
+type DownstreamTLS struct {
+	// MTLS is true when TLS applied to this connection AND a peer certificate
+	// was presented. False (never a zero-value ambiguity) whenever the
+	// gateway populated TLS at all but no certificate arrived — including on
+	// a plain HTTP listener or a TLS connection with no client certificate.
+	MTLS bool
+
+	// SHA256Thumbprint is the hex digest of the leaf certificate's DER
+	// encoding, exactly as Envoy reports it (connection.sha256_peer_certificate_digest).
+	SHA256Thumbprint string
+
+	// SubjectDN is the leaf certificate's subject distinguished name
+	// (connection.subject_peer_certificate).
+	SubjectDN string
+
+	// FirstURISAN is the first URI subject alternative name only
+	// (connection.uri_san_peer_certificate). A policy that needs the full URI
+	// SAN set must parse PeerCertificatePEM itself.
+	FirstURISAN string
+
+	// FirstDNSSAN is the first DNS subject alternative name only
+	// (connection.dns_san_peer_certificate). A policy that needs the full DNS
+	// SAN set must parse PeerCertificatePEM itself.
+	FirstDNSSAN string
+
+	// PeerCertificatePEM is the leaf client certificate, PEM-encoded
+	// (connection.peer_certificate).
+	PeerCertificatePEM string
+
+	// TLSVersion is the negotiated TLS protocol version
+	// (connection.tls_version).
+	TLSVersion string
+
+	// RequestedServerName is the SNI value the client requested
+	// (connection.requested_server_name).
+	RequestedServerName string
+
+	// PeerCertValid is Envoy's own X.509 verification verdict for the
+	// presented certificate against the gateway's client-CA pool
+	// (connection.peer_certificate_valid) — the derived listener never closes
+	// a connection over this verdict, so a policy must consult it itself.
+	// Nil means the gateway did not populate this attribute at all (treat as
+	// deny, per GO-AUTH-001 fail-closed authentication — never as "valid").
+	// A non-nil false means Envoy explicitly rejected the certificate.
+	PeerCertValid *bool
 }
 
 // UpstreamRequestContext identifies the route's resolved upstream target during

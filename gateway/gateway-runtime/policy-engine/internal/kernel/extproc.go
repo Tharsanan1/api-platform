@@ -49,6 +49,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/registry"
 	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/resolver"
 	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/tracing"
+	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 	policyenginev1 "github.com/wso2/api-platform/sdk/core/policyengine"
 )
 
@@ -768,6 +769,19 @@ func (s *ExternalProcessorServer) newBoundExecutionContext(
 	ec.upstreamDefinitionPaths = routeMetadata.UpstreamDefinitionPaths
 	ec.defaultUpstream = routeMetadata.DefaultUpstream
 	ec.buildRequestContexts(req.GetRequestHeaders(), routeMetadata)
+
+	// Populate the connection-level TLS/mTLS snapshot from the same ext_proc
+	// request attributes extractRouteKey reads below. This happens here,
+	// rather than inside buildRequestContexts, because req.Attributes lives on
+	// the top-level ProcessingRequest, not on the HttpHeaders message
+	// buildRequestContexts is handed — and because requestHeaderCtx,
+	// requestBodyCtx, and requestStreamContext all share the one *DownstreamContext
+	// buildRequestContexts allocated, setting TLS once here makes it visible to
+	// every phase (and, via buildResponseContexts reusing the same pointer, the
+	// response phase too).
+	if ec.requestHeaderCtx != nil && ec.requestHeaderCtx.Downstream != nil {
+		ec.requestHeaderCtx.Downstream.TLS = extractDownstreamTLS(req.Attributes)
+	}
 	return ec
 }
 
@@ -787,6 +801,65 @@ func (s *ExternalProcessorServer) extractRouteKey(req *extprocv3.ProcessingReque
 		}
 	}
 	return "default"
+}
+
+// extractDownstreamTLS reads the connection-level TLS/mTLS ext_proc request
+// attributes (connection.* — see constants.ExtProcAttrConnection*) into a
+// policy.DownstreamTLS snapshot.
+//
+// Always returns non-nil: MTLS is explicitly false when connection.mtls is
+// absent or false, so a policy can tell "no certificate was presented" apart
+// from "TLS is nil because this gateway build never populates it" (the latter
+// is only possible when the caller chooses not to call this function at all,
+// or when the derived listener's mtls-listener feature hasn't rolled out yet
+// — see the DownstreamTLS doc comment in the SDK for the fail-closed
+// contract). PeerCertValid is the one field that stays nil unless
+// connection.peer_certificate_valid was actually present in the attributes,
+// regardless of MTLS — Envoy populates the verdict independently of whether a
+// certificate was presented at all.
+//
+// Never logs PeerCertificatePEM or SHA256Thumbprint (GO-AUTH-003) — callers
+// must not either.
+func extractDownstreamTLS(attrs map[string]*structpb.Struct) *policy.DownstreamTLS {
+	tls := &policy.DownstreamTLS{}
+	if attrs == nil {
+		return tls
+	}
+	extProcAttrs, ok := attrs[constants.ExtProcFilter]
+	if !ok || extProcAttrs.Fields == nil {
+		return tls
+	}
+	fields := extProcAttrs.Fields
+
+	if v, ok := fields[constants.ExtProcAttrConnectionMTLS]; ok {
+		tls.MTLS = v.GetBoolValue()
+	}
+	if v, ok := fields[constants.ExtProcAttrConnectionPeerCertificateDigest]; ok {
+		tls.SHA256Thumbprint = v.GetStringValue()
+	}
+	if v, ok := fields[constants.ExtProcAttrConnectionSubjectPeerCertificate]; ok {
+		tls.SubjectDN = v.GetStringValue()
+	}
+	if v, ok := fields[constants.ExtProcAttrConnectionURISANPeerCertificate]; ok {
+		tls.FirstURISAN = v.GetStringValue()
+	}
+	if v, ok := fields[constants.ExtProcAttrConnectionDNSSANPeerCertificate]; ok {
+		tls.FirstDNSSAN = v.GetStringValue()
+	}
+	if v, ok := fields[constants.ExtProcAttrConnectionPeerCertificate]; ok {
+		tls.PeerCertificatePEM = v.GetStringValue()
+	}
+	if v, ok := fields[constants.ExtProcAttrConnectionTLSVersion]; ok {
+		tls.TLSVersion = v.GetStringValue()
+	}
+	if v, ok := fields[constants.ExtProcAttrConnectionRequestedServerName]; ok {
+		tls.RequestedServerName = v.GetStringValue()
+	}
+	if v, ok := fields[constants.ExtProcAttrConnectionPeerCertificateValid]; ok {
+		valid := v.GetBoolValue()
+		tls.PeerCertValid = &valid
+	}
+	return tls
 }
 
 // skipAllProcessing returns a response that skips all processing phases

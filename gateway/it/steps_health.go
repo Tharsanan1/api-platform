@@ -52,6 +52,7 @@ func RegisterHealthSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps
 	ctx.Step(`^I wait for the endpoint "([^"]*)" to be ready$`, h.iWaitForEndpointToBeReady)
 	ctx.Step(`^I wait for the endpoint "([^"]*)" to be ready with host "([^"]*)"$`, h.iWaitForEndpointToBeReadyWithHost)
 	ctx.Step(`^I wait for the endpoint "([^"]*)" to be ready with method "([^"]*)" and body '([^']*)'$`, h.iWaitForEndpointToBeReadyWithMethodAndBody)
+	ctx.Step(`^I wait for the endpoint "([^"]*)" to respond with status (\d+)$`, h.iWaitForEndpointToReturnStatus)
 	ctx.Step(`^I wait for the endpoint "([^"]*)" to return 403$`, h.iWaitForEndpointToReturn403)
 }
 
@@ -216,6 +217,31 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithHost(url, host string) error 
 	}
 
 	return fmt.Errorf("endpoint %s with host %s did not become ready after %d attempts", url, trimmedHost, maxAttempts)
+}
+
+// iWaitForEndpointToReturnStatus polls an endpoint until it returns the given status
+// (e.g. a route protected by an authentication policy answering 401 to an anonymous
+// request), then waits for the policy snapshot to be in sync.
+func (h *HealthSteps) iWaitForEndpointToReturnStatus(url string, status int) error {
+	maxAttempts := 30
+	attemptInterval := 300 * time.Millisecond
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err := h.state.HTTPClient.Get(url)
+		if err == nil && resp.StatusCode == status {
+			resp.Body.Close()
+			return h.waitForPolicySnapshotSync()
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+
+		if attempt < maxAttempts {
+			time.Sleep(attemptInterval)
+		}
+	}
+
+	return fmt.Errorf("endpoint %s did not respond with status %d after %d attempts", url, status, maxAttempts)
 }
 
 // iWaitForEndpointToReturn403 polls an endpoint until it returns 403 (e.g. subscription-protected route blocking unauthenticated requests)

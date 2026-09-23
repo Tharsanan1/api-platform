@@ -587,3 +587,116 @@ func TestInitializeExecutionContext_WithPolicyChain(t *testing.T) {
 	assert.Equal(t, "/api/v1/pets", execCtx.requestBodyCtx.Path)
 	assert.Equal(t, "GET", execCtx.requestBodyCtx.Method)
 }
+
+// =============================================================================
+// extractDownstreamTLS
+// =============================================================================
+
+// TestExtractDownstreamTLS_AttributesNil guards the documented "always
+// returns non-nil" contract: a nil attributes map (an ext_proc request that
+// never carried connection.* at all) must still produce a non-nil
+// *policy.DownstreamTLS with MTLS explicitly false, never a nil TLS — that
+// distinction is reserved for a caller that chooses not to invoke this
+// function, per the SDK's DownstreamTLS doc comment.
+func TestExtractDownstreamTLS_AttributesNil(t *testing.T) {
+	tls := extractDownstreamTLS(nil)
+
+	require.NotNil(t, tls)
+	assert.False(t, tls.MTLS)
+	assert.Nil(t, tls.PeerCertValid)
+}
+
+// TestExtractDownstreamTLS_ExtProcFilterAbsent covers an attributes map that
+// exists but carries no envoy.filters.http.ext_proc entry at all (e.g. only
+// xds.route_name was ever populated under a different key) — same non-nil,
+// MTLS-false outcome as the nil-map case.
+func TestExtractDownstreamTLS_ExtProcFilterAbsent(t *testing.T) {
+	attrs := map[string]*structpb.Struct{
+		"some.other.filter": {Fields: map[string]*structpb.Value{"x": structpb.NewStringValue("y")}},
+	}
+
+	tls := extractDownstreamTLS(attrs)
+
+	require.NotNil(t, tls)
+	assert.False(t, tls.MTLS)
+	assert.Nil(t, tls.PeerCertValid)
+}
+
+// TestExtractDownstreamTLS_ConnectionMTLSAbsent covers connection.* present
+// but connection.mtls itself absent (e.g. a plain HTTP listener, or a build
+// that doesn't yet populate every field) — MTLS stays false and
+// PeerCertValid stays nil, exactly like the fully-absent cases above.
+func TestExtractDownstreamTLS_ConnectionMTLSAbsent(t *testing.T) {
+	attrs := map[string]*structpb.Struct{
+		constants.ExtProcFilter: {
+			Fields: map[string]*structpb.Value{
+				"xds.route_name": structpb.NewStringValue("test-route"),
+			},
+		},
+	}
+
+	tls := extractDownstreamTLS(attrs)
+
+	require.NotNil(t, tls)
+	assert.False(t, tls.MTLS)
+	assert.Nil(t, tls.PeerCertValid)
+}
+
+// TestExtractDownstreamTLS_AllFieldsPresent guards the field-by-field mapping
+// for a fully-populated mTLS connection, including that PeerCertValid becomes
+// a non-nil *bool (true here) rather than being left nil once Envoy actually
+// reports a verdict.
+func TestExtractDownstreamTLS_AllFieldsPresent(t *testing.T) {
+	attrs := map[string]*structpb.Struct{
+		constants.ExtProcFilter: {
+			Fields: map[string]*structpb.Value{
+				constants.ExtProcAttrConnectionMTLS:                   structpb.NewBoolValue(true),
+				constants.ExtProcAttrConnectionPeerCertificateDigest:  structpb.NewStringValue("deadbeef"),
+				constants.ExtProcAttrConnectionSubjectPeerCertificate: structpb.NewStringValue("CN=client-valid"),
+				constants.ExtProcAttrConnectionURISANPeerCertificate:  structpb.NewStringValue("urn:partner-a:payments"),
+				constants.ExtProcAttrConnectionDNSSANPeerCertificate:  structpb.NewStringValue("client-valid.partner-a.test"),
+				constants.ExtProcAttrConnectionPeerCertificate:        structpb.NewStringValue("-----BEGIN CERTIFICATE-----\nMII...\n-----END CERTIFICATE-----\n"),
+				constants.ExtProcAttrConnectionTLSVersion:             structpb.NewStringValue("TLSv1.3"),
+				constants.ExtProcAttrConnectionRequestedServerName:    structpb.NewStringValue("api.example.com"),
+				constants.ExtProcAttrConnectionPeerCertificateValid:   structpb.NewBoolValue(true),
+			},
+		},
+	}
+
+	tls := extractDownstreamTLS(attrs)
+
+	require.NotNil(t, tls)
+	assert.True(t, tls.MTLS)
+	assert.Equal(t, "deadbeef", tls.SHA256Thumbprint)
+	assert.Equal(t, "CN=client-valid", tls.SubjectDN)
+	assert.Equal(t, "urn:partner-a:payments", tls.FirstURISAN)
+	assert.Equal(t, "client-valid.partner-a.test", tls.FirstDNSSAN)
+	assert.Equal(t, "-----BEGIN CERTIFICATE-----\nMII...\n-----END CERTIFICATE-----\n", tls.PeerCertificatePEM)
+	assert.Equal(t, "TLSv1.3", tls.TLSVersion)
+	assert.Equal(t, "api.example.com", tls.RequestedServerName)
+	require.NotNil(t, tls.PeerCertValid)
+	assert.True(t, *tls.PeerCertValid)
+}
+
+// TestExtractDownstreamTLS_PeerCertValid_FalsePointer guards that a present
+// but false connection.peer_certificate_valid becomes a non-nil *bool
+// pointing at false — distinct from the field being absent entirely (nil
+// pointer), which policy.DownstreamTLS's fail-closed contract treats
+// differently (see evaluate()'s Step 3 in the mtls-auth policy).
+func TestExtractDownstreamTLS_PeerCertValid_FalsePointer(t *testing.T) {
+	attrs := map[string]*structpb.Struct{
+		constants.ExtProcFilter: {
+			Fields: map[string]*structpb.Value{
+				constants.ExtProcAttrConnectionMTLS:                 structpb.NewBoolValue(true),
+				constants.ExtProcAttrConnectionPeerCertificateValid: structpb.NewBoolValue(false),
+			},
+		},
+	}
+
+	tls := extractDownstreamTLS(attrs)
+
+	require.NotNil(t, tls)
+	assert.True(t, tls.MTLS)
+	require.NotNil(t, tls.PeerCertValid)
+	assert.False(t, *tls.PeerCertValid)
+}

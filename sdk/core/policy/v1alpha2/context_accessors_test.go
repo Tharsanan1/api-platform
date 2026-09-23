@@ -168,6 +168,58 @@ func TestRequestContexts_DownstreamAccessors(t *testing.T) {
 	})
 }
 
+// ─── PeerCertificate ──────────────────────────────────────────────────────────
+//
+// Unlike every other accessor in this file, PeerCertificate has no live-header
+// fallback: a nil return must mean "the gateway asserts nothing", never "fall
+// back to something derived from headers" — inventing a fallback from
+// request-scoped data would let a caller spoof the very connection-level fact
+// this accessor exists to authenticate.
+
+func TestRequestHeaderContext_PeerCertificate(t *testing.T) {
+	t.Run("nil when Downstream nil", func(t *testing.T) {
+		c := &RequestHeaderContext{}
+		if got := c.PeerCertificate(); got != nil {
+			t.Errorf("expected nil, got %+v", got)
+		}
+	})
+	t.Run("nil when Downstream.TLS nil", func(t *testing.T) {
+		c := &RequestHeaderContext{Downstream: &DownstreamContext{}}
+		if got := c.PeerCertificate(); got != nil {
+			t.Errorf("expected nil, got %+v", got)
+		}
+	})
+	t.Run("returns TLS as-is when present", func(t *testing.T) {
+		tls := &DownstreamTLS{MTLS: true, SHA256Thumbprint: "deadbeef"}
+		c := &RequestHeaderContext{Downstream: &DownstreamContext{TLS: tls}}
+		if got := c.PeerCertificate(); got != tls {
+			t.Fatalf("expected the TLS struct to be returned as-is, got %+v", got)
+		}
+	})
+	t.Run("never consults headers: a header carrying a forged certificate is ignored without TLS", func(t *testing.T) {
+		// A context with headers set (including a spoofed X-Forwarded-Client-Cert)
+		// but no Downstream.TLS must still return nil — there is no live
+		// equivalent of connection-level TLS state to fall back to, unlike every
+		// other accessor in this file.
+		c := &RequestHeaderContext{
+			Headers: NewHeaders(map[string][]string{
+				"x-forwarded-client-cert": {`Subject="CN=forged";URI=urn:evil:actor`},
+			}),
+			Downstream: &DownstreamContext{
+				Request: &DownstreamRequest{
+					Headers: NewHeaders(map[string][]string{
+						"x-forwarded-client-cert": {`Subject="CN=forged";URI=urn:evil:actor`},
+					}),
+				},
+				// TLS deliberately left nil.
+			},
+		}
+		if got := c.PeerCertificate(); got != nil {
+			t.Errorf("expected nil despite headers carrying a certificate-shaped value, got %+v", got)
+		}
+	})
+}
+
 // ─── Response-phase context wrappers ─────────────────────────────────────────
 
 func TestResponseContexts_DownstreamFallbackHasNoAuthorityOrScheme(t *testing.T) {

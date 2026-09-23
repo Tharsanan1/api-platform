@@ -200,6 +200,31 @@ class DownstreamRequest:
 
 
 @dataclass(slots=True)
+class DownstreamTLS:
+    """Connection-level TLS/mTLS facts the gateway observed for this request,
+    surfaced from Envoy's ``connection.*`` ext_proc request attributes. Mirrors
+    the Go SDK's ``DownstreamTLS`` field-for-field. All fields reflect the leaf
+    certificate only; a policy that needs the full SAN set or the intermediate
+    chain must parse ``peer_certificate_pem`` (and, for the chain, the
+    forwarded ``X-Forwarded-Client-Cert`` header) itself.
+    """
+
+    mtls: bool = False
+    sha256_thumbprint: str = ""
+    subject_dn: str = ""
+    first_uri_san: str = ""
+    first_dns_san: str = ""
+    peer_certificate_pem: str = ""
+    tls_version: str = ""
+    requested_server_name: str = ""
+    # None means the gateway did not populate connection.peer_certificate_valid
+    # at all — treat as deny (GO-AUTH-001 fail-closed authentication), never
+    # as "valid". A non-None False means Envoy explicitly rejected the
+    # certificate.
+    peer_cert_valid: bool | None = None
+
+
+@dataclass(slots=True)
 class DownstreamContext:
     """Downstream client, carrying a snapshot of the client request.
 
@@ -207,9 +232,15 @@ class DownstreamContext:
     upstream side's ``upstream.response.headers``. ``request`` is
     ``DownstreamRequest | None`` (defaulting to ``None``), left ``None`` by the
     kernel when no snapshot is available.
+
+    ``tls`` is ``DownstreamTLS | None`` (defaulting to ``None``); ``None``
+    means the gateway asserts nothing about this connection's certificate — a
+    policy that needs to know whether a certificate was presented MUST treat
+    ``None`` as authentication failure, never as "no certificate required".
     """
 
     request: DownstreamRequest | None = None
+    tls: DownstreamTLS | None = None
 
 
 @dataclass(slots=True)

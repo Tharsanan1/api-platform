@@ -73,3 +73,40 @@ Legend: **IT** = `gateway/it/features/<file>.feature` scenario title; **UT** = G
 | §3.1.5 stored config unchanged by resolution | UT (input untouched assertion) |
 
 Decisions taken while writing slice 2 tests: unknown-parameter message is `unknown parameter <name>` generically, with the `thumbprints` hint only for `thumbprint`; warnings and the resolved `accept` echo appear on create/update responses only, not on later GETs.
+
+## Slice 3 — certificate evaluation, trust anchors, forwarded header (§3.1.1, §3.1.2, §3.1.4 steps 4b–6, §3.1.7, §8.15, §8.17)
+
+| Spec case | Test |
+|---|---|
+| §8.15 API-M rows (nothing, valid, extra SANs, SAN≠U, no SAN, renewed, wrong CA, same CN, same-DN CA, self-signed unpooled, expired, not-yet-valid, serverAuth-only) | IT mtls-auth outline *An API accepting one authority narrowed by URI SAN decides per certificate* (15 rows); UT mtlsauth_test evaluate branches |
+| §8.15 API-M chain depth > max | not automated: the listener uses Envoy's default depth, so no fixture exceeds it; revisit if a max_verify_depth is ever configured |
+| §8.15 API-P rows (cert ignored, XFCC stripped) | IT outline *A public API ignores whatever certificate arrives…* (6 rows) |
+| §8.15 API-T rows (thumbprint; renewed 401 until updated) | IT *An API accepting exact fingerprints…*; *A renewed certificate is admitted once its fingerprint is listed…* |
+| §8.15 forged XFCC with/without cert; header stripped | IT *A forged forwarded-certificate header never reaches a backend or stands in for a handshake*; UT SDK accessor never reads headers; UT policy: XFCC read only when MTLS true, chain never becomes a root |
+| §8.15 HTTP/1.1 and TLS 1.2 clients; one HTTP/2 connection across APIs | not automated: the request steps open a fresh connection per request; covered by the per-request evaluation design (UT) |
+| §8.15 mtls-auth + jwt-auth composition (4 rows, identical 401 bodies) | IT *A certificate and a token are both required when both policies are attached* |
+| §8.15 mtls-auth + subscription-validation | slice 4/8 |
+| §8.17 Entry A root only (6 rows) | IT outline *A pool entry holding only the root anchors everything the root signed…* |
+| §8.17 Entry B root + intermediate (5 rows; Issuer = entry name) | IT outline *…holding the root and its issuing intermediate…*; Issuer asserted in UT |
+| §8.17 Entry C intermediate only (5 rows; leaf+intermediate+root row not automated: no such chain fixture) | IT outline *…holding only an issuing intermediate…* |
+| §8.17 Entry D self-signed (4 rows) | IT outline *A self-signed certificate pooled as its own authority admits exactly itself* |
+| §8.17 cross-entry (4 rows) | IT outline *With the root and the intermediate pooled separately…* |
+| §8.17 unit tests: KeyUsages ExtKeyUsageAny; XFCC only when mtls; chain never in Roots | UT mtlsauth_test |
+| §3.1.2 D10 per-request re-evaluation | IT *Narrowing the accept list takes effect on the caller's next request* |
+| S16 pool membership grants nothing; inheriting API follows the pool | IT *Adding an authority to the pool grants no access…*; *An API that inherits the whole pool follows the pool as it changes*; UT re-push on client upload only |
+| §3.1.7 SANITIZE_SET + details; strip on non-mtls routes | IT public-API and per-operation scenarios; UT translator HCM and route tests |
+| §3.1.4 (5) SDK DownstreamTLS + fail-closed accessor; proto mirror; kernel population | UT sdk accessor; kernel extractDownstreamTLS; pythonbridge and Python translator |
+| §3.1.5 per-operation attachment | IT *Attached to one operation, the policy protects that operation only* |
+
+### Decisions taken while implementing slice 3
+
+- **Pool material reaches the policy inside the policy chain.** The spec did not say how the running
+  policy obtains the certificates named by `accept`. The controller resolves each entry into the pool
+  row's certificates and adds two engine-internal parameters (`__wso2_internal_mtls_accept`,
+  `__wso2_internal_mtls_pool`) to the `mtls-auth` instance when it builds the chain, and re-pushes
+  every `mtls-auth` API when a `usage: client` row is uploaded or deleted. The policy engine stays
+  free of database access and inheriting APIs follow the pool on the next request.
+- The policy engine and the dev policy carry a local `replace` for `sdk/core` (as the repo does for
+  `common` and `httpkit`) so the image build compiles against the workspace SDK before it is tagged.
+- The legacy per-API translation path (used only when no transformers are wired) has no header
+  stripping; production always wires transformers.

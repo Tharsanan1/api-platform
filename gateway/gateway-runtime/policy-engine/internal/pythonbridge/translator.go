@@ -93,7 +93,34 @@ func (t *Translator) ToProtoDownstream(ds *policy.DownstreamContext) *proto.Down
 			Authority: ds.Request.Authority,
 			Scheme:    ds.Request.Scheme,
 		},
+		Tls: t.toProtoDownstreamTLS(ds.TLS),
 	}
+}
+
+// toProtoDownstreamTLS converts the connection-level TLS/mTLS snapshot into the
+// transport form. Returns nil when the gateway did not populate it (see
+// policy.DownstreamTLS's doc comment) — the wire field then stays unset, which
+// a Python-side mtls-auth-equivalent policy must treat as "no certificate
+// accepted", never as "not required", exactly like the Go-side accessor.
+func (t *Translator) toProtoDownstreamTLS(tls *policy.DownstreamTLS) *proto.DownstreamTLS {
+	if tls == nil {
+		return nil
+	}
+	out := &proto.DownstreamTLS{
+		Mtls:                tls.MTLS,
+		Sha256Thumbprint:    tls.SHA256Thumbprint,
+		SubjectDn:           tls.SubjectDN,
+		FirstUriSan:         tls.FirstURISAN,
+		FirstDnsSan:         tls.FirstDNSSAN,
+		PeerCertificatePem:  tls.PeerCertificatePEM,
+		TlsVersion:          tls.TLSVersion,
+		RequestedServerName: tls.RequestedServerName,
+	}
+	if tls.PeerCertValid != nil {
+		v := *tls.PeerCertValid
+		out.PeerCertValid = &v
+	}
+	return out
 }
 
 // ToProtoRequestUpstream converts the request-phase resolved upstream target

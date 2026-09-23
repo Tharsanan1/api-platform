@@ -20,7 +20,19 @@ package mtlsauth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
+	"encoding/pem"
+	"math/big"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
@@ -182,4 +194,667 @@ func TestMtlsAuthPolicy_Mode(t *testing.T) {
 	if mode.ResponseBodyMode != policy.BodyModeSkip {
 		t.Errorf("ResponseBodyMode = %v, want BodyModeSkip", mode.ResponseBodyMode)
 	}
+}
+
+// ─── In-test certificate authority helpers ───────────────────────────────────
+//
+// This module doesn't depend on gateway-controller, so it can't reuse that
+// module's pkg/testutil/pki helper — this is a small, self-contained
+// equivalent built directly on crypto/x509, sized for exactly what this
+// file's tests below need.
+
+// testEntity is a generated certificate plus the private key that created it.
+type testEntity struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	der  []byte
+}
+
+func (e *testEntity) pemCert() string {
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: e.der}))
+}
+
+// thumbprint returns the lowercase-hex SHA-256 digest of the certificate's DER
+// encoding — the same "canonical thumbprint" evaluate() computes from a
+// parsed leaf, and the format both __wso2_internal_mtls_accept's thumbprints
+// entries and DownstreamTLS.SHA256Thumbprint are normalized to.
+func (e *testEntity) thumbprint() string {
+	sum := sha256.Sum256(e.der)
+	return hex.EncodeToString(sum[:])
+}
+
+// certOpts configures a single certificate issuance. Despite the name it
+// applies equally to roots, intermediates, and leaves — isCA/parent select
+// which.
+type certOpts struct {
+	parent    *testEntity // nil => self-signed
+	isCA      bool
+	subject   pkix.Name // zero value => pkix.Name{CommonName: cn}
+	uriSANs   []string
+	dnsSANs   []string
+	ekus      []x509.ExtKeyUsage
+	notBefore time.Time
+	notAfter  time.Time
+}
+
+func issueCert(t *testing.T, cn string, opts certOpts) *testEntity {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key for %q: %v", cn, err)
+	}
+
+	subject := opts.subject
+	if subject.CommonName == "" && len(subject.Organization) == 0 {
+		subject = pkix.Name{CommonName: cn}
+	}
+
+	notBefore, notAfter := opts.notBefore, opts.notAfter
+	if notBefore.IsZero() && notAfter.IsZero() {
+		notBefore = time.Now().Add(-1 * time.Hour)
+		notAfter = time.Now().Add(10 * 365 * 24 * time.Hour)
+	}
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("failed to generate serial number for %q: %v", cn, err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               subject,
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		BasicConstraintsValid: true,
+		IsCA:                  opts.isCA,
+	}
+	if opts.isCA {
+		tmpl.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
+	} else {
+		tmpl.KeyUsage = x509.KeyUsageDigitalSignature
+	}
+	switch {
+	case len(opts.ekus) > 0:
+		tmpl.ExtKeyUsage = opts.ekus
+	case !opts.isCA:
+		// Every client leaf in this file defaults to clientAuth-only EKU,
+		// mirroring resources/mtls-pki/generate.go's fixtures — this is what
+		// makes TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny
+		// below a meaningful regression guard rather than a one-off.
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+	}
+
+	for _, u := range opts.uriSANs {
+		parsed, err := url.Parse(u)
+		if err != nil {
+			t.Fatalf("invalid URI SAN %q for %q: %v", u, cn, err)
+		}
+		tmpl.URIs = append(tmpl.URIs, parsed)
+	}
+	tmpl.DNSNames = append(tmpl.DNSNames, opts.dnsSANs...)
+
+	var parentCert *x509.Certificate
+	var signer *ecdsa.PrivateKey
+	if opts.parent == nil {
+		parentCert = tmpl
+		signer = key
+	} else {
+		parentCert = opts.parent.cert
+		signer = opts.parent.key
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, parentCert, key.Public(), signer)
+	if err != nil {
+		t.Fatalf("failed to create certificate for %q: %v", cn, err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("failed to parse generated certificate for %q: %v", cn, err)
+	}
+	return &testEntity{cert: cert, key: key, der: der}
+}
+
+func newRootCA(t *testing.T, cn string) *testEntity {
+	t.Helper()
+	return issueCert(t, cn, certOpts{isCA: true})
+}
+
+func newIntermediateCA(t *testing.T, parent *testEntity, cn string) *testEntity {
+	t.Helper()
+	return issueCert(t, cn, certOpts{isCA: true, parent: parent})
+}
+
+func newLeaf(t *testing.T, parent *testEntity, cn string, opts certOpts) *testEntity {
+	t.Helper()
+	opts.parent = parent
+	return issueCert(t, cn, opts)
+}
+
+// xfccChainField builds the Chain= field of an X-Forwarded-Client-Cert header
+// value exactly as parseXFCCChainCertificates expects to decode it: RFC 3986
+// percent-encoding (url.PathEscape, matching the production code's
+// url.PathUnescape) of the concatenated PEM blocks — never
+// url.QueryEscape/Unescape, which would corrupt a literal '+' in the PEM
+// base64 alphabet.
+func xfccChainField(certs ...*testEntity) string {
+	var pemBlob strings.Builder
+	for _, c := range certs {
+		pemBlob.WriteString(c.pemCert())
+	}
+	return "Chain=" + url.PathEscape(pemBlob.String())
+}
+
+// ─── __wso2_internal_mtls_accept / _pool param construction ──────────────────
+
+// entrySpec is one accept-list entry, expressed with real certificates/SAN
+// values rather than the raw JSON-ish shape GetPolicy actually parses —
+// buildParams does that translation once, the same way the
+// gateway-controller's transform package would when injecting these params.
+type entrySpec struct {
+	ca          string
+	roots       []*testEntity
+	uriSANs     []string
+	dnsSANs     []string
+	thumbprints []string
+}
+
+func stringsToInterfaces(ss []string) []interface{} {
+	out := make([]interface{}, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
+}
+
+func entitiesToPEMInterfaces(entities []*testEntity) []interface{} {
+	out := make([]interface{}, len(entities))
+	for i, e := range entities {
+		out[i] = e.pemCert()
+	}
+	return out
+}
+
+func buildParams(pool []*testEntity, entries []entrySpec) map[string]interface{} {
+	acceptList := make([]interface{}, 0, len(entries))
+	for _, e := range entries {
+		obj := map[string]interface{}{
+			"ca":           e.ca,
+			"certificates": entitiesToPEMInterfaces(e.roots),
+		}
+		if len(e.uriSANs) > 0 || len(e.dnsSANs) > 0 {
+			match := map[string]interface{}{}
+			if len(e.uriSANs) > 0 {
+				match["uriSANs"] = stringsToInterfaces(e.uriSANs)
+			}
+			if len(e.dnsSANs) > 0 {
+				match["dnsSANs"] = stringsToInterfaces(e.dnsSANs)
+			}
+			obj["match"] = match
+		}
+		if len(e.thumbprints) > 0 {
+			obj["thumbprints"] = stringsToInterfaces(e.thumbprints)
+		}
+		acceptList = append(acceptList, obj)
+	}
+
+	return map[string]interface{}{
+		internalAcceptParam: acceptList,
+		internalPoolParam:   entitiesToPEMInterfaces(pool),
+	}
+}
+
+func mustBuildPolicy(t *testing.T, pool []*testEntity, entries []entrySpec) *MtlsAuthPolicy {
+	t.Helper()
+	p, err := GetPolicy(policy.PolicyMetadata{}, buildParams(pool, entries))
+	if err != nil {
+		t.Fatalf("GetPolicy returned an error: %v", err)
+	}
+	mp, ok := p.(*MtlsAuthPolicy)
+	if !ok {
+		t.Fatalf("GetPolicy returned %T, want *MtlsAuthPolicy", p)
+	}
+	return mp
+}
+
+// ─── Request-context / DownstreamTLS construction ────────────────────────────
+
+func boolPtr(b bool) *bool { return &b }
+
+func reqCtxWithTLS(tls *policy.DownstreamTLS) *policy.RequestHeaderContext {
+	return &policy.RequestHeaderContext{
+		SharedContext: &policy.SharedContext{},
+		Method:        "GET",
+		Path:          "/protected",
+		Downstream:    &policy.DownstreamContext{TLS: tls},
+	}
+}
+
+// downstreamTLSFromLeaf builds the DownstreamTLS Envoy would report for a
+// connection that presented leaf, with valid pinning Envoy's own
+// peer_certificate_valid verdict (Step 3 in evaluate()).
+func downstreamTLSFromLeaf(leaf *testEntity, valid bool) *policy.DownstreamTLS {
+	return &policy.DownstreamTLS{
+		MTLS:               true,
+		PeerCertificatePEM: leaf.pemCert(),
+		PeerCertValid:      boolPtr(valid),
+		SHA256Thumbprint:   leaf.thumbprint(),
+	}
+}
+
+// ─── Assertion helpers ────────────────────────────────────────────────────────
+
+// evaluateAndRespond exercises both surfaces the task requires: the
+// unexported evaluate() result (reason, matched entry) and the actual
+// OnRequestHeaders action (401 ImmediateResponse vs pass-through). evaluate()
+// is a pure read of reqCtx, so calling it directly and then letting
+// OnRequestHeaders call it again internally is safe — neither call mutates
+// reqCtx itself, only OnRequestHeaders's own AuthContext side effect below.
+func evaluateAndRespond(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderContext) (evaluationResult, policy.RequestHeaderAction) {
+	t.Helper()
+	result := p.evaluate(reqCtx, nil)
+	action := p.OnRequestHeaders(context.Background(), reqCtx, map[string]interface{}{})
+	return result, action
+}
+
+// assertDenied asserts evaluate() denied with wantReason AND that
+// OnRequestHeaders produced the identical 401 body — every deny path must
+// converge on the same response regardless of *why*, per error-handling.md's
+// unified-auth-failure directive, so this same byte-for-byte check runs on
+// every call site below rather than being asserted once in isolation.
+func assertDenied(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderContext, wantReason string) {
+	t.Helper()
+	result, action := evaluateAndRespond(t, p, reqCtx)
+	if result.authenticated {
+		t.Fatalf("evaluate(): authenticated = true, want false (reason would have been %q)", wantReason)
+	}
+	if result.reason != wantReason {
+		t.Errorf("evaluate() reason = %q, want %q", result.reason, wantReason)
+	}
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("OnRequestHeaders returned %T, want policy.ImmediateResponse", action)
+	}
+	if resp.StatusCode != 401 {
+		t.Errorf("StatusCode = %d, want 401", resp.StatusCode)
+	}
+	wantBody := `{"error":"Unauthorized","message":"Authentication failed"}`
+	if string(resp.Body) != wantBody {
+		t.Errorf("body = %q, want %q (deny body must be byte-identical regardless of reason %q)", resp.Body, wantBody, result.reason)
+	}
+}
+
+// assertAuthenticated asserts evaluate() authenticated at wantEntryIndex AND
+// that OnRequestHeaders produced a pass-through action rather than a 401.
+func assertAuthenticated(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderContext, wantEntryIndex int) evaluationResult {
+	t.Helper()
+	result, action := evaluateAndRespond(t, p, reqCtx)
+	if !result.authenticated {
+		t.Fatalf("evaluate(): authenticated = false, reason = %q, want true", result.reason)
+	}
+	if result.entryIndex != wantEntryIndex {
+		t.Errorf("evaluate() entryIndex = %d, want %d", result.entryIndex, wantEntryIndex)
+	}
+	if _, ok := action.(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Fatalf("OnRequestHeaders returned %T, want policy.UpstreamRequestHeaderModifications (pass-through)", action)
+	}
+	return result
+}
+
+// ─── Connection-level gating (Steps 1-3) ─────────────────────────────────────
+
+// TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating guards evaluate()'s
+// fail-closed handling of the three ways the gateway can assert "nothing
+// certain about this connection's certificate" — nil TLS, TLS populated but
+// no certificate presented, and Envoy's own verification verdict missing.
+// None of these may ever be treated as "no certificate required".
+func TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	p := mustBuildPolicy(t, []*testEntity{rootA}, []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}})
+
+	t.Run("TLS nil", func(t *testing.T) {
+		reqCtx := reqCtxWithTLS(nil)
+		assertDenied(t, p, reqCtx, reasonAttributeAbsent)
+	})
+	t.Run("MTLS false", func(t *testing.T) {
+		reqCtx := reqCtxWithTLS(&policy.DownstreamTLS{MTLS: false})
+		assertDenied(t, p, reqCtx, reasonNoCertificate)
+	})
+	t.Run("PeerCertValid nil", func(t *testing.T) {
+		reqCtx := reqCtxWithTLS(&policy.DownstreamTLS{MTLS: true, PeerCertValid: nil})
+		assertDenied(t, p, reqCtx, reasonAttributeAbsent)
+	})
+}
+
+// ─── Envoy already rejected: deriveRejectReason (Step 3 false branch) ────────
+
+// TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason covers the three
+// deriveRejectReason outcomes reachable when tls.PeerCertValid is a non-nil
+// false: date-based reasons short-circuit before any chain check, and a
+// pool-wide chain check distinguishes "genuinely untrusted" from other
+// causes.
+func TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	unrelatedRoot := newRootCA(t, "Unrelated Root CA")
+	p := mustBuildPolicy(t, []*testEntity{rootA}, []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}})
+
+	t.Run("expired leaf", func(t *testing.T) {
+		expired := newLeaf(t, rootA, "client-expired", certOpts{
+			notBefore: time.Now().Add(-2 * 365 * 24 * time.Hour),
+			notAfter:  time.Now().Add(-1 * 365 * 24 * time.Hour),
+		})
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(expired, false))
+		assertDenied(t, p, reqCtx, reasonExpired)
+	})
+
+	t.Run("not yet valid leaf", func(t *testing.T) {
+		notYetValid := newLeaf(t, rootA, "client-not-yet-valid", certOpts{
+			notBefore: time.Now().Add(1 * 365 * 24 * time.Hour),
+			notAfter:  time.Now().Add(11 * 365 * 24 * time.Hour),
+		})
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(notYetValid, false))
+		assertDenied(t, p, reqCtx, reasonNotYetValid)
+	})
+
+	t.Run("leaf from an unpooled CA", func(t *testing.T) {
+		leaf := newLeaf(t, unrelatedRoot, "client-wrong-ca", certOpts{})
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, false))
+		assertDenied(t, p, reqCtx, reasonUntrustedChain)
+	})
+}
+
+// ─── The happy path: full AuthContext population ─────────────────────────────
+
+// TestMtlsAuthPolicy_Evaluate_AuthenticatesAndPopulatesAuthContext is the one
+// dedicated test for the full authenticated outcome: every AuthContext field
+// OnRequestHeaders derives from evaluate()'s result, plus that an earlier
+// auth layer's AuthContext is preserved via Previous rather than discarded.
+func TestMtlsAuthPolicy_Evaluate_AuthenticatesAndPopulatesAuthContext(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	leaf := newLeaf(t, rootA, "client-valid", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
+
+	p := mustBuildPolicy(t, []*testEntity{rootA}, []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}})
+
+	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+	previous := &policy.AuthContext{Authenticated: true, AuthType: "jwt"} // sentinel: an earlier auth layer
+	reqCtx.SharedContext.AuthContext = previous
+
+	result := assertAuthenticated(t, p, reqCtx, 0)
+	if result.subject != "urn:partner-a:payments" {
+		t.Errorf("evaluate() subject = %q, want %q", result.subject, "urn:partner-a:payments")
+	}
+
+	auth := reqCtx.SharedContext.AuthContext
+	if auth == nil {
+		t.Fatal("expected AuthContext to be populated")
+	}
+	if !auth.Authenticated {
+		t.Error("AuthContext.Authenticated = false, want true")
+	}
+	if auth.AuthType != AuthType {
+		t.Errorf("AuthContext.AuthType = %q, want %q", auth.AuthType, AuthType)
+	}
+	if auth.Issuer != "auth-ca-a" {
+		t.Errorf("AuthContext.Issuer = %q, want %q", auth.Issuer, "auth-ca-a")
+	}
+	if auth.CredentialID != leaf.thumbprint() {
+		t.Errorf("AuthContext.CredentialID = %q, want %q", auth.CredentialID, leaf.thumbprint())
+	}
+	if auth.Subject != "urn:partner-a:payments" {
+		t.Errorf("AuthContext.Subject = %q, want %q", auth.Subject, "urn:partner-a:payments")
+	}
+	if auth.Properties["source"] != "connection" {
+		t.Errorf(`AuthContext.Properties["source"] = %q, want "connection"`, auth.Properties["source"])
+	}
+	if auth.Properties["matchedEntry"] != "0" {
+		t.Errorf(`AuthContext.Properties["matchedEntry"] = %q, want "0"`, auth.Properties["matchedEntry"])
+	}
+	if auth.Previous != previous {
+		t.Errorf("AuthContext.Previous = %+v, want the pre-existing AuthContext to be preserved", auth.Previous)
+	}
+}
+
+// ─── Path-building via the intermediate and the XFCC Chain element ──────────
+
+// TestMtlsAuthPolicy_Evaluate_IntermediateViaXFCCChain covers the four
+// XFCC-related scenarios: an intermediate missing entirely, the same
+// intermediate supplied via X-Forwarded-Client-Cert's Chain= element, that
+// same header ignored outright when MTLS is false, and a chain element that
+// can never be promoted to a trusted Root no matter how "complete" a path it
+// appears to close.
+func TestMtlsAuthPolicy_Evaluate_IntermediateViaXFCCChain(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	intermediateA := newIntermediateCA(t, rootA, "Partner A Issuing CA 1")
+	leaf := newLeaf(t, intermediateA, "client-via-intermediate", certOpts{})
+	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
+
+	t.Run("no XFCC: pool holds root only", func(t *testing.T) {
+		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+		// Realistic: the client presented only the leaf during the handshake
+		// (no intermediate), so Envoy's own verification against pool=[rootA]
+		// fails the same way deriveRejectReason's pool-wide check would.
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, false))
+		assertDenied(t, p, reqCtx, reasonUntrustedChain)
+	})
+
+	t.Run("XFCC Chain carries the intermediate: authenticated", func(t *testing.T) {
+		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+		// Realistic: the client presented leaf+intermediate during the TLS
+		// handshake, so Envoy verified successfully (pool root + client-supplied
+		// intermediate completes the path) and forwarded that same intermediate
+		// in X-Forwarded-Client-Cert's Chain element.
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+		reqCtx.Headers = policy.NewHeaders(map[string][]string{xfccHeaderName: {xfccChainField(intermediateA)}})
+		assertAuthenticated(t, p, reqCtx, 0)
+	})
+
+	t.Run("same XFCC but MTLS false: still denied, header never read", func(t *testing.T) {
+		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+		tls := downstreamTLSFromLeaf(leaf, true)
+		tls.MTLS = false
+		reqCtx := reqCtxWithTLS(tls)
+		reqCtx.Headers = policy.NewHeaders(map[string][]string{xfccHeaderName: {xfccChainField(intermediateA)}})
+		assertDenied(t, p, reqCtx, reasonNoCertificate)
+	})
+
+	t.Run("XFCC Chain ending in an unpooled self-consistent root never becomes a trusted root", func(t *testing.T) {
+		rogueRoot := newRootCA(t, "Rogue Root CA")
+		rogueLeaf := newLeaf(t, rogueRoot, "client-rogue", certOpts{})
+		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+		// PeerCertValid=true here isolates Steps 5-6's own chain-building logic
+		// from Step 3's Envoy-verdict gate, specifically to demonstrate that a
+		// self-signed CA certificate arriving via the XFCC Chain element is
+		// path-building material only — it never gets treated as a Root, no
+		// matter how "complete" a chain it appears to close.
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(rogueLeaf, true))
+		reqCtx.Headers = policy.NewHeaders(map[string][]string{xfccHeaderName: {xfccChainField(rogueRoot)}})
+		assertDenied(t, p, reqCtx, reasonNoMatchingEntry)
+	})
+}
+
+// ─── SAN narrowing ────────────────────────────────────────────────────────────
+
+// TestMtlsAuthPolicy_Evaluate_SANNarrowing covers uriSANs matching among
+// several leaf URIs, no match at all, and the both-uriSANs-and-dnsSANs case
+// where only one of the two narrowings is satisfied.
+func TestMtlsAuthPolicy_Evaluate_SANNarrowing(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+
+	t.Run("matches one of several leaf URIs", func(t *testing.T) {
+		entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}, uriSANs: []string{"urn:partner-a:payments"}}}
+		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+		// The leaf's FIRST URI deliberately does not match, proving the matched
+		// Subject comes from resolving against entry.uriSANs, not leaf.URIs[0].
+		leaf := newLeaf(t, rootA, "client-multi-uri", certOpts{
+			uriSANs: []string{"urn:partner-a:other", "urn:partner-a:payments"},
+		})
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+		result := assertAuthenticated(t, p, reqCtx, 0)
+		if result.subject != "urn:partner-a:payments" {
+			t.Errorf("subject = %q, want %q", result.subject, "urn:partner-a:payments")
+		}
+	})
+
+	t.Run("no matching URI", func(t *testing.T) {
+		entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}, uriSANs: []string{"urn:partner-a:payments"}}}
+		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+		leaf := newLeaf(t, rootA, "client-no-match", certOpts{uriSANs: []string{"urn:partner-a:other"}})
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+		assertDenied(t, p, reqCtx, reasonNoMatchingEntry)
+	})
+
+	t.Run("both uriSANs and dnsSANs configured, only one satisfied", func(t *testing.T) {
+		entries := []entrySpec{{
+			ca:      "auth-ca-a",
+			roots:   []*testEntity{rootA},
+			uriSANs: []string{"urn:partner-a:payments"},
+			dnsSANs: []string{"expected.partner-a.test"},
+		}}
+		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+		leaf := newLeaf(t, rootA, "client-partial-match", certOpts{
+			uriSANs: []string{"urn:partner-a:payments"}, // satisfies the uriSANs narrowing
+			dnsSANs: []string{"other.partner-a.test"},   // does NOT satisfy dnsSANs
+		})
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+		assertDenied(t, p, reqCtx, reasonNoMatchingEntry)
+	})
+}
+
+// ─── Thumbprint narrowing ─────────────────────────────────────────────────────
+
+func TestMtlsAuthPolicy_Evaluate_ThumbprintNarrowing(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	leaf := newLeaf(t, rootA, "client-valid", certOpts{})
+	other := newLeaf(t, rootA, "client-other", certOpts{})
+
+	t.Run("thumbprints containing the leaf's canonical hex: authenticated", func(t *testing.T) {
+		entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}, thumbprints: []string{leaf.thumbprint()}}}
+		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+		assertAuthenticated(t, p, reqCtx, 0)
+	})
+
+	t.Run("thumbprints not containing it: denied", func(t *testing.T) {
+		entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}, thumbprints: []string{other.thumbprint()}}}
+		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+		assertDenied(t, p, reqCtx, reasonNoMatchingEntry)
+	})
+}
+
+// ─── Multiple entries: first match wins, index recorded ─────────────────────
+
+// TestMtlsAuthPolicy_Evaluate_MultipleEntries_SecondMatches guards that
+// matchedEntry reflects the actual index that verified, not always "0".
+func TestMtlsAuthPolicy_Evaluate_MultipleEntries_SecondMatches(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	rootX := newRootCA(t, "Unrelated Root CA")
+	leaf := newLeaf(t, rootA, "client-valid", certOpts{})
+
+	entries := []entrySpec{
+		{ca: "auth-ca-x", roots: []*testEntity{rootX}}, // never matches this leaf
+		{ca: "auth-ca-a", roots: []*testEntity{rootA}}, // matches
+	}
+	p := mustBuildPolicy(t, []*testEntity{rootA, rootX}, entries)
+
+	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+	result := assertAuthenticated(t, p, reqCtx, 1)
+	if result.issuerCA != "auth-ca-a" {
+		t.Errorf("issuerCA = %q, want %q", result.issuerCA, "auth-ca-a")
+	}
+	if got := reqCtx.SharedContext.AuthContext.Properties["matchedEntry"]; got != "1" {
+		t.Errorf(`Properties["matchedEntry"] = %q, want "1"`, got)
+	}
+}
+
+// ─── Pool membership alone never grants access ───────────────────────────────
+
+// TestMtlsAuthPolicy_Evaluate_PoolMembershipAloneNeverGrantsAccess guards that
+// an authority merely being in the gateway's client-CA pool (and therefore
+// trusted at the connection level) is not sufficient — this API's own accept
+// list must separately name it.
+func TestMtlsAuthPolicy_Evaluate_PoolMembershipAloneNeverGrantsAccess(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	rootB := newRootCA(t, "Partner B Root CA")
+	leaf := newLeaf(t, rootB, "client-wrong-ca", certOpts{})
+
+	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
+	p := mustBuildPolicy(t, []*testEntity{rootB}, entries) // pool holds CA-B; accept list never names it
+
+	// PeerCertValid=true: realistic, since rootB genuinely is in the gateway's
+	// client-CA pool and the connection legitimately verified against it.
+	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+	assertDenied(t, p, reqCtx, reasonNoMatchingEntry)
+}
+
+// ─── Lookalike CA: verified cryptographically, never by comparing names ─────
+
+// TestMtlsAuthPolicy_Evaluate_LookalikeCA_SameDNDifferentKey_Denies is the
+// package doc comment's central security property made concrete: a CA
+// certificate whose distinguished name is byte-identical to a pooled,
+// accepted authority — but signed with a different key — must never verify.
+func TestMtlsAuthPolicy_Evaluate_LookalikeCA_SameDNDifferentKey_Denies(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	lookalikeCA := issueCert(t, "", certOpts{isCA: true, subject: rootA.cert.Subject})
+	leaf := newLeaf(t, lookalikeCA, "client-lookalike", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
+
+	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
+	p := mustBuildPolicy(t, []*testEntity{rootA}, entries) // pool holds the REAL rootA only, never the lookalike
+
+	// Realistic: Envoy's own verification against pool=[rootA] fails too,
+	// since the lookalike CA's DN matches rootA's byte-for-byte but its key
+	// does not.
+	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, false))
+	assertDenied(t, p, reqCtx, reasonUntrustedChain)
+}
+
+// ─── Verify must use ExtKeyUsageAny ──────────────────────────────────────────
+
+// TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny guards
+// against a regression to Go's x509.Verify default KeyUsages (which requires
+// ExtKeyUsageServerAuth) — every client-certificate fixture in this suite,
+// like production client certificates, carries clientAuth-only EKU and would
+// fail to verify at all under that default.
+func TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	leaf := newLeaf(t, rootA, "client-clientauth-only", certOpts{
+		ekus: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, // explicit, though also this file's default
+	})
+
+	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
+	p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
+
+	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
+	assertAuthenticated(t, p, reqCtx, 0)
+}
+
+// ─── GetPolicy bind-time validation ───────────────────────────────────────────
+
+// TestGetPolicy_MalformedPEM_ReturnsError guards GetPolicy's doc-commented
+// contract: a pool or accept-list certificate that isn't valid PEM/DER is a
+// bind-time error, never deferred to request time.
+func TestGetPolicy_MalformedPEM_ReturnsError(t *testing.T) {
+	t.Run("malformed pool certificate", func(t *testing.T) {
+		params := map[string]interface{}{
+			internalPoolParam: []interface{}{"not a valid PEM certificate"},
+		}
+		if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil {
+			t.Fatal("expected GetPolicy to return an error for a malformed pool certificate")
+		}
+	})
+
+	t.Run("malformed accept-list certificate", func(t *testing.T) {
+		params := map[string]interface{}{
+			internalAcceptParam: []interface{}{
+				map[string]interface{}{
+					"ca":           "auth-ca-a",
+					"certificates": []interface{}{"not a valid PEM certificate"},
+				},
+			},
+		}
+		if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil {
+			t.Fatal("expected GetPolicy to return an error for a malformed accept-list certificate")
+		}
+	})
 }

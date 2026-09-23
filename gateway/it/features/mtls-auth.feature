@@ -66,7 +66,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-san/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-san/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" <presenting>
     Then the response status code should be <status>
 
@@ -116,7 +116,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-san/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-san/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with no client certificate
     Then the response status code should be 401
     And the response body should be:
@@ -176,7 +176,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-thumb/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-thumb/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-thumb/v1.0/anything" with client certificate "client-valid"
     Then the response status code should be 200
     When I send a GET request to "https://localhost:8443/mtls-thumb/v1.0/anything" with client certificate "client-renewed"
@@ -213,7 +213,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-thumb/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-thumb/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-thumb/v1.0/anything" with client certificate "client-valid"
     Then the response status code should be 200
     When I send a GET request to "https://localhost:8443/mtls-thumb/v1.0/anything" with client certificate "client-renewed"
@@ -247,7 +247,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-san/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-san/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-no-san"
     Then the response status code should be 200
     When I update the API "mtls-san-api" with this configuration:
@@ -308,7 +308,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-san/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-san/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
     Given the certificate fixture "ca-b" is pooled as "auth-ca-b" with usage "client"
@@ -341,7 +341,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-pool/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-pool/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-pool/v1.0/anything" with client certificate "client-valid"
     Then the response status code should be 200
     When I send a GET request to "https://localhost:8443/mtls-pool/v1.0/anything" with client certificate "client-wrong-ca"
@@ -499,7 +499,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-anchor/v1.0/anything" <presenting>
     Then the response status code should be <status>
 
@@ -539,7 +539,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-anchor/v1.0/anything" <presenting>
     Then the response status code should be <status>
 
@@ -577,7 +577,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-anchor/v1.0/anything" <presenting>
     Then the response status code should be <status>
 
@@ -615,7 +615,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-anchor/v1.0/anything" <presenting>
     Then the response status code should be <status>
 
@@ -653,7 +653,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-anchor/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-anchor/v1.0/anything" <presenting>
     Then the response status code should be <status>
 
@@ -697,7 +697,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/mtls-and-jwt/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/mtls-and-jwt/v1.0/anything" to respond with status 401
     When I get a JWT token from the mock JWKS server with issuer "http://mock-jwks:8080/token"
     And I send a GET request to "https://localhost:8443/mtls-and-jwt/v1.0/anything" with the JWT token and client certificate "client-valid"
     Then the response status code should be 200

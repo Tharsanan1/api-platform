@@ -86,6 +86,28 @@ func (c *RequestHeaderContext) DownstreamHeaders() *Headers {
 	return c.DownstreamRequest().Headers
 }
 
+// PeerCertificate returns the connection-level TLS/mTLS facts the gateway
+// observed for this request, or nil.
+//
+// UNLIKE every other accessor in this file, PeerCertificate never falls back
+// to live header data — there is no live equivalent of a connection's TLS
+// state to fall back to, and inventing one from request headers (e.g. trusting
+// a client-sent X-Forwarded-Client-Cert) would let a caller spoof the very
+// fact this accessor exists to authenticate. A nil return means the gateway
+// asserts nothing about this connection's certificate, and a caller MUST
+// treat that as authentication failure — never as "no certificate required".
+// This covers both an older gateway that doesn't populate TLS at all and a
+// listener that isn't the derived mTLS-capable HTTPS listener; either way,
+// "unknown" and "fail closed" are the same outcome here.
+//
+// Nil-safe: may be called even when Downstream is nil.
+func (c *RequestHeaderContext) PeerCertificate() *DownstreamTLS {
+	if c == nil || c.Downstream == nil {
+		return nil
+	}
+	return c.Downstream.TLS
+}
+
 // DownstreamRequest returns the client request snapshot, or the live request
 // values when the gateway does not provide a snapshot.
 func (c *RequestContext) DownstreamRequest() *DownstreamRequest {

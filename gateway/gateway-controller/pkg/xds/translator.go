@@ -381,6 +381,17 @@ func (t *Translator) createRouteFromRDC(routeKey string, rdcRoute *models.Route,
 		r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, constants.TargetUpstreamHeader)
 	}
 
+	// Strip the forwarded client-certificate header before this route's own
+	// backend, unless this route's own policy chain contains mtls-auth. The
+	// router filter applies RequestHeadersToRemove after ext_proc, so the
+	// policy engine still evaluates the header where a chain needs it — only
+	// the header a public/unrelated backend would otherwise receive is
+	// removed, and a route with no chain at all is treated the same as one
+	// that doesn't attach mtls-auth.
+	if !chainAttachesMTLSAuth(rdc.PolicyChains[routeKey]) {
+		r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, xfccHeaderName)
+	}
+
 	// Build the request matchers (shared with direct-response routes so both kinds of
 	// route match identical requests).
 	r.Match.Headers = buildMatchHeaders(method, rdcRoute)
@@ -1380,6 +1391,21 @@ func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS b
 		NormalizePath:                wrapperspb.Bool(!t.routerConfig.HTTPListener.DisablePathNormalization),
 		MergeSlashes:                 !t.routerConfig.HTTPListener.DisablePathNormalization,
 		PathWithEscapedSlashesAction: convertPathWithEscapedSlashesAction(t.routerConfig.HTTPListener.PathWithEscapedSlashesAction),
+		// SANITIZE_SET (never APPEND_FORWARD): Envoy must overwrite whatever
+		// x-forwarded-client-cert a caller sent, so a forged header can never
+		// survive onto this connection's own value — mtls-auth's evaluation
+		// (and the per-route stripping in createRouteFromRDC for routes whose
+		// chain doesn't include it) is what decides whether a backend ever
+		// sees it. Shared between the HTTP and HTTPS listeners (both call this
+		// function); the WebSub hub's own listener is unaffected.
+		ForwardClientCertDetails: hcm.HttpConnectionManager_SANITIZE_SET,
+		SetCurrentClientCertDetails: &hcm.HttpConnectionManager_SetCurrentClientCertDetails{
+			Subject: wrapperspb.Bool(true),
+			Cert:    true,
+			Chain:   true,
+			Uri:     true,
+			Dns:     true,
+		},
 	}
 
 	// Add access logs if either consumer needs a sink: the operator-facing stdout
@@ -2566,6 +2592,29 @@ func policiesAttachMTLSAuth(policies *[]api.Policy) bool {
 		return false
 	}
 	for _, p := range *policies {
+		if p.Name == mtlsAuthPolicyName {
+			return true
+		}
+	}
+	return false
+}
+
+// xfccHeaderName is the forwarded-client-certificate header createListener's
+// SetCurrentClientCertDetails populates on the shared HTTP/HTTPS listener.
+// Stripped per route (see createRouteFromRDC) on every route whose own
+// resolved policy chain doesn't contain mtls-auth, so a backend with no
+// mtls-auth policy to evaluate it never receives it — regardless of what a
+// caller sent, since SANITIZE_SET already overwrites that.
+const xfccHeaderName = "x-forwarded-client-cert"
+
+// chainAttachesMTLSAuth reports whether a route's own resolved policy chain
+// (rdc.PolicyChains[routeKey]) contains mtls-auth. A nil chain — no chain was
+// built for this route — is treated the same as one that doesn't attach it.
+func chainAttachesMTLSAuth(chain *models.PolicyChain) bool {
+	if chain == nil {
+		return false
+	}
+	for _, p := range chain.Policies {
 		if p.Name == mtlsAuthPolicyName {
 			return true
 		}

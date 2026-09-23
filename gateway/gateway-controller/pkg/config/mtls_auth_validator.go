@@ -158,6 +158,16 @@ func collectMTLSAuthOccurrences(apiConfig *api.RestAPI) []mtlsOccurrence {
 	return occs
 }
 
+// HasMtlsAuthAttached reports whether apiConfig attaches mtls-auth anywhere —
+// at API level or on any single operation. Exposed so callers outside this
+// package (e.g. a certificate-upload/delete handler deciding which deployed
+// RestAPIs need their policy chain re-pushed after a client-CA pool change)
+// can ask the question without duplicating collectMTLSAuthOccurrences's
+// traversal.
+func HasMtlsAuthAttached(apiConfig *api.RestAPI) bool {
+	return len(collectMTLSAuthOccurrences(apiConfig)) > 0
+}
+
 // ValidateRestAPI reports every deploy-blocking problem with every mtls-auth
 // attachment on apiConfig. Called from PolicyValidator.ValidateRestAPIPolicies
 // alongside (not instead of) the generic per-policy validation that runs for
@@ -431,6 +441,15 @@ func normalizeThumbprint(raw string) (normalized string, changed bool, valid boo
 		return "", false, false
 	}
 	return s, s != raw, true
+}
+
+// NormalizeThumbprint is the exported form of normalizeThumbprint, reused by
+// the chain-build-time injection in pkg/transform so the canonical 64
+// lowercase hex form served to the mtls-auth policy engine (in
+// __wso2_internal_mtls_accept) is produced by exactly the same normaliser as
+// the deploy-response echo in ResolveMtlsAuthForResponse.
+func NormalizeThumbprint(raw string) (normalized string, changed bool, valid bool) {
+	return normalizeThumbprint(raw)
 }
 
 func unknownParamError(basePath, key string) ValidationError {

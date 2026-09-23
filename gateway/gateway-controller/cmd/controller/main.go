@@ -402,6 +402,12 @@ func main() {
 	// the policy engine then routes to upstream_* clusters that don't exist in Envoy,
 	// and every API returns 503 cluster_not_found until it is redeployed
 	restTransformer := transform.NewRestAPITransformer(&cfg.Router, cfg, policyDefinitions)
+	// The policy engine has no database access, so mtls-auth's accept list is
+	// resolved into certificate material at chain-build time — see
+	// pkg/transform/mtls_internal.go. db already satisfies
+	// config.MtlsAuthCertificateStore (the same lookups the deploy-time
+	// validator uses).
+	restTransformer.SetMtlsCertificateStore(db)
 	llmTransformer := transform.NewLLMTransformer(configStore, db, &cfg.Router, cfg, policyDefinitions, policyVersionResolver)
 	transformerRegistry := transform.NewRegistry(restTransformer, llmTransformer)
 

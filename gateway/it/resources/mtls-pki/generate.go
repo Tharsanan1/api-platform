@@ -274,7 +274,7 @@ func main() {
 		parent:  caA,
 		isCA:    true,
 	}))
-	track(issue("ca-b-same-dn", issueOpts{
+	caBSameDN := track(issue("ca-b-same-dn", issueOpts{
 		subject: caA.cert.Subject, // byte-identical DN to ca-a, different key
 		isCA:    true,
 	}))
@@ -307,6 +307,17 @@ func main() {
 		parent:  caA,
 		uriSANs: []string{"urn:partner-a:payments"},
 		dnsSANs: []string{"client-valid.partner-a.test"},
+	}))
+	track(issue("client-valid-extra-sans", issueOpts{
+		subject: pkix.Name{CommonName: "client-valid-extra-sans"},
+		parent:  caA,
+		uriSANs: []string{"urn:partner-a:payments", "urn:partner-a:other"},
+		dnsSANs: []string{"client-valid.partner-a.test", "other.partner-a.test"},
+	}))
+	track(issue("client-from-lookalike-ca", issueOpts{
+		subject: pkix.Name{CommonName: "client-lookalike"},
+		parent:  caBSameDN,
+		uriSANs: []string{"urn:partner-a:payments"},
 	}))
 	track(issue("client-via-intermediate", issueOpts{
 		subject: pkix.Name{CommonName: "client-via-intermediate"},
@@ -398,8 +409,13 @@ func main() {
 		parent:  clientSelfsigned, // a CA:FALSE issuer
 	}))
 	track(issue("client-renewed", issueOpts{
+		// Same subject AND same SANs as client-valid, but a fresh key (no
+		// reuseKey) so its thumbprint differs — this is what "renewed"
+		// means: the same identity, re-issued under a new keypair.
 		subject: clientValid.cert.Subject,
 		parent:  caA,
+		uriSANs: []string{"urn:partner-a:payments"},
+		dnsSANs: []string{"client-valid.partner-a.test"},
 	}))
 
 	// ---- Outbound mirror set ----

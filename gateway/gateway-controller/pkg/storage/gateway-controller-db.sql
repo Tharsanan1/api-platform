@@ -96,10 +96,15 @@ CREATE TABLE IF NOT EXISTS certificates (
     -- Usage separates backend/upstream trust (the original purpose of this
     -- table) from a pooled client certificate authority used for mutual TLS.
     -- The two purposes never share a trust bundle. Role only applies to
-    -- usage: client. Added in schema version 5; already-provisioned
-    -- databases get these via the ALTER TABLE path in sqlite.go's initSchema.
+    -- usage: client. match_json narrows a role: relay entry to the
+    -- connections it vouches for (JSON-encoded
+    -- {"dnsSANs": [...], "uriSANs": [...]}); NULL means unnarrowed, and it is
+    -- only meaningful for role: relay. All three added in schema version 5;
+    -- already-provisioned databases get them via the ALTER TABLE path in
+    -- sqlite.go's initSchema.
     usage TEXT NOT NULL DEFAULT 'upstream',
     role TEXT NOT NULL DEFAULT 'client',
+    match_json TEXT,
 
     -- Timestamps
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

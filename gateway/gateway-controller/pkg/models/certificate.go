@@ -48,18 +48,30 @@ const (
 	CertificateRoleRelay = "relay"
 )
 
+// CertificateMatch narrows a role: relay pool entry to the connections it
+// vouches for: a relayed header is only believed when the connection itself
+// authenticated as this relay entry AND (when Match is non-nil) its
+// certificate carries at least one of the listed SANs. A nil Match (the
+// common case) means the relay entry vouches for any connection
+// authenticated as it, with no further narrowing.
+type CertificateMatch struct {
+	DNSSANs []string `json:"dnsSANs,omitempty"`
+	URISANs []string `json:"uriSANs,omitempty"`
+}
+
 // StoredCertificate represents a certificate stored in the database
 type StoredCertificate struct {
-	UUID        string    `json:"uuid"`        // Unique UUID
-	Name        string    `json:"name"`        // Human-readable name
-	Certificate []byte    `json:"certificate"` // PEM-encoded certificate(s)
-	Subject     string    `json:"subject"`     // Certificate subject DN
-	Issuer      string    `json:"issuer"`      // Certificate issuer DN
-	NotBefore   time.Time `json:"notBefore"`   // Certificate validity start
-	NotAfter    time.Time `json:"notAfter"`    // Certificate validity end
-	CertCount   int       `json:"certCount"`   // Number of certs in bundle
-	Usage       string    `json:"usage"`       // "upstream" (default) or "client"
-	Role        string    `json:"role"`        // "client" (default) or "relay"; meaningful only for usage: client
-	CreatedAt   time.Time `json:"createdAt"`   // When uploaded
-	UpdatedAt   time.Time `json:"updatedAt"`   // Last modified
+	UUID        string            `json:"uuid"`            // Unique UUID
+	Name        string            `json:"name"`            // Human-readable name
+	Certificate []byte            `json:"certificate"`     // PEM-encoded certificate(s)
+	Subject     string            `json:"subject"`         // Certificate subject DN
+	Issuer      string            `json:"issuer"`          // Certificate issuer DN
+	NotBefore   time.Time         `json:"notBefore"`       // Certificate validity start
+	NotAfter    time.Time         `json:"notAfter"`        // Certificate validity end
+	CertCount   int               `json:"certCount"`       // Number of certs in bundle
+	Usage       string            `json:"usage"`           // "upstream" (default) or "client"
+	Role        string            `json:"role"`            // "client" (default) or "relay"; meaningful only for usage: client
+	Match       *CertificateMatch `json:"match,omitempty"` // Only meaningful for role: relay; nil means unnarrowed
+	CreatedAt   time.Time         `json:"createdAt"`       // When uploaded
+	UpdatedAt   time.Time         `json:"updatedAt"`       // Last modified
 }

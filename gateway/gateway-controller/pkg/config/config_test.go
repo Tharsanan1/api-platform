@@ -1075,6 +1075,49 @@ func TestDefaultConfig_AdminServerDefaults(t *testing.T) {
 	assert.Equal(t, []string{"*"}, cfg.Controller.AdminServer.AllowedIPs)
 }
 
+// TestDefaultConfig_ClientCertificateHeaderDefaults guards the shipped
+// default for router.downstream_tls.client_certificate_header: the header
+// name a front proxy is expected to use, and both narrow opt-ins
+// (trust_any/forward_to_backend) off.
+func TestDefaultConfig_ClientCertificateHeaderDefaults(t *testing.T) {
+	cfg := defaultConfig()
+	h := cfg.Router.DownstreamTLS.ClientCertificateHeader
+	assert.Equal(t, "X-WSO2-CLIENT-CERTIFICATE", h.Name)
+	assert.False(t, h.TrustAny)
+	assert.False(t, h.ForwardToBackend)
+}
+
+// TestConfig_ValidateClientCertificateHeaderName guards
+// ValidateClientCertificateHeaderName's RFC 7230 tchar enforcement, wired
+// into Config.Validate() unconditionally (independent of https_enabled).
+func TestConfig_ValidateClientCertificateHeaderName(t *testing.T) {
+	tests := []struct {
+		name        string
+		headerName  string
+		wantErr     bool
+		errContains string
+	}{
+		{name: "shipped default", headerName: "X-WSO2-CLIENT-CERTIFICATE", wantErr: false},
+		{name: "empty is not validated, same convention as other DownstreamTLS string fields", headerName: "", wantErr: false},
+		{name: "space is not a valid tchar", headerName: "X Bad", wantErr: true, errContains: "is not a valid HTTP header name"},
+		{name: "colon is not a valid tchar", headerName: "X:Y", wantErr: true, errContains: "is not a valid HTTP header name"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Router.DownstreamTLS.ClientCertificateHeader.Name = tt.headerName
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestConfig_Validate_HTTPSPort(t *testing.T) {
 	tests := []struct {
 		name         string

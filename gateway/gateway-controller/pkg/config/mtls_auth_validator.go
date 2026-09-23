@@ -38,6 +38,13 @@ const (
 	WarningCodeMTLSAcceptUnnarrowed     = "MTLS_ACCEPT_UNNARROWED"
 	WarningCodeMTLSAuthNotFirst         = "MTLS_AUTH_NOT_FIRST"
 	WarningCodeMTLSThumbprintNormalised = "MTLS_THUMBPRINT_NORMALISED"
+
+	// WarningCodeHeaderCertBypassActive is attached to every mtls-auth
+	// deploy response while
+	// router.downstream_tls.client_certificate_header.trust_any is true: the
+	// relayed-certificate header is believed from any connection, so the
+	// connection presenting it is never consulted.
+	WarningCodeHeaderCertBypassActive = "HEADER_CERT_BYPASS_ACTIVE"
 )
 
 // mtlsAuthAllowedParams is the set of top-level parameter names mtls-auth
@@ -93,15 +100,27 @@ type MtlsAuthCertificateStore interface {
 // never authenticate anyone (empty pool, an accept list naming nothing
 // reachable) must be refused rather than silently deployed inert.
 type MtlsAuthValidator struct {
-	store        MtlsAuthCertificateStore
-	httpsEnabled bool
+	store          MtlsAuthCertificateStore
+	httpsEnabled   bool
+	headerTrustAny bool
 }
 
 // NewMtlsAuthValidator creates a validator bound to the gateway's
 // certificate store and its (static, config-file-sourced) HTTPS-listener
-// enablement.
+// enablement. Defaults headerTrustAny to false — call SetHeaderTrustAny to
+// mirror router.downstream_tls.client_certificate_header.trust_any.
 func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled bool) *MtlsAuthValidator {
 	return &MtlsAuthValidator{store: store, httpsEnabled: httpsEnabled}
+}
+
+// SetHeaderTrustAny mirrors
+// router.downstream_tls.client_certificate_header.trust_any onto this
+// validator: when true, the HTTPS-listener requirement is relaxed (a relayed
+// header can legitimately arrive over plaintext from a trusted front proxy)
+// and every resolved response carries WarningCodeHeaderCertBypassActive.
+func (v *MtlsAuthValidator) SetHeaderTrustAny(trustAny bool) *MtlsAuthValidator {
+	v.headerTrustAny = trustAny
+	return v
 }
 
 // mtlsOccurrence is one place mtls-auth is attached in a RestAPI: either the
@@ -168,6 +187,53 @@ func HasMtlsAuthAttached(apiConfig *api.RestAPI) bool {
 	return len(collectMTLSAuthOccurrences(apiConfig)) > 0
 }
 
+// NamedAcceptEntryFieldPaths returns, in document order, the field path of
+// every accept entry across every mtls-auth occurrence on apiConfig (API- or
+// operation-level) whose `ca` explicitly names caName. An omitted `accept`
+// (inheriting the whole pool) never contributes a path here — this reports
+// only an EXPLICIT reference, which is what makes a client-CA authority
+// unremovable while the reference stands (see the certificate-delete
+// referential-integrity check in pkg/api/handlers/certificates.go).
+func NamedAcceptEntryFieldPaths(apiConfig *api.RestAPI, caName string) []string {
+	var paths []string
+	for _, occ := range collectMTLSAuthOccurrences(apiConfig) {
+		acceptRaw, hasAccept := occ.params["accept"]
+		if !hasAccept {
+			continue
+		}
+		acceptSlice, ok := acceptRaw.([]interface{})
+		if !ok {
+			continue
+		}
+		for j, entryRaw := range acceptSlice {
+			entryMap, ok := entryRaw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name, _ := entryMap["ca"].(string)
+			if strings.TrimSpace(name) == caName {
+				paths = append(paths, fmt.Sprintf("%s.params.accept[%d].ca", occ.fieldPath, j))
+			}
+		}
+	}
+	return paths
+}
+
+// MtlsAuthAttachmentFieldPaths returns the field path of every mtls-auth
+// occurrence on apiConfig (spec.policies[i] or an operation's
+// spec.operations[k].policies[j]), in document order — used to build one 409
+// error entry per referencing API when the client-CA pool is about to lose
+// its last non-relay authority while some deployed API still attaches
+// mtls-auth (whether or not it names that authority explicitly).
+func MtlsAuthAttachmentFieldPaths(apiConfig *api.RestAPI) []string {
+	occs := collectMTLSAuthOccurrences(apiConfig)
+	paths := make([]string, 0, len(occs))
+	for _, occ := range occs {
+		paths = append(paths, occ.fieldPath)
+	}
+	return paths
+}
+
 // ValidateRestAPI reports every deploy-blocking problem with every mtls-auth
 // attachment on apiConfig. Called from PolicyValidator.ValidateRestAPIPolicies
 // alongside (not instead of) the generic per-policy validation that runs for
@@ -216,7 +282,7 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 	}
 
 	for _, occ := range occs {
-		if !v.httpsEnabled {
+		if !v.httpsEnabled && !v.headerTrustAny {
 			errs = append(errs, ValidationError{
 				Field:   occ.fieldPath,
 				Message: "mtls-auth requires the HTTPS listener, which is disabled on this gateway",
@@ -524,6 +590,14 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 	}
 	apiConfig.Spec.Operations = newOps
 
+	if v.headerTrustAny {
+		warnings = append(warnings, clientca.Warning{
+			Code:    WarningCodeHeaderCertBypassActive,
+			Field:   "",
+			Message: "the client certificate header is believed from any connection (trust_any = true)",
+		})
+	}
+
 	return apiConfig, warnings
 }
 
@@ -666,8 +740,27 @@ func (v *MtlsAuthValidator) resolveOnePolicy(p api.Policy, fieldPath string, poo
 // startup state and fail closed (refuse to start) rather than silently
 // running with a listener that can never satisfy an already-deployed API's
 // authentication requirement.
+//
+// This is the headerTrustAny=false case of
+// ValidateMTLSStartupInvariantForRouter; kept as its own entry point so
+// existing callers/tests that only ever cared about https_enabled don't need
+// to thread the header config through.
 func ValidateMTLSStartupInvariant(configs []*models.StoredConfig, httpsEnabled bool) error {
-	if httpsEnabled {
+	return validateMTLSStartupInvariant(configs, httpsEnabled, false)
+}
+
+// ValidateMTLSStartupInvariantForRouter is ValidateMTLSStartupInvariant with
+// the same trust_any relaxation ValidateRestAPI applies at deploy time:
+// headerTrustAny mirrors
+// router.downstream_tls.client_certificate_header.trust_any, and when true
+// the HTTPS-listener requirement is relaxed — a relayed header can
+// legitimately arrive over plaintext from a trusted front proxy.
+func ValidateMTLSStartupInvariantForRouter(configs []*models.StoredConfig, httpsEnabled, headerTrustAny bool) error {
+	return validateMTLSStartupInvariant(configs, httpsEnabled, headerTrustAny)
+}
+
+func validateMTLSStartupInvariant(configs []*models.StoredConfig, httpsEnabled, headerTrustAny bool) error {
+	if httpsEnabled || headerTrustAny {
 		return nil
 	}
 	for _, cfg := range configs {

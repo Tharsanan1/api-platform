@@ -30,6 +30,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -99,18 +100,19 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 		return c, nil
 	})
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
-		// Every API this scenario deployed (tracked generically in
-		// steps_api.go, regardless of which deploy step or feature it went
-		// through) is already deleted by the time this hook runs:
-		// RegisterAPISteps registers its own After hook ahead of this one in
-		// suite_test.go, and godog runs After hooks in registration order.
-		// So it's safe to clean up pooled certificates here without
-		// separately deleting the referencing API ourselves.
+		// A pooled certificate cannot be removed while a deployed API still
+		// references it (or while it is the last authority an mtls-auth API
+		// depends on), so the APIs this scenario deployed must be gone first.
+		// Delete them here explicitly instead of relying on the order godog
+		// runs After hooks in; a second deletion by the API steps' own hook
+		// is a harmless 404.
+		cleanupDeployedAPIs(m.state, m.httpSteps)
 		m.cleanup()
 		return c, nil
 	})
 
 	// ---- Uploading ----
+	ctx.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)" and dns SAN "([^"]*)"$`, m.uploadFixtureWithUsageRoleAndDNSSAN)
 	ctx.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)"$`, m.uploadFixtureWithUsageAndRole)
 	ctx.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)" with usage "([^"]*)"$`, m.uploadFixtureWithUsage)
 	ctx.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)"$`, m.uploadFixtureNoUsage)
@@ -120,8 +122,9 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^I upload to the certificates endpoint the body:$`, m.uploadRawBody)
 	ctx.Step(`^I upload a certificate body of (\d+) megabytes as "([^"]*)" with usage "([^"]*)"$`, m.uploadOversizedBody)
 
-	// ---- Deploying with fixture-derived values ----
+	// ---- Deploying/updating with fixture-derived values ----
 	ctx.Step(`^I deploy this API configuration with fixture values:$`, m.deployWithFixtureValues)
+	ctx.Step(`^I update the API "([^"]*)" with this configuration with fixture values:$`, m.updateWithFixtureValues)
 
 	// ---- Listing assertions ----
 	// Listing itself is done via the existing generic
@@ -152,8 +155,12 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 
 	// ---- Requests carrying (or omitting) a client certificate ----
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and its chain$`, m.getWithClientCertificateAndChain)
+	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and header "([^"]*)" carrying certificate "([^"]*)" encoded as "([^"]*)"$`, m.getWithClientCertificateAndHeaderCertificateEncoded)
+	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and header "([^"]*)" carrying certificate "([^"]*)"$`, m.getWithClientCertificateAndHeaderCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)"$`, m.getWithClientCertificate)
+	ctx.Step(`^I send a GET request to "([^"]*)" with no client certificate and header "([^"]*)" carrying certificate "([^"]*)"$`, m.getWithNoClientCertificateAndHeaderCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with no client certificate$`, m.getWithNoClientCertificate)
+	ctx.Step(`^I send a GET request to "([^"]*)" with header "([^"]*)" carrying certificate "([^"]*)"$`, m.getWithHeaderCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with the JWT token and client certificate "([^"]*)"$`, m.getWithJWTTokenAndClientCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with the JWT token and no client certificate$`, m.getWithJWTTokenAndNoClientCertificate)
 
@@ -162,6 +169,7 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 
 	// ---- Deploy-response warnings ----
 	ctx.Step(`^the response should include a warning with code "([^"]*)" for field "([^"]*)"$`, m.responseShouldIncludeWarningWithCodeForField)
+	ctx.Step(`^the response should include a warning with code "([^"]*)"$`, m.responseShouldIncludeWarningWithCode)
 	ctx.Step(`^the response should include no warnings$`, m.responseShouldIncludeNoWarnings)
 }
 
@@ -280,6 +288,19 @@ func (m *mtlsSteps) deployWithFixtureValues(body *godog.DocString) error {
 	return deployAPIConfiguration(m.state, m.httpSteps, resolved)
 }
 
+// updateWithFixtureValues is deployWithFixtureValues' update-in-place
+// counterpart: it expands {{thumbprint "name"}} markers in the docstring and
+// then delegates to the same updateAPIConfiguration (steps_api.go) the plain
+// "I update the API ... with this configuration:" step uses, so a fingerprint
+// cut-over scenario can update an API's accept list by fixture thumbprint.
+func (m *mtlsSteps) updateWithFixtureValues(apiName string, body *godog.DocString) error {
+	resolved, err := m.resolveThumbprintTemplates(body.Content)
+	if err != nil {
+		return err
+	}
+	return updateAPIConfiguration(m.httpSteps, apiName, resolved)
+}
+
 // ============ Uploading ============
 
 func (m *mtlsSteps) recordUploaded(name string) {
@@ -287,6 +308,12 @@ func (m *mtlsSteps) recordUploaded(name string) {
 }
 
 func (m *mtlsSteps) uploadRaw(name, certPEM, usage, role string) error {
+	return m.uploadRawWithMatch(name, certPEM, usage, role, nil)
+}
+
+// uploadRawWithMatch is uploadRaw plus an optional "match" clause (e.g. a
+// dnsSANs narrowing on a relay entry) included in the upload body when given.
+func (m *mtlsSteps) uploadRawWithMatch(name, certPEM, usage, role string, match map[string]any) error {
 	m.recordUploaded(name)
 
 	body := map[string]any{
@@ -298,6 +325,9 @@ func (m *mtlsSteps) uploadRaw(name, certPEM, usage, role string) error {
 	}
 	if role != "" {
 		body["role"] = role
+	}
+	if match != nil {
+		body["match"] = match
 	}
 
 	bodyBytes, err := json.Marshal(body)
@@ -331,6 +361,19 @@ func (m *mtlsSteps) uploadFixtureWithUsageAndRole(fixture, name, usage, role str
 		return err
 	}
 	return m.uploadRaw(name, string(certPEM), usage, role)
+}
+
+// uploadFixtureWithUsageRoleAndDNSSAN uploads fixture as a relay entry (or any
+// role) narrowed by a single DNS SAN — a relay entry vouches only for a
+// connection whose own certificate carries that SAN.
+func (m *mtlsSteps) uploadFixtureWithUsageRoleAndDNSSAN(fixture, name, usage, role, dnsSAN string) error {
+	certPEM, err := m.readFixtureCert(fixture)
+	if err != nil {
+		return err
+	}
+	return m.uploadRawWithMatch(name, string(certPEM), usage, role, map[string]any{
+		"dnsSANs": []string{dnsSAN},
+	})
 }
 
 func (m *mtlsSteps) uploadFixturesWithUsage(fixtureList, name, usage string) error {
@@ -777,6 +820,104 @@ func (m *mtlsSteps) getWithNoClientCertificate(url string) error {
 	return m.httpSteps.SendRequestWithClient(m.tlsClientNoCertificate(), http.MethodGet, url)
 }
 
+// ============ Requests carrying a client certificate in a header ============
+//
+// A front proxy that terminates TLS relays the client certificate it saw to
+// the gateway in a header instead of (or alongside) its own TLS handshake.
+// These steps build that header value and set it for one request only, using
+// the same restore-afterwards pattern as useBearerTokenForOneRequest so it
+// never leaks into a later request that must be sent without it.
+
+// Header encodings a front proxy might use for a relayed client certificate.
+const (
+	headerCertEncodingURL    = "url"    // default: the PEM text, URL-path-escaped
+	headerCertEncodingPEM    = "pem"    // raw PEM text, newlines replaced by spaces
+	headerCertEncodingBase64 = "base64" // bare base64 of the DER bytes, no PEM armor
+)
+
+// encodeCertificateForHeader renders fixture "name"'s certificate the way a
+// front proxy would place it in a header, per the requested encoding. An
+// empty encoding means the default: "url".
+func (m *mtlsSteps) encodeCertificateForHeader(name, encoding string) (string, error) {
+	certPEM, err := m.readFixtureCert(name)
+	if err != nil {
+		return "", err
+	}
+	switch encoding {
+	case "", headerCertEncodingURL:
+		return url.PathEscape(string(certPEM)), nil
+	case headerCertEncodingPEM:
+		// HTTP headers cannot carry a literal newline; several proxies emit
+		// the PEM text with newlines replaced by spaces instead of encoding it.
+		return strings.ReplaceAll(string(certPEM), "\n", " "), nil
+	case headerCertEncodingBase64:
+		cert, err := m.parseFixtureCert(name)
+		if err != nil {
+			return "", err
+		}
+		return base64.StdEncoding.EncodeToString(cert.Raw), nil
+	default:
+		return "", fmt.Errorf("unknown certificate header encoding %q", encoding)
+	}
+}
+
+// useHeaderForOneRequest sets header name to value for the next request only
+// and returns a function that restores whatever was in place before it -
+// the same one-shot pattern as useBearerTokenForOneRequest, generalized to an
+// arbitrary header.
+func (m *mtlsSteps) useHeaderForOneRequest(name, value string) func() {
+	previous, had := m.httpSteps.Header(name)
+	m.httpSteps.SetHeader(name, value)
+	return func() {
+		if had {
+			m.httpSteps.SetHeader(name, previous)
+		} else {
+			m.httpSteps.RemoveHeader(name)
+		}
+	}
+}
+
+// getWithClientCertificateAndHeaderCertificate sends a request presenting
+// certName as the TLS client certificate while relaying certFixture, encoded
+// the default way (url), in headerName.
+func (m *mtlsSteps) getWithClientCertificateAndHeaderCertificate(reqURL, certName, headerName, certFixture string) error {
+	return m.getWithClientCertificateAndHeaderCertificateEncoded(reqURL, certName, headerName, certFixture, "")
+}
+
+// getWithClientCertificateAndHeaderCertificateEncoded is the same pairing,
+// with an explicit header encoding ("url", "pem", or "base64").
+func (m *mtlsSteps) getWithClientCertificateAndHeaderCertificateEncoded(reqURL, certName, headerName, certFixture, encoding string) error {
+	encoded, err := m.encodeCertificateForHeader(certFixture, encoding)
+	if err != nil {
+		return err
+	}
+	restore := m.useHeaderForOneRequest(headerName, encoded)
+	defer restore()
+	return m.getWithClientCertificate(reqURL, certName)
+}
+
+// getWithNoClientCertificateAndHeaderCertificate presents no TLS client
+// certificate at all while relaying certFixture (default encoding) in
+// headerName - the case where the connection itself carries no identity and
+// only the header claims one.
+func (m *mtlsSteps) getWithNoClientCertificateAndHeaderCertificate(reqURL, headerName, certFixture string) error {
+	encoded, err := m.encodeCertificateForHeader(certFixture, "")
+	if err != nil {
+		return err
+	}
+	restore := m.useHeaderForOneRequest(headerName, encoded)
+	defer restore()
+	return m.getWithNoClientCertificate(reqURL)
+}
+
+// getWithHeaderCertificate sends a request over plaintext HTTP or over HTTPS
+// without presenting any client certificate, relaying certFixture (default
+// encoding) in headerName. Shares tlsClientNoCertificate's per-request client:
+// its TLS settings are simply unused when reqURL is a plain http:// URL.
+func (m *mtlsSteps) getWithHeaderCertificate(reqURL, headerName, certFixture string) error {
+	return m.getWithNoClientCertificateAndHeaderCertificate(reqURL, headerName, certFixture)
+}
+
 // requireJWTToken guards the two steps below exactly like steps_jwt.go's own
 // "with the JWT token" steps do, so the failure mode (call the token-fetch
 // step first) is identical whether or not a client certificate is involved.
@@ -902,6 +1043,22 @@ func (m *mtlsSteps) responseShouldIncludeWarningWithCodeForField(code, field str
 		}
 	}
 	return fmt.Errorf("no warning with code %q for field %q found in %v", code, field, warnings)
+}
+
+// responseShouldIncludeWarningWithCode is responseShouldIncludeWarningWithCodeForField
+// without the field constraint, for a warning (e.g. HEADER_CERT_BYPASS_ACTIVE)
+// that isn't tied to one particular field.
+func (m *mtlsSteps) responseShouldIncludeWarningWithCode(code string) error {
+	warnings, err := m.responseWarnings()
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		if fmt.Sprint(w["code"]) == code {
+			return nil
+		}
+	}
+	return fmt.Errorf("no warning with code %q found in %v", code, warnings)
 }
 
 func (m *mtlsSteps) responseShouldIncludeNoWarnings() error {

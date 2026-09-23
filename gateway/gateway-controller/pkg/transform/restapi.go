@@ -462,7 +462,11 @@ func (t *RestAPITransformer) buildPolicyChain(
 	// this chain gets handed its resolved certificate material here, at
 	// chain-build time — see mtls_internal.go. No-op when mtlsCertStore is
 	// unset or the chain has no mtls-auth instance.
-	injectMtlsInternalParams(result, t.mtlsCertStore)
+	var headerConfig config.ClientCertificateHeader
+	if t.routerConfig != nil {
+		headerConfig = t.routerConfig.DownstreamTLS.ClientCertificateHeader
+	}
+	injectMtlsInternalParams(result, t.mtlsCertStore, headerConfig)
 
 	return result
 }

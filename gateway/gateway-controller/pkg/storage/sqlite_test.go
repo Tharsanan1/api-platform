@@ -743,6 +743,72 @@ func TestSQLiteStorage_SaveCertificate_DefaultsEmptyUsageAndRole(t *testing.T) {
 	assert.Equal(t, retrieved.Role, models.CertificateRoleClient)
 }
 
+// TestSQLiteStorage_SaveCertificate_RoundTripsMatchJSON_RelayRow guards
+// match_json's round trip for a role: relay row carrying a narrowing Match:
+// both DNSSANs and URISANs must come back exactly as saved.
+func TestSQLiteStorage_SaveCertificate_RoundTripsMatchJSON_RelayRow(t *testing.T) {
+	store := setupTestStorage(t)
+	defer store.db.Close()
+
+	cert := createTestStoredCertificate()
+	cert.Usage = models.CertificateUsageClient
+	cert.Role = models.CertificateRoleRelay
+	cert.Match = &models.CertificateMatch{
+		DNSSANs: []string{"lb.corp.test"},
+		URISANs: []string{"urn:partner-a:payments"},
+	}
+
+	assert.NilError(t, store.SaveCertificate(cert))
+
+	retrieved, err := store.GetCertificate(cert.UUID)
+	assert.NilError(t, err)
+	if retrieved.Match == nil {
+		t.Fatal("expected a non-nil Match on the retrieved relay row")
+	}
+	assert.DeepEqual(t, retrieved.Match.DNSSANs, cert.Match.DNSSANs)
+	assert.DeepEqual(t, retrieved.Match.URISANs, cert.Match.URISANs)
+
+	// The same row read back via ListCertificates/ListCertificatesByUsage
+	// (a separate scan path) must carry the identical Match.
+	byUsage, err := store.ListCertificatesByUsage(models.CertificateUsageClient)
+	assert.NilError(t, err)
+	found := false
+	for _, c := range byUsage {
+		if c.UUID == cert.UUID {
+			found = true
+			if c.Match == nil {
+				t.Fatal("expected a non-nil Match from ListCertificatesByUsage")
+			}
+			assert.DeepEqual(t, c.Match.DNSSANs, cert.Match.DNSSANs)
+		}
+	}
+	if !found {
+		t.Fatalf("saved certificate %q not found via ListCertificatesByUsage", cert.UUID)
+	}
+}
+
+// TestSQLiteStorage_SaveCertificate_MatchJSON_NilForNonRelayRows guards the
+// other half of the contract: a client-role row (and, by the same code path,
+// any upstream-usage row) with no Match set persists match_json as NULL and
+// reads back as a nil Match — never an empty JSON object/array.
+func TestSQLiteStorage_SaveCertificate_MatchJSON_NilForNonRelayRows(t *testing.T) {
+	store := setupTestStorage(t)
+	defer store.db.Close()
+
+	cert := createTestStoredCertificate()
+	cert.Usage = models.CertificateUsageClient
+	cert.Role = models.CertificateRoleClient
+	cert.Match = nil
+
+	assert.NilError(t, store.SaveCertificate(cert))
+
+	retrieved, err := store.GetCertificate(cert.UUID)
+	assert.NilError(t, err)
+	if retrieved.Match != nil {
+		t.Fatalf("expected a nil Match for a non-relay row, got %+v", retrieved.Match)
+	}
+}
+
 func TestSQLiteStorage_ListCertificatesByUsage(t *testing.T) {
 	store := setupTestStorage(t)
 	defer store.db.Close()
@@ -829,6 +895,12 @@ func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Equal(t, existing.Usage, models.CertificateUsageUpstream)
 	assert.Equal(t, existing.Role, models.CertificateRoleClient)
+	// match_json is nullable with no default (unlike usage/role): the
+	// pre-existing row must read back with a nil Match, never an error or an
+	// empty-but-non-nil one.
+	if existing.Match != nil {
+		t.Fatalf("expected a nil Match for the pre-migration row, got %+v", existing.Match)
+	}
 
 	newCert := createTestStoredCertificate()
 	newCert.Usage = models.CertificateUsageClient
@@ -837,6 +909,45 @@ func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
 	saved, err := upgraded.GetCertificate(newCert.UUID)
 	assert.NilError(t, err)
 	assert.Equal(t, saved.Usage, models.CertificateUsageClient)
+
+	// The migration must also have added match_json itself: assert the
+	// column exists (a raw PRAGMA table_info probe, independent of the
+	// StoredCertificate round trip above) and that a relay row carrying a
+	// Match saves and reads back correctly on this freshly upgraded database.
+	sqlDB := upgraded.(*sqlStore).db
+	rows, err := sqlDB.Query(`PRAGMA table_info(certificates)`)
+	assert.NilError(t, err)
+	defer rows.Close()
+	hasMatchJSONColumn := false
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dfltValue sql.NullString
+		assert.NilError(t, rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk))
+		if name == "match_json" {
+			hasMatchJSONColumn = true
+		}
+	}
+	assert.NilError(t, rows.Err())
+	if !hasMatchJSONColumn {
+		t.Fatal("expected the migrated schema to have a certificates.match_json column")
+	}
+
+	relayCert := createTestStoredCertificate()
+	relayCert.UUID = "post-upgrade-relay-cert"
+	relayCert.Name = "post-upgrade-relay-cert"
+	relayCert.Usage = models.CertificateUsageClient
+	relayCert.Role = models.CertificateRoleRelay
+	relayCert.Match = &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}}
+	assert.NilError(t, upgraded.SaveCertificate(relayCert))
+
+	savedRelay, err := upgraded.GetCertificate(relayCert.UUID)
+	assert.NilError(t, err)
+	if savedRelay.Match == nil {
+		t.Fatal("expected a non-nil Match for the relay row saved after upgrading a v4 database")
+	}
+	assert.DeepEqual(t, savedRelay.Match.DNSSANs, relayCert.Match.DNSSANs)
 }
 
 func TestSQLiteStorage_GetAPIKeyByID_NotFound(t *testing.T) {

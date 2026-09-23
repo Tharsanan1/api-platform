@@ -285,6 +285,116 @@ func TestBuildPolicyChain_MtlsAuth_NoInjectionForOtherPolicies(t *testing.T) {
 	assert.False(t, hasPool, "a non-mtls-auth policy must never get the internal pool param")
 }
 
+// ============ __wso2_internal_mtls_relays ============
+
+// TestBuildPolicyChain_MtlsAuth_RelaysParam_ListsRelayRowsWithMatch guards
+// __wso2_internal_mtls_relays: it lists every usage: client, role: relay pool
+// row (never a plain client row), and a "match" key is present only for a
+// relay row that was actually stored with a narrowing Match.
+func TestBuildPolicyChain_MtlsAuth_RelaysParam_ListsRelayRowsWithMatch(t *testing.T) {
+	clientEntry := clientCA(t, "auth-ca-a")
+	relayNoMatch := relayCA(t, "auth-ca-relay-no-match")
+	relayWithMatch := relayCA(t, "auth-ca-relay-with-match")
+	relayWithMatch.Match = &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}}
+	store := newFakeMtlsCertStore(clientEntry, relayNoMatch, relayWithMatch)
+
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
+	transformer.SetMtlsCertificateStore(store)
+
+	cfg := makeRestAPIStoredConfig([]api.Policy{mtlsAuthPolicy(nil)}, nil)
+
+	rdc, err := transformer.Transform(cfg)
+	require.NoError(t, err)
+	p := findPolicy(rdc, mtlsAuthTestRouteKey, config.MtlsAuthPolicyName)
+	require.NotNil(t, p)
+
+	relays := asInterfaceSlice(t, p.Params[mtlsInternalRelaysParam])
+	require.Len(t, relays, 2, "the client (non-relay) row must be excluded from __wso2_internal_mtls_relays")
+
+	byName := map[string]map[string]interface{}{}
+	for _, raw := range relays {
+		entry, ok := raw.(map[string]interface{})
+		require.True(t, ok)
+		byName[entry["name"].(string)] = entry
+	}
+
+	noMatchEntry, ok := byName["auth-ca-relay-no-match"]
+	require.True(t, ok)
+	_, hasMatch := noMatchEntry["match"]
+	assert.False(t, hasMatch, "a relay row with no stored Match must carry no match key at all")
+	certs := asInterfaceSlice(t, noMatchEntry["certificates"])
+	assert.Len(t, certs, 1)
+
+	withMatchEntry, ok := byName["auth-ca-relay-with-match"]
+	require.True(t, ok)
+	matchRaw, hasMatch := withMatchEntry["match"]
+	require.True(t, hasMatch, "a relay row with a stored Match must carry a match key")
+	matchMap, ok := matchRaw.(map[string]interface{})
+	require.True(t, ok)
+	dnsSANs := asInterfaceSlice(t, matchMap["dnsSANs"])
+	require.Len(t, dnsSANs, 1)
+	assert.Equal(t, "lb.corp.test", dnsSANs[0])
+}
+
+// TestBuildPolicyChain_MtlsAuth_RelaysParam_EmptyWhenNoRelays guards the
+// "none" case: buildMtlsRelaysMaterial always sets the param (never omits
+// it), so a pool with no relay rows resolves to an empty array, not an
+// absent key — and the policy (mtlsauth.go's parseRelaysParam) tolerates
+// either shape, so this pins down which one the controller actually sends.
+func TestBuildPolicyChain_MtlsAuth_RelaysParam_EmptyWhenNoRelays(t *testing.T) {
+	clientEntry := clientCA(t, "auth-ca-a")
+	store := newFakeMtlsCertStore(clientEntry) // no relay rows at all
+
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
+	transformer.SetMtlsCertificateStore(store)
+
+	cfg := makeRestAPIStoredConfig([]api.Policy{mtlsAuthPolicy(nil)}, nil)
+
+	rdc, err := transformer.Transform(cfg)
+	require.NoError(t, err)
+	p := findPolicy(rdc, mtlsAuthTestRouteKey, config.MtlsAuthPolicyName)
+	require.NotNil(t, p)
+
+	relaysRaw, present := p.Params[mtlsInternalRelaysParam]
+	require.True(t, present, "the relays param must still be present as an empty array, not omitted")
+	relays := asInterfaceSlice(t, relaysRaw)
+	assert.Len(t, relays, 0)
+}
+
+// ============ __wso2_internal_mtls_header ============
+
+// TestBuildPolicyChain_MtlsAuth_HeaderParam_CarriesRouterConfig guards that
+// __wso2_internal_mtls_header mirrors
+// router.downstream_tls.client_certificate_header exactly — the policy
+// engine's only source of that config, since it runs outside the controller
+// process.
+func TestBuildPolicyChain_MtlsAuth_HeaderParam_CarriesRouterConfig(t *testing.T) {
+	clientEntry := clientCA(t, "auth-ca-a")
+	store := newFakeMtlsCertStore(clientEntry)
+
+	routerCfg := testRouterCfg()
+	routerCfg.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{
+		Name:             "X-Custom-Client-Cert",
+		TrustAny:         true,
+		ForwardToBackend: true,
+	}
+	transformer := NewRestAPITransformer(routerCfg, &config.Config{}, mtlsAuthDefs())
+	transformer.SetMtlsCertificateStore(store)
+
+	cfg := makeRestAPIStoredConfig([]api.Policy{mtlsAuthPolicy(nil)}, nil)
+
+	rdc, err := transformer.Transform(cfg)
+	require.NoError(t, err)
+	p := findPolicy(rdc, mtlsAuthTestRouteKey, config.MtlsAuthPolicyName)
+	require.NotNil(t, p)
+
+	header, ok := p.Params[mtlsInternalHeaderParam].(map[string]interface{})
+	require.Truef(t, ok, "expected %s to be a map[string]interface{}, got %T", mtlsInternalHeaderParam, p.Params[mtlsInternalHeaderParam])
+	assert.Equal(t, "X-Custom-Client-Cert", header["name"])
+	assert.Equal(t, true, header["trustAny"])
+	assert.Equal(t, true, header["forwardToBackend"])
+}
+
 func TestBuildPolicyChain_MtlsAuth_NilStore_NoInjection(t *testing.T) {
 	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs())
 	// SetMtlsCertificateStore deliberately not called: mtlsCertStore stays nil.

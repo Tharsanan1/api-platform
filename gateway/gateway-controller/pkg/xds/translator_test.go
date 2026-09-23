@@ -3612,3 +3612,101 @@ func TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSA
 	assert.NotContains(t, mtlsRoute.RequestHeadersToRemove, xfccHeaderName,
 		"a route whose chain attaches mtls-auth must not strip x-forwarded-client-cert")
 }
+
+// mtlsHeaderStrippingRDC is the same two-route (plain-route/mtls-route)
+// shape TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSAuth
+// uses, reused here for the relayed client-certificate header's own
+// stripping rule.
+func mtlsHeaderStrippingRDC() *models.RuntimeDeployConfig {
+	return &models.RuntimeDeployConfig{
+		Metadata: models.Metadata{UUID: "u", Kind: "RestApi"},
+		Routes: map[string]*models.Route{
+			"plain-route": {
+				Method: "GET", Path: "/plain-api/resource", OperationPath: "/resource",
+				Upstream: models.RouteUpstream{ClusterKey: "backend"},
+			},
+			"mtls-route": {
+				Method: "GET", Path: "/mtls-api/resource", OperationPath: "/resource",
+				Upstream: models.RouteUpstream{ClusterKey: "backend"},
+			},
+		},
+		PolicyChains: map[string]*models.PolicyChain{
+			"mtls-route": {Policies: []models.Policy{{Name: "mtls-auth", Version: "v1.0.0"}}},
+		},
+		UpstreamClusters: map[string]*models.UpstreamCluster{
+			"backend": {BasePath: "/", Endpoints: []models.Endpoint{{Host: "backend.example.com", Port: 8080}}},
+		},
+	}
+}
+
+func findRoutesByName(t *testing.T, routes []*route.Route) (plainRoute, mtlsRoute *route.Route) {
+	t.Helper()
+	for _, r := range routes {
+		switch r.GetName() {
+		case "plain-route":
+			plainRoute = r
+		case "mtls-route":
+			mtlsRoute = r
+		}
+	}
+	require.NotNil(t, plainRoute, "expected to find the plain (no mtls-auth) route")
+	require.NotNil(t, mtlsRoute, "expected to find the mtls-auth route")
+	return plainRoute, mtlsRoute
+}
+
+// TestTranslator_CreateRouteFromRDC_StripsClientCertificateHeader_UnlessBelieved
+// is the relayed client-certificate header's own per-route stripping rule
+// (go-network-service-hardening.md/mtls-header-forward feature): a route
+// whose chain doesn't attach mtls-auth strips the configured header
+// unconditionally, since no policy in that chain could ever have believed
+// it — regardless of forward_to_backend.
+func TestTranslator_CreateRouteFromRDC_StripsClientCertificateHeader_UnlessBelieved(t *testing.T) {
+	t.Run("forward_to_backend false: both routes strip it", func(t *testing.T) {
+		translator := createTestTranslator()
+		translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{
+			Name:             "X-WSO2-CLIENT-CERTIFICATE",
+			ForwardToBackend: false,
+		}
+
+		routes, _, err := translator.translateRuntimeConfig(mtlsHeaderStrippingRDC())
+		require.NoError(t, err)
+		plainRoute, mtlsRoute := findRoutesByName(t, routes)
+
+		assert.Contains(t, plainRoute.RequestHeadersToRemove, "x-wso2-client-certificate")
+		assert.Contains(t, mtlsRoute.RequestHeadersToRemove, "x-wso2-client-certificate",
+			"forward_to_backend is false: even the mtls-auth route must strip it")
+	})
+
+	t.Run("forward_to_backend true: only the non-mtls-auth route strips it", func(t *testing.T) {
+		translator := createTestTranslator()
+		translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{
+			Name:             "X-WSO2-CLIENT-CERTIFICATE",
+			ForwardToBackend: true,
+		}
+
+		routes, _, err := translator.translateRuntimeConfig(mtlsHeaderStrippingRDC())
+		require.NoError(t, err)
+		plainRoute, mtlsRoute := findRoutesByName(t, routes)
+
+		assert.Contains(t, plainRoute.RequestHeadersToRemove, "x-wso2-client-certificate",
+			"a route with no mtls-auth must strip the header regardless of forward_to_backend")
+		assert.NotContains(t, mtlsRoute.RequestHeadersToRemove, "x-wso2-client-certificate",
+			"forward_to_backend is true: the mtls-auth route keeps the header for the policy to forward")
+	})
+
+	t.Run("header name is lower-cased before being added to RequestHeadersToRemove", func(t *testing.T) {
+		translator := createTestTranslator()
+		translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{
+			Name:             "X-Amzn-Mtls-Clientcert",
+			ForwardToBackend: false,
+		}
+
+		routes, _, err := translator.translateRuntimeConfig(mtlsHeaderStrippingRDC())
+		require.NoError(t, err)
+		plainRoute, _ := findRoutesByName(t, routes)
+
+		assert.Contains(t, plainRoute.RequestHeadersToRemove, "x-amzn-mtls-clientcert")
+		assert.NotContains(t, plainRoute.RequestHeadersToRemove, "X-Amzn-Mtls-Clientcert",
+			"the configured header name must be lower-cased, not added as-authored")
+	})
+}

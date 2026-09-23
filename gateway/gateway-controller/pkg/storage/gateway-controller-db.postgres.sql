@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS certificates (
     -- bundle. role only applies to usage: client.
     usage TEXT NOT NULL DEFAULT 'upstream',
     role TEXT NOT NULL DEFAULT 'client',
+    -- match_json narrows a role: relay entry to the connections it vouches
+    -- for (JSON-encoded {"dnsSANs": [...], "uriSANs": [...]}); NULL means
+    -- unnarrowed. Only meaningful for role: relay.
+    match_json TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (gateway_id, uuid),
@@ -95,6 +99,7 @@ CREATE TABLE IF NOT EXISTS certificates (
 -- above is a no-op against them): add the columns if this table pre-dates them.
 ALTER TABLE certificates ADD COLUMN IF NOT EXISTS usage TEXT NOT NULL DEFAULT 'upstream';
 ALTER TABLE certificates ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'client';
+ALTER TABLE certificates ADD COLUMN IF NOT EXISTS match_json TEXT;
 
 -- LLM Provider Templates table
 CREATE TABLE IF NOT EXISTS llm_provider_templates (

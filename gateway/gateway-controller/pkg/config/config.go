@@ -21,6 +21,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -686,6 +687,64 @@ type DownstreamTLS struct {
 	// instance out of any further config changes until the operator fixes it. Confirm the
 	// deployed Envoy/BoringSSL build supports the group before enabling it.
 	EcdhCurves string `koanf:"ecdh_curves"`
+
+	// ClientCertificateHeader configures the header carrying a client
+	// certificate relayed by a front proxy that terminates TLS ahead of this
+	// gateway. See mtls-header-relay/bypass/forward features and
+	// ClientCertificateHeader's own doc comment.
+	ClientCertificateHeader ClientCertificateHeader `koanf:"client_certificate_header"`
+}
+
+// ClientCertificateHeader configures how the mtls-auth policy treats a
+// client certificate relayed via an HTTP header (e.g. from a load balancer
+// that terminates TLS) rather than presented directly on the mTLS
+// connection. By default, the header is believed only when the connection
+// itself authenticated as a role: relay pool entry (see
+// pkg/transform/mtls_internal.go's __wso2_internal_mtls_relays); TrustAny and
+// ForwardToBackend are both narrow, off-by-default opt-ins.
+type ClientCertificateHeader struct {
+	// Name is the HTTP header carrying the relayed client certificate (PEM
+	// or base64-encoded PEM). Must be a valid HTTP header token (RFC 7230
+	// tchar), never empty.
+	Name string `koanf:"name"`
+
+	// TrustAny, when true, believes the header on ANY connection — the
+	// connection presenting it is never consulted, not even for a role:
+	// relay entry. Only safe when this gateway is reachable from nothing but
+	// a trusted front proxy; every mtls-auth deployment carries a
+	// HEADER_CERT_BYPASS_ACTIVE warning while this is true, and a startup
+	// WARN is logged once. Off by default.
+	TrustAny bool `koanf:"trust_any"`
+
+	// ForwardToBackend, when true, forwards a header the gateway believed
+	// (evaluated by mtls-auth on this route) to the backend instead of
+	// stripping it. A header the gateway did NOT believe (no relay entry
+	// vouched for it, or the route's own chain never evaluated it) is always
+	// stripped regardless of this setting. Off by default.
+	ForwardToBackend bool `koanf:"forward_to_backend"`
+}
+
+// httpHeaderTokenPattern matches a single HTTP header field-name token per
+// RFC 7230 section 3.2.6 (tchar+): letters, digits, and
+// "!#$%&'*+-.^_`|~" — no spaces, no separators, no control characters.
+var httpHeaderTokenPattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
+
+// ValidateClientCertificateHeaderName reports whether name is a valid HTTP
+// header token (RFC 7230 tchar). An empty name is not validated here — same
+// convention as router.downstream_tls.ciphers/ecdh_curves in this file — but
+// the shipped default config always populates it (defaultConfig), so this
+// only ever accepts a genuinely blank override, never silently drops
+// enforcement for a normally-configured gateway. Exported so callers outside
+// this package (deploy-time/response-warning wiring) can reuse the exact
+// same check without re-implementing it.
+func ValidateClientCertificateHeaderName(name string) error {
+	if name == "" {
+		return nil
+	}
+	if !httpHeaderTokenPattern.MatchString(name) {
+		return fmt.Errorf("router.downstream_tls.client_certificate_header.name %q is not a valid HTTP header name", name)
+	}
+	return nil
 }
 
 // VHostsConfig for vhosts configuration
@@ -1277,6 +1336,11 @@ func defaultConfig() *Config {
 				MaximumProtocolVersion: "TLS1_3",
 				Ciphers:                "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
 				EcdhCurves:             "X25519,P-256",
+				ClientCertificateHeader: ClientCertificateHeader{
+					Name:             "X-WSO2-CLIENT-CERTIFICATE",
+					TrustAny:         false,
+					ForwardToBackend: false,
+				},
 			},
 			GatewayHost: "*",
 			Upstream: RouterUpstream{
@@ -1748,6 +1812,13 @@ func (c *Config) Validate() error {
 		if c.Router.HTTPSPort < 1 || c.Router.HTTPSPort > 65535 {
 			return fmt.Errorf("router.https_port must be between 1 and 65535, got: %d", c.Router.HTTPSPort)
 		}
+	}
+
+	// Validate the relayed client-certificate header's name unconditionally —
+	// a header-relay/bypass deployment is valid regardless of https_enabled
+	// (trust_any lets the header arrive over plaintext, per go-network-service-hardening.md).
+	if err := ValidateClientCertificateHeaderName(c.Router.DownstreamTLS.ClientCertificateHeader.Name); err != nil {
+		return err
 	}
 
 	// Validate EventHub configuration

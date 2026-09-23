@@ -388,8 +388,22 @@ func (t *Translator) createRouteFromRDC(routeKey string, rdcRoute *models.Route,
 	// the header a public/unrelated backend would otherwise receive is
 	// removed, and a route with no chain at all is treated the same as one
 	// that doesn't attach mtls-auth.
-	if !chainAttachesMTLSAuth(rdc.PolicyChains[routeKey]) {
+	routeHasMTLSAuth := chainAttachesMTLSAuth(rdc.PolicyChains[routeKey])
+	if !routeHasMTLSAuth {
 		r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, xfccHeaderName)
+	}
+
+	// Strip the relayed client-certificate header the same way, with one
+	// difference: when the operator has opted into forward_to_backend, a
+	// route WITH mtls-auth keeps it (the policy itself decides whether to
+	// forward what it believed) — every other route strips it unconditionally,
+	// since only a chain that evaluated the header could ever have believed
+	// it. See go-network-service-hardening.md and the mtls-header-forward
+	// feature contract.
+	if clientCertHeaderName := t.routerConfig.DownstreamTLS.ClientCertificateHeader.Name; clientCertHeaderName != "" {
+		if !routeHasMTLSAuth || !t.routerConfig.DownstreamTLS.ClientCertificateHeader.ForwardToBackend {
+			r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, strings.ToLower(clientCertHeaderName))
+		}
 	}
 
 	// Build the request matchers (shared with direct-response routes so both kinds of

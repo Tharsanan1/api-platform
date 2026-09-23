@@ -1915,6 +1915,33 @@ func (s *sqlStore) GetLLMProviderTemplateByHandle(handle string) (*models.Stored
 	return &template, nil
 }
 
+// certificateMatchToJSON marshals a CertificateMatch (only meaningful for
+// role: relay entries) into the nullable match_json column value. A nil
+// match persists as SQL NULL ("unnarrowed"), never the literal string "null".
+func certificateMatchToJSON(match *models.CertificateMatch) (sql.NullString, error) {
+	if match == nil {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(match)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("failed to encode certificate match: %w", err)
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+// certificateMatchFromJSON reverses certificateMatchToJSON. A NULL/empty
+// column value decodes to a nil match (unnarrowed).
+func certificateMatchFromJSON(ns sql.NullString) (*models.CertificateMatch, error) {
+	if !ns.Valid || ns.String == "" {
+		return nil, nil
+	}
+	var match models.CertificateMatch
+	if err := json.Unmarshal([]byte(ns.String), &match); err != nil {
+		return nil, fmt.Errorf("failed to decode stored certificate match: %w", err)
+	}
+	return &match, nil
+}
+
 // SaveCertificate persists a certificate to the database
 func (s *sqlStore) SaveCertificate(cert *models.StoredCertificate) error {
 	usage := cert.Usage
@@ -1925,15 +1952,19 @@ func (s *sqlStore) SaveCertificate(cert *models.StoredCertificate) error {
 	if role == "" {
 		role = models.CertificateRoleClient
 	}
+	matchJSON, err := certificateMatchToJSON(cert.Match)
+	if err != nil {
+		return err
+	}
 
 	query := `
 		INSERT INTO certificates (
 			uuid, gateway_id, name, certificate, subject, issuer,
-			not_before, not_after, cert_count, usage, role, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			not_before, not_after, cert_count, usage, role, match_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	_, err := s.exec(query,
+	_, err = s.exec(query,
 		cert.UUID,
 		s.gatewayId,
 		cert.Name,
@@ -1945,6 +1976,7 @@ func (s *sqlStore) SaveCertificate(cert *models.StoredCertificate) error {
 		cert.CertCount,
 		usage,
 		role,
+		matchJSON,
 		cert.CreatedAt,
 		cert.UpdatedAt,
 	)
@@ -1964,12 +1996,13 @@ func (s *sqlStore) SaveCertificate(cert *models.StoredCertificate) error {
 func (s *sqlStore) GetCertificate(id string) (*models.StoredCertificate, error) {
 	query := `
 		SELECT uuid, name, certificate, subject, issuer,
-		       not_before, not_after, cert_count, usage, role, created_at, updated_at
+		       not_before, not_after, cert_count, usage, role, match_json, created_at, updated_at
 		FROM certificates
 		WHERE uuid = ? AND gateway_id = ?
 	`
 
 	var cert models.StoredCertificate
+	var matchJSON sql.NullString
 	err := s.queryRow(query, id, s.gatewayId).Scan(
 		&cert.UUID,
 		&cert.Name,
@@ -1981,6 +2014,7 @@ func (s *sqlStore) GetCertificate(id string) (*models.StoredCertificate, error) 
 		&cert.CertCount,
 		&cert.Usage,
 		&cert.Role,
+		&matchJSON,
 		&cert.CreatedAt,
 		&cert.UpdatedAt,
 	)
@@ -1992,6 +2026,12 @@ func (s *sqlStore) GetCertificate(id string) (*models.StoredCertificate, error) 
 		return nil, fmt.Errorf("failed to get certificate: %w", err)
 	}
 
+	match, err := certificateMatchFromJSON(matchJSON)
+	if err != nil {
+		return nil, err
+	}
+	cert.Match = match
+
 	return &cert, nil
 }
 
@@ -1999,12 +2039,13 @@ func (s *sqlStore) GetCertificate(id string) (*models.StoredCertificate, error) 
 func (s *sqlStore) GetCertificateByName(name string) (*models.StoredCertificate, error) {
 	query := `
 		SELECT uuid, name, certificate, subject, issuer,
-		       not_before, not_after, cert_count, usage, role, created_at, updated_at
+		       not_before, not_after, cert_count, usage, role, match_json, created_at, updated_at
 		FROM certificates
 		WHERE name = ? AND gateway_id = ?
 	`
 
 	var cert models.StoredCertificate
+	var matchJSON sql.NullString
 	err := s.queryRow(query, name, s.gatewayId).Scan(
 		&cert.UUID,
 		&cert.Name,
@@ -2016,6 +2057,7 @@ func (s *sqlStore) GetCertificateByName(name string) (*models.StoredCertificate,
 		&cert.CertCount,
 		&cert.Usage,
 		&cert.Role,
+		&matchJSON,
 		&cert.CreatedAt,
 		&cert.UpdatedAt,
 	)
@@ -2027,6 +2069,12 @@ func (s *sqlStore) GetCertificateByName(name string) (*models.StoredCertificate,
 		return nil, fmt.Errorf("failed to get certificate by name: %w", err)
 	}
 
+	match, err := certificateMatchFromJSON(matchJSON)
+	if err != nil {
+		return nil, err
+	}
+	cert.Match = match
+
 	return &cert, nil
 }
 
@@ -2034,7 +2082,7 @@ func (s *sqlStore) GetCertificateByName(name string) (*models.StoredCertificate,
 func (s *sqlStore) ListCertificates() ([]*models.StoredCertificate, error) {
 	query := `
 		SELECT uuid, name, certificate, subject, issuer,
-		       not_before, not_after, cert_count, usage, role, created_at, updated_at
+		       not_before, not_after, cert_count, usage, role, match_json, created_at, updated_at
 		FROM certificates
 		WHERE gateway_id = ?
 		ORDER BY created_at DESC
@@ -2058,7 +2106,7 @@ func (s *sqlStore) ListCertificates() ([]*models.StoredCertificate, error) {
 func (s *sqlStore) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
 	query := `
 		SELECT uuid, name, certificate, subject, issuer,
-		       not_before, not_after, cert_count, usage, role, created_at, updated_at
+		       not_before, not_after, cert_count, usage, role, match_json, created_at, updated_at
 		FROM certificates
 		WHERE gateway_id = ? AND usage = ?
 		ORDER BY created_at DESC
@@ -2084,6 +2132,7 @@ func scanCertificateRows(rows *sql.Rows) ([]*models.StoredCertificate, error) {
 	var certs []*models.StoredCertificate
 	for rows.Next() {
 		var cert models.StoredCertificate
+		var matchJSON sql.NullString
 		if err := rows.Scan(
 			&cert.UUID,
 			&cert.Name,
@@ -2095,11 +2144,17 @@ func scanCertificateRows(rows *sql.Rows) ([]*models.StoredCertificate, error) {
 			&cert.CertCount,
 			&cert.Usage,
 			&cert.Role,
+			&matchJSON,
 			&cert.CreatedAt,
 			&cert.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan certificate: %w", err)
 		}
+		match, err := certificateMatchFromJSON(matchJSON)
+		if err != nil {
+			return nil, err
+		}
+		cert.Match = match
 		certs = append(certs, &cert)
 	}
 

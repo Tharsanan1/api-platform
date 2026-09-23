@@ -80,6 +80,20 @@ func deployAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, body s
 	return nil
 }
 
+// updateAPIConfiguration PUTs a RestApi configuration to the gateway
+// controller under the given API name and waits out policy propagation.
+// Shared by the plain "I update the API ... with this configuration:" step
+// below and the fixture-values update step in steps_mtls.go, so both go
+// through a single implementation.
+func updateAPIConfiguration(httpSteps *steps.HTTPSteps, apiName, body string) error {
+	httpSteps.SetHeader("Content-Type", "application/yaml")
+	if err := httpSteps.SendPUTToService("gateway-controller", "/rest-apis/"+apiName, &godog.DocString{Content: body}); err != nil {
+		return err
+	}
+	time.Sleep(policyPropagationDelay)
+	return nil
+}
+
 // cleanupDeployedAPIs deletes every API name this scenario recorded via
 // deployAPIConfiguration, authenticating as admin. Best-effort: a scenario
 // that already deleted its own API explicitly gets a silent 404 here, and a
@@ -139,13 +153,7 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 	})
 
 	ctx.Step(`^I update the API "([^"]*)" with this configuration:$`, func(apiName string, body *godog.DocString) error {
-		httpSteps.SetHeader("Content-Type", "application/yaml")
-		err := httpSteps.SendPUTToService("gateway-controller", "/rest-apis/"+apiName, body)
-		if err != nil {
-			return err
-		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return updateAPIConfiguration(httpSteps, apiName, body.Content)
 	})
 
 	ctx.Step(`^I get the API "([^"]*)"$`, func(name string) error {

@@ -26,10 +26,12 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"math/big"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -417,6 +419,88 @@ func mustBuildPolicy(t *testing.T, pool []*testEntity, entries []entrySpec) *Mtl
 	return mp
 }
 
+// ─── __wso2_internal_mtls_relays / _header param construction ────────────────
+
+// relaySpec is one relay-list entry, expressed with real certificates/SAN
+// values rather than the raw JSON-ish shape GetPolicy actually parses — the
+// same translation entrySpec/buildParams do for __wso2_internal_mtls_accept.
+type relaySpec struct {
+	name    string
+	roots   []*testEntity
+	uriSANs []string
+	dnsSANs []string
+}
+
+// buildParamsWithHeader is buildParams plus the two header-relay params.
+// nil relays/header means the corresponding param is omitted entirely
+// (absent, not an empty array/object) — matching parseRelaysParam/
+// parseHeaderParam's documented "absent means off" contract.
+func buildParamsWithHeader(pool []*testEntity, entries []entrySpec, relays []relaySpec, header map[string]interface{}) map[string]interface{} {
+	params := buildParams(pool, entries)
+
+	if relays != nil {
+		relayList := make([]interface{}, 0, len(relays))
+		for _, r := range relays {
+			obj := map[string]interface{}{
+				"name":         r.name,
+				"certificates": entitiesToPEMInterfaces(r.roots),
+			}
+			if len(r.uriSANs) > 0 || len(r.dnsSANs) > 0 {
+				match := map[string]interface{}{}
+				if len(r.uriSANs) > 0 {
+					match["uriSANs"] = stringsToInterfaces(r.uriSANs)
+				}
+				if len(r.dnsSANs) > 0 {
+					match["dnsSANs"] = stringsToInterfaces(r.dnsSANs)
+				}
+				obj["match"] = match
+			}
+			relayList = append(relayList, obj)
+		}
+		params[internalRelaysParam] = relayList
+	}
+
+	if header != nil {
+		params[internalHeaderParam] = header
+	}
+	return params
+}
+
+func mustBuildRelayPolicy(t *testing.T, pool []*testEntity, entries []entrySpec, relays []relaySpec, header map[string]interface{}) *MtlsAuthPolicy {
+	t.Helper()
+	p, err := GetPolicy(policy.PolicyMetadata{}, buildParamsWithHeader(pool, entries, relays, header))
+	if err != nil {
+		t.Fatalf("GetPolicy returned an error: %v", err)
+	}
+	mp, ok := p.(*MtlsAuthPolicy)
+	if !ok {
+		t.Fatalf("GetPolicy returned %T, want *MtlsAuthPolicy", p)
+	}
+	return mp
+}
+
+// ─── Header-value encodings a front proxy might emit ─────────────────────────
+
+// urlEncodedPEMHeaderValue is the default encoding: the PEM text, RFC 3986
+// percent-encoded — url.PathEscape, matching decodeHeaderCertificate's
+// url.PathUnescape fallback.
+func urlEncodedPEMHeaderValue(e *testEntity) string {
+	return url.PathEscape(e.pemCert())
+}
+
+// pemWithSpacesHeaderValue is the raw PEM text with newlines replaced by
+// spaces — an HTTP header cannot carry a literal newline, and this is what
+// several proxies emit instead of percent-encoding it.
+func pemWithSpacesHeaderValue(e *testEntity) string {
+	return strings.ReplaceAll(e.pemCert(), "\n", " ")
+}
+
+// bareBase64DERHeaderValue is the bare base64 of the certificate's DER bytes,
+// with no PEM armor at all.
+func bareBase64DERHeaderValue(e *testEntity) string {
+	return base64.StdEncoding.EncodeToString(e.der)
+}
+
 // ─── Request-context / DownstreamTLS construction ────────────────────────────
 
 func boolPtr(b bool) *bool { return &b }
@@ -427,6 +511,26 @@ func reqCtxWithTLS(tls *policy.DownstreamTLS) *policy.RequestHeaderContext {
 		Method:        "GET",
 		Path:          "/protected",
 		Downstream:    &policy.DownstreamContext{TLS: tls},
+	}
+}
+
+// reqCtxWithTLSAndHeader is reqCtxWithTLS plus a downstream snapshot carrying
+// headerName: headerValue, driving evaluate()'s header-relay decision path via
+// Downstream.Request.Headers — the snapshot headerRawValue reads (see
+// policy.RequestHeaderContext.DownstreamRequest's doc comment on why the
+// snapshot, not the top-level Headers fallback, is what a policy should read
+// for an authentication decision).
+func reqCtxWithTLSAndHeader(tls *policy.DownstreamTLS, headerName, headerValue string) *policy.RequestHeaderContext {
+	return &policy.RequestHeaderContext{
+		SharedContext: &policy.SharedContext{},
+		Method:        "GET",
+		Path:          "/protected",
+		Downstream: &policy.DownstreamContext{
+			TLS: tls,
+			Request: &policy.DownstreamRequest{
+				Headers: policy.NewHeaders(map[string][]string{headerName: {headerValue}}),
+			},
+		},
 	}
 }
 
@@ -604,8 +708,8 @@ func TestMtlsAuthPolicy_Evaluate_AuthenticatesAndPopulatesAuthContext(t *testing
 	if auth.Subject != "urn:partner-a:payments" {
 		t.Errorf("AuthContext.Subject = %q, want %q", auth.Subject, "urn:partner-a:payments")
 	}
-	if auth.Properties["source"] != "connection" {
-		t.Errorf(`AuthContext.Properties["source"] = %q, want "connection"`, auth.Properties["source"])
+	if auth.Properties["source"] != "handshake" {
+		t.Errorf(`AuthContext.Properties["source"] = %q, want "handshake"`, auth.Properties["source"])
 	}
 	if auth.Properties["matchedEntry"] != "0" {
 		t.Errorf(`AuthContext.Properties["matchedEntry"] = %q, want "0"`, auth.Properties["matchedEntry"])
@@ -855,6 +959,208 @@ func TestGetPolicy_MalformedPEM_ReturnsError(t *testing.T) {
 		}
 		if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil {
 			t.Fatal("expected GetPolicy to return an error for a malformed accept-list certificate")
+		}
+	})
+}
+
+// ─── Header-relay decision order (slice 4) ───────────────────────────────────
+
+// TestMtlsAuthPolicy_Evaluate_HeaderRelay covers evaluate()'s full decision
+// order for a client certificate relayed in a header by a front proxy: header
+// mode off, a relay-authenticated connection vouching for the header in every
+// supported encoding, a header ignored because the connection isn't a relay
+// (falling back to evaluating the connection as itself either way), a relay
+// narrowed by SAN declining to vouch, and the trustAny bypass.
+func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	acceptLeaf := newLeaf(t, rootA, "client-valid", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
+	otherAcceptLeaf := newLeaf(t, rootA, "client-other", certOpts{uriSANs: []string{"urn:partner-a:other"}})
+	expiredLeaf := newLeaf(t, rootA, "client-expired", certOpts{
+		notBefore: time.Now().Add(-2 * 365 * 24 * time.Hour),
+		notAfter:  time.Now().Add(-1 * 365 * 24 * time.Hour),
+	})
+
+	unrelatedRoot := newRootCA(t, "Unrelated Root CA")
+	unacceptedLeaf := newLeaf(t, unrelatedRoot, "client-wrong-ca", certOpts{})
+
+	relayCA := newRootCA(t, "Edge LB CA")
+	relayLeaf := newLeaf(t, relayCA, "edge-lb", certOpts{dnsSANs: []string{"edge-lb.internal"}})
+
+	corpCA := newRootCA(t, "Corp CA")
+	// corpOtherLeaf verifies fine against corpCA (a relay root below) but
+	// carries "other.corp.test", never the "lb.corp.test" a narrowed relay
+	// entry requires — used to prove a SAN-mismatched relay declines to vouch.
+	corpOtherLeaf := newLeaf(t, corpCA, "corp-other-service", certOpts{dnsSANs: []string{"other.corp.test"}})
+
+	acceptEntries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
+	pool := []*testEntity{rootA, relayCA, corpCA}
+	relays := []relaySpec{{name: "relay-edge-lb", roots: []*testEntity{relayCA}}}
+
+	t.Run("header mode off: header present but inert, connection evaluated as itself", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, nil, nil) // no relays, trustAny defaults false
+		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(acceptLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(otherAcceptLeaf))
+		result := assertAuthenticated(t, p, reqCtx, 0)
+		if result.source != sourceConnection {
+			t.Errorf("source = %q, want %q", result.source, sourceConnection)
+		}
+	})
+
+	t.Run("relay connection, header carries an accepted cert URL-encoded: authenticated via the header", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+		result := assertAuthenticated(t, p, reqCtx, 0)
+		if result.source != sourceHeader {
+			t.Errorf("source = %q, want %q", result.source, sourceHeader)
+		}
+		if result.relayedBy != "relay-edge-lb" {
+			t.Errorf("relayedBy = %q, want %q", result.relayedBy, "relay-edge-lb")
+		}
+		if result.relaySubject != relayLeaf.cert.Subject.String() {
+			t.Errorf("relaySubject = %q, want the relay leaf's own subject %q", result.relaySubject, relayLeaf.cert.Subject.String())
+		}
+	})
+
+	t.Run("relay connection, header carries an accepted cert as plain PEM with newlines as spaces: authenticated", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, pemWithSpacesHeaderValue(acceptLeaf))
+		result := assertAuthenticated(t, p, reqCtx, 0)
+		if result.source != sourceHeader {
+			t.Errorf("source = %q, want %q", result.source, sourceHeader)
+		}
+	})
+
+	t.Run("relay connection, header carries an accepted cert as bare base64 DER: authenticated", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, bareBase64DERHeaderValue(acceptLeaf))
+		result := assertAuthenticated(t, p, reqCtx, 0)
+		if result.source != sourceHeader {
+			t.Errorf("source = %q, want %q", result.source, sourceHeader)
+		}
+	})
+
+	t.Run("relay connection, header carries a cert from an unaccepted authority: denied", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(unacceptedLeaf))
+		assertDenied(t, p, reqCtx, reasonNoMatchingEntry)
+	})
+
+	t.Run("relay connection, header carries an expired cert: denied", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(expiredLeaf))
+		assertDenied(t, p, reqCtx, reasonExpired)
+	})
+
+	t.Run("relay connection, header is garbage: denied with the uniform body", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, "this-is-not-a-certificate")
+		assertDenied(t, p, reqCtx, reasonInvalidCert)
+	})
+
+	t.Run("connection is a valid non-relay client, header carries another client: authenticated as the connection", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(acceptLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(otherAcceptLeaf))
+		result := assertAuthenticated(t, p, reqCtx, 0)
+		if result.source != sourceConnection {
+			t.Errorf("source = %q, want %q (the header must be ignored, never believed, from a non-relay connection)", result.source, sourceConnection)
+		}
+		if result.subject != "urn:partner-a:payments" {
+			t.Errorf("subject = %q, want the CONNECTION leaf's own subject %q, not the header's", result.subject, "urn:partner-a:payments")
+		}
+	})
+
+	t.Run("connection has no certificate, header present, relays configured: denied no_certificate", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+		reqCtx := reqCtxWithTLSAndHeader(&policy.DownstreamTLS{MTLS: false}, defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+		assertDenied(t, p, reqCtx, reasonNoCertificate)
+	})
+
+	t.Run("relay entry narrowed by a dnsSAN the relay leaf doesn't carry: header ignored, connection evaluated and denied", func(t *testing.T) {
+		narrowedRelays := []relaySpec{{name: "relay-corp", roots: []*testEntity{corpCA}, dnsSANs: []string{"lb.corp.test"}}}
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, narrowedRelays, nil)
+		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(corpOtherLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+		// corpOtherLeaf fails the relay's SAN narrowing, so the header (however
+		// well-formed) is ignored, and this connection is evaluated as itself —
+		// against an accept list that never names corpCA.
+		assertDenied(t, p, reqCtx, reasonNoMatchingEntry)
+	})
+
+	t.Run("trustAny bypass: no connection certificate, header carries an accepted cert: authenticated, source bypass", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, nil, map[string]interface{}{"trustAny": true})
+		reqCtx := reqCtxWithTLSAndHeader(nil, defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+		result := assertAuthenticated(t, p, reqCtx, 0)
+		if result.source != sourceBypass {
+			t.Errorf("source = %q, want %q", result.source, sourceBypass)
+		}
+		if result.relayedBy != "" {
+			t.Errorf("relayedBy = %q, want empty — the bypass names no relay", result.relayedBy)
+		}
+	})
+}
+
+// ─── Header forwarding to the backend (slice 4) ──────────────────────────────
+
+// TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend covers
+// forwardToBackend's contract: remove the header only when it was NOT
+// believed and forwardToBackend is on (a believed header, or forwardToBackend
+// off entirely, must never see this policy strip it — the router's own
+// default route configuration handles the off case).
+func TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	acceptLeaf := newLeaf(t, rootA, "client-valid", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
+	relayCA := newRootCA(t, "Edge LB CA")
+	relayLeaf := newLeaf(t, relayCA, "edge-lb", certOpts{})
+
+	acceptEntries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
+	pool := []*testEntity{rootA, relayCA}
+	relays := []relaySpec{{name: "relay-edge-lb", roots: []*testEntity{relayCA}}}
+
+	believedReqCtx := func() *policy.RequestHeaderContext {
+		return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+	}
+	notBelievedReqCtx := func() *policy.RequestHeaderContext {
+		// The connection's own certificate is a valid accepted client, not the
+		// relay — so this header, however well-formed, is never believed.
+		return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(acceptLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+	}
+
+	mustModifications := func(t *testing.T, action policy.RequestHeaderAction) policy.UpstreamRequestHeaderModifications {
+		t.Helper()
+		mods, ok := action.(policy.UpstreamRequestHeaderModifications)
+		if !ok {
+			t.Fatalf("OnRequestHeaders returned %T, want policy.UpstreamRequestHeaderModifications", action)
+		}
+		return mods
+	}
+
+	t.Run("forwardToBackend true, believed header: not removed", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, map[string]interface{}{"forwardToBackend": true})
+		action := p.OnRequestHeaders(context.Background(), believedReqCtx(), map[string]interface{}{})
+		mods := mustModifications(t, action)
+		if len(mods.HeadersToRemove) != 0 {
+			t.Errorf("HeadersToRemove = %v, want empty — a believed header must reach the backend", mods.HeadersToRemove)
+		}
+	})
+
+	t.Run("forwardToBackend true, header not believed (non-relay connection): removed", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, map[string]interface{}{"forwardToBackend": true})
+		action := p.OnRequestHeaders(context.Background(), notBelievedReqCtx(), map[string]interface{}{})
+		mods := mustModifications(t, action)
+		if !slices.Contains(mods.HeadersToRemove, defaultHeaderName) {
+			t.Errorf("HeadersToRemove = %v, want it to contain %q — a header this policy never believed must not reach the backend", mods.HeadersToRemove, defaultHeaderName)
+		}
+	})
+
+	t.Run("forwardToBackend false: no removal action either way", func(t *testing.T) {
+		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil) // forwardToBackend defaults false
+
+		believedAction := p.OnRequestHeaders(context.Background(), believedReqCtx(), map[string]interface{}{})
+		if mods := mustModifications(t, believedAction); len(mods.HeadersToRemove) != 0 {
+			t.Errorf("HeadersToRemove (believed) = %v, want empty when forwardToBackend is false", mods.HeadersToRemove)
+		}
+
+		notBelievedAction := p.OnRequestHeaders(context.Background(), notBelievedReqCtx(), map[string]interface{}{})
+		if mods := mustModifications(t, notBelievedAction); len(mods.HeadersToRemove) != 0 {
+			t.Errorf("HeadersToRemove (not believed) = %v, want empty when forwardToBackend is false — the router's own default route configuration strips it instead", mods.HeadersToRemove)
 		}
 	})
 }

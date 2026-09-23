@@ -117,6 +117,10 @@ CREATE TABLE dbo.certificates (
     -- bundle. role only applies to usage: client.
     usage NVARCHAR(20) NOT NULL DEFAULT 'upstream',
     role NVARCHAR(20) NOT NULL DEFAULT 'client',
+    -- match_json narrows a role: relay entry to the connections it vouches
+    -- for (JSON-encoded {"dnsSANs": [...], "uriSANs": [...]}); NULL means
+    -- unnarrowed. Only meaningful for role: relay.
+    match_json NVARCHAR(MAX) NULL,
     created_at DATETIME2(7) NOT NULL DEFAULT SYSUTCDATETIME(),
     updated_at DATETIME2(7) NOT NULL DEFAULT SYSUTCDATETIME(),
     PRIMARY KEY (gateway_id, uuid),
@@ -128,6 +132,8 @@ IF COL_LENGTH('dbo.certificates', 'usage') IS NULL
 ALTER TABLE dbo.certificates ADD usage NVARCHAR(20) NOT NULL DEFAULT 'upstream';
 IF COL_LENGTH('dbo.certificates', 'role') IS NULL
 ALTER TABLE dbo.certificates ADD role NVARCHAR(20) NOT NULL DEFAULT 'client';
+IF COL_LENGTH('dbo.certificates', 'match_json') IS NULL
+ALTER TABLE dbo.certificates ADD match_json NVARCHAR(MAX) NULL;
 
 -- LLM Provider Templates table
 IF OBJECT_ID(N'dbo.llm_provider_templates', N'U') IS NULL

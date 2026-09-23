@@ -444,6 +444,35 @@ func main() {
 		ekus:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}))
 
+	// ---- Header-relay fixtures ----
+	// A front proxy's own identity (edge-lb, issued by edge-lb-ca) and a
+	// second authority (corp-ca) used to show that a relay entry narrowed by
+	// SAN vouches only for the proxy carrying that SAN, not for any other
+	// service the same authority happens to have issued.
+	edgeLBCA := track(issue("edge-lb-ca", issueOpts{
+		subject: pkix.Name{CommonName: "Edge LB CA"},
+		isCA:    true,
+	}))
+	track(issue("edge-lb", issueOpts{
+		subject: pkix.Name{CommonName: "edge-lb"},
+		parent:  edgeLBCA,
+		dnsSANs: []string{"edge-lb.internal"},
+	}))
+	corpCA := track(issue("corp-ca", issueOpts{
+		subject: pkix.Name{CommonName: "Corp CA"},
+		isCA:    true,
+	}))
+	track(issue("edge-lb-corp", issueOpts{
+		subject: pkix.Name{CommonName: "edge-lb-corp"},
+		parent:  corpCA,
+		dnsSANs: []string{"lb.corp.test"},
+	}))
+	track(issue("corp-other-service", issueOpts{
+		subject: pkix.Name{CommonName: "corp-other-service"},
+		parent:  corpCA,
+		dnsSANs: []string{"other.corp.test"},
+	}))
+
 	// key-mismatch.key: a key that matches no certificate.
 	mismatchKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	check(err)

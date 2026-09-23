@@ -511,3 +511,85 @@ func TestValidateMTLSStartupInvariant_NoMTLSConfigs_NoError(t *testing.T) {
 		t.Fatalf("expected no error when no stored config attaches mtls-auth, got: %v", err)
 	}
 }
+
+// ============ SetHeaderTrustAny: the header-relay trust_any relaxation ============
+
+// TestMtlsAuthValidator_ValidateRestAPI_HeaderTrustAny_RelaxesHTTPSRequirement
+// guards that a relayed header can legitimately arrive over plaintext from a
+// trusted front proxy: with trust_any true, HTTPS-listener-disabled no
+// longer produces the "requires the HTTPS listener" refusal.
+func TestMtlsAuthValidator_ValidateRestAPI_HeaderTrustAny_RelaxesHTTPSRequirement(t *testing.T) {
+	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
+	v := NewMtlsAuthValidator(store, false).SetHeaderTrustAny(true)
+	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
+
+	errs := v.ValidateRestAPI(apiConfig)
+
+	want := "mtls-auth requires the HTTPS listener, which is disabled on this gateway"
+	if hasError(errs, "spec.policies[0]", want) {
+		t.Fatalf("expected the HTTPS-listener refusal to be relaxed when trust_any is true, got %+v", errs)
+	}
+}
+
+func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_EmitsBypassWarning(t *testing.T) {
+	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
+	v := NewMtlsAuthValidator(store, true).SetHeaderTrustAny(true)
+	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
+
+	_, warnings := v.ResolveMtlsAuthForResponse(*apiConfig)
+
+	if !hasWarning(warnings, WarningCodeHeaderCertBypassActive, "") {
+		t.Fatalf("expected %s warning with an empty field when trust_any is true, got %+v", WarningCodeHeaderCertBypassActive, warnings)
+	}
+}
+
+// TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypassWarning
+// guards the off case: no SetHeaderTrustAny call at all (defaults to false)
+// never emits HEADER_CERT_BYPASS_ACTIVE.
+func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypassWarning(t *testing.T) {
+	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
+	v := NewMtlsAuthValidator(store, true)
+	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
+
+	_, warnings := v.ResolveMtlsAuthForResponse(*apiConfig)
+
+	if hasWarning(warnings, WarningCodeHeaderCertBypassActive, "") {
+		t.Fatalf("expected no %s warning when trust_any is false, got %+v", WarningCodeHeaderCertBypassActive, warnings)
+	}
+}
+
+// TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_NoMTLSAuth_NoBypassWarning
+// guards that the warning is attached per mtls-auth deploy response, never
+// unconditionally: an API with no mtls-auth attachment at all must not carry
+// it even though trust_any is true gateway-wide.
+func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_NoMTLSAuth_NoBypassWarning(t *testing.T) {
+	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
+	v := NewMtlsAuthValidator(store, true).SetHeaderTrustAny(true)
+	plainConfig := createValidRestAPIConfig()
+
+	_, warnings := v.ResolveMtlsAuthForResponse(*plainConfig)
+
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings for an API that never attaches mtls-auth, got %+v", warnings)
+	}
+}
+
+// ============ ValidateMTLSStartupInvariantForRouter ============
+
+func TestValidateMTLSStartupInvariantForRouter_HTTPSDisabled_HeaderTrustAny_NoError(t *testing.T) {
+	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
+	configs := []*models.StoredConfig{storedConfigWithRestAPI("mtls-api", apiConfig)}
+
+	if err := ValidateMTLSStartupInvariantForRouter(configs, false, true); err != nil {
+		t.Fatalf("expected no error when https is disabled but trust_any is true, got: %v", err)
+	}
+}
+
+func TestValidateMTLSStartupInvariantForRouter_HTTPSDisabled_HeaderTrustAnyFalse_Errors(t *testing.T) {
+	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
+	configs := []*models.StoredConfig{storedConfigWithRestAPI("mtls-api", apiConfig)}
+
+	if err := ValidateMTLSStartupInvariantForRouter(configs, false, false); err == nil {
+		t.Fatal("expected an error when https is disabled and trust_any is false")
+	}
+}

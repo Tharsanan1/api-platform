@@ -987,6 +987,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            The client-CA authority cannot be removed: it is explicitly named
+            in a deployed API's accept list, or it is the pool's last
+            non-relay authority and a deployed API still attaches mtls-auth.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Internal server error
           content:
@@ -5157,6 +5166,31 @@ components:
             terminating load balancer) instead.
           enum: [ client, relay ]
           example: client
+        match:
+          allOf:
+            - $ref: "#/components/schemas/CertificateMatch"
+          description: |
+            Only valid for role: relay. Narrows which connections
+            authenticated as this relay entry can make a relayed header
+            believed. Omit to accept any connection presenting a certificate
+            from this authority, with no further narrowing.
+
+    CertificateMatch:
+      type: object
+      description: |
+        Narrows a role: relay pool entry to the connections it vouches for.
+        Each list, when present, must name at least one non-empty SAN.
+      properties:
+        dnsSANs:
+          type: array
+          items:
+            type: string
+          example: [ "lb.corp.test" ]
+        uriSANs:
+          type: array
+          items:
+            type: string
+          example: [ "urn:partner-a:edge-lb" ]
 
     CertificateResponse:
       type: object
@@ -5196,6 +5230,10 @@ components:
           description: Only present for usage client. Whether the authority validates a directly-presented or header-relayed client certificate.
           enum: [ client, relay ]
           example: client
+        match:
+          allOf:
+            - $ref: "#/components/schemas/CertificateMatch"
+          description: Only present for role relay entries that were stored with a narrowing match.
         isLeaf:
           type: boolean
           description: True when the identity certificate is not itself a certificate authority (pooled as a one-member authority).

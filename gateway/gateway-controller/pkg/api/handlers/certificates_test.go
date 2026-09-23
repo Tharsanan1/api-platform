@@ -1238,3 +1238,413 @@ func TestListCertificates_WarningsAndFieldPresence(t *testing.T) {
 	require.True(t, ok, "expected client row to carry a numeric referencedByApis, got %v", clientItem["referencedByApis"])
 	assert.Equal(t, float64(0), referenced)
 }
+
+// ============================================================================
+// DELETE referential integrity for client-CA authorities (slice 4)
+// ============================================================================
+
+func clientAuthorityCert(name string) *models.StoredCertificate {
+	return &models.StoredCertificate{
+		UUID: name, Name: name, Usage: models.CertificateUsageClient, Role: models.CertificateRoleClient,
+		NotAfter: time.Now().Add(365 * 24 * time.Hour),
+	}
+}
+
+func relayAuthorityCert(name string) *models.StoredCertificate {
+	return &models.StoredCertificate{
+		UUID: name, Name: name, Usage: models.CertificateUsageClient, Role: models.CertificateRoleRelay,
+		NotAfter: time.Now().Add(365 * 24 * time.Hour),
+	}
+}
+
+// restAPIConfigWithMtlsAuth builds a minimal deployed RestApi StoredConfig
+// attaching mtls-auth either at API level (apiLevel true) or operation
+// level, with an accept list naming caNames (in order) — or, when caNames is
+// empty, no accept param at all (inheriting the whole client-CA pool). This
+// is the referential-integrity counterpart to mtls_repush_test.go's simpler
+// restAPIConfig, which only supports a bare (accept-less) attachment.
+func restAPIConfigWithMtlsAuth(handle string, apiLevel bool, caNames ...string) *models.StoredConfig {
+	var params map[string]interface{}
+	if len(caNames) > 0 {
+		accept := make([]interface{}, 0, len(caNames))
+		for _, name := range caNames {
+			accept = append(accept, map[string]interface{}{"ca": name})
+		}
+		params = map[string]interface{}{"accept": accept}
+	}
+	policy := management.Policy{Name: "mtls-auth", Version: "v1"}
+	if params != nil {
+		policy.Params = &params
+	}
+
+	cfg := management.RestAPI{
+		Kind:     management.RestAPIKindRestApi,
+		Metadata: management.Metadata{Name: handle},
+		Spec: management.APIConfigData{
+			DisplayName: handle,
+			Version:     "v1.0",
+			Context:     "/" + handle,
+			Operations: []management.Operation{
+				{Method: management.Ptr(management.OperationMethodGET), Path: management.Ptr("/resource")},
+			},
+			Upstream: struct {
+				Main    management.Upstream  `json:"main" yaml:"main"`
+				Sandbox *management.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+			}{
+				Main: management.Upstream{Url: stringPtr("http://backend:8080")},
+			},
+		},
+	}
+	if apiLevel {
+		cfg.Spec.Policies = &[]management.Policy{policy}
+	} else {
+		cfg.Spec.Operations[0].Policies = &[]management.Policy{policy}
+	}
+
+	return &models.StoredConfig{
+		UUID:          handle,
+		Kind:          models.KindRestApi,
+		Handle:        handle,
+		DisplayName:   handle,
+		Version:       "v1.0",
+		DesiredState:  models.StateDeployed,
+		Configuration: cfg,
+	}
+}
+
+// ---- checkClientAuthorityDeletable: direct unit tests ----
+
+func TestCheckClientAuthorityDeletable_NamedInAcceptList_APILevel_Blocks(t *testing.T) {
+	mockDB := NewMockStorage()
+	target := clientAuthorityCert("ref-partner-a")
+	mockDB.certs = []*models.StoredCertificate{target}
+	server := createTestAPIServerWithDB(mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-naming-api", true, "ref-partner-a")))
+
+	resp, _, blocked := server.checkClientAuthorityDeletable(target)
+
+	require.True(t, blocked)
+	assert.Equal(t, "error", resp.Status)
+	assert.Equal(t, "client-CA authority 'ref-partner-a' is named by 1 deployed API; remove those references first", resp.Message)
+	require.NotNil(t, resp.Errors)
+	errs := *resp.Errors
+	require.Len(t, errs, 1)
+	assert.Equal(t, "spec.policies[0].params.accept[0].ca", *errs[0].Field)
+	assert.Equal(t, "referenced by API 'ref-naming-api'", *errs[0].Message)
+}
+
+func TestCheckClientAuthorityDeletable_NamedInAcceptList_OperationLevel_Blocks(t *testing.T) {
+	mockDB := NewMockStorage()
+	target := clientAuthorityCert("ref-partner-a")
+	mockDB.certs = []*models.StoredCertificate{target}
+	server := createTestAPIServerWithDB(mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-naming-api", false, "ref-partner-a")))
+
+	resp, _, blocked := server.checkClientAuthorityDeletable(target)
+
+	require.True(t, blocked)
+	require.NotNil(t, resp.Errors)
+	errs := *resp.Errors
+	require.Len(t, errs, 1)
+	assert.Equal(t, "spec.operations[0].policies[0].params.accept[0].ca", *errs[0].Field)
+}
+
+func TestCheckClientAuthorityDeletable_NamedInAcceptList_TwoAPIs_PluralMessage(t *testing.T) {
+	mockDB := NewMockStorage()
+	target := clientAuthorityCert("ref-partner-a")
+	mockDB.certs = []*models.StoredCertificate{target}
+	server := createTestAPIServerWithDB(mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-naming-api-1", true, "ref-partner-a")))
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-naming-api-2", true, "ref-partner-a")))
+
+	resp, _, blocked := server.checkClientAuthorityDeletable(target)
+
+	require.True(t, blocked)
+	assert.Equal(t, "client-CA authority 'ref-partner-a' is named by 2 deployed APIs; remove those references first", resp.Message)
+	require.NotNil(t, resp.Errors)
+	assert.Len(t, *resp.Errors, 2)
+}
+
+func TestCheckClientAuthorityDeletable_LastNonRelayAuthority_Inheriting_Blocks(t *testing.T) {
+	mockDB := NewMockStorage()
+	target := clientAuthorityCert("ref-only-authority")
+	mockDB.certs = []*models.StoredCertificate{target}
+	server := createTestAPIServerWithDB(mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true))) // no accept: inherits the pool
+
+	resp, _, blocked := server.checkClientAuthorityDeletable(target)
+
+	require.True(t, blocked)
+	assert.Equal(t, "cannot remove the last client-CA authority while 1 deployed API attaches mtls-auth; add a replacement first or remove those APIs", resp.Message)
+	require.NotNil(t, resp.Errors)
+	errs := *resp.Errors
+	require.Len(t, errs, 1)
+	assert.Equal(t, "spec.policies[0]", *errs[0].Field)
+}
+
+// TestCheckClientAuthorityDeletable_ReferencedOnlyByInheritingAPIs_WithReplacement_Allowed
+// guards that once a replacement non-relay authority exists in the pool, the
+// "last authority" refusal no longer applies — even though an inheriting API
+// is still deployed and this authority is unnamed anywhere.
+func TestCheckClientAuthorityDeletable_ReferencedOnlyByInheritingAPIs_WithReplacement_Allowed(t *testing.T) {
+	mockDB := NewMockStorage()
+	target := clientAuthorityCert("ref-partner-b")
+	replacement := clientAuthorityCert("ref-partner-a")
+	mockDB.certs = []*models.StoredCertificate{target, replacement}
+	server := createTestAPIServerWithDB(mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true))) // no accept: inherits the pool
+
+	_, _, blocked := server.checkClientAuthorityDeletable(target)
+
+	assert.False(t, blocked, "expected removal to be allowed while a replacement non-relay authority remains")
+}
+
+// ---- Full HTTP round trip: confirms the handler wiring, not just the message ----
+
+func TestDeleteCertificate_NamedInAcceptList_Returns409(t *testing.T) {
+	mockDB := NewMockStorage()
+	target := clientAuthorityCert("ref-partner-a")
+	mockDB.certs = []*models.StoredCertificate{target, seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-naming-api", true, "ref-partner-a")))
+
+	handler := newDeleteCertHandler(server, target.UUID)
+	req := httptest.NewRequest(http.MethodDelete, "/certificates/"+target.UUID, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "error", resp["status"])
+	assert.Equal(t, "client-CA authority 'ref-partner-a' is named by 1 deployed API; remove those references first", resp["message"])
+
+	// Still present afterwards: the delete never reached the database.
+	_, err := mockDB.GetCertificate(target.UUID)
+	assert.NoError(t, err)
+}
+
+// TestDeleteCertificate_RelayRow_DeletesEvenWhenLastAuthority guards that a
+// relay entry is never counted as a client-CA authority at all: it deletes
+// successfully even when it is the pool's only usage: client row, while a
+// deployed API attaching mtls-auth (inheriting) would otherwise refuse to
+// lose its last non-relay authority.
+func TestDeleteCertificate_RelayRow_DeletesEvenWhenLastAuthority(t *testing.T) {
+	mockDB := NewMockStorage()
+	relay := relayAuthorityCert("ref-edge-lb")
+	mockDB.certs = []*models.StoredCertificate{relay, seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true)))
+
+	handler := newDeleteCertHandler(server, relay.UUID)
+	req := httptest.NewRequest(http.MethodDelete, "/certificates/"+relay.UUID, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+}
+
+// TestDeleteCertificate_UpstreamRow_UnaffectedByReferentialCheck guards that
+// the new referential-integrity check never even runs for a usage: upstream
+// certificate, which keeps today's unconditional-delete behaviour — even
+// while a deployed API would block losing its last CLIENT authority.
+func TestDeleteCertificate_UpstreamRow_UnaffectedByReferentialCheck(t *testing.T) {
+	mockDB := NewMockStorage()
+	upstream := &models.StoredCertificate{
+		UUID: "ref-backend-trust", Name: "ref-backend-trust", Usage: models.CertificateUsageUpstream,
+		NotAfter: time.Now().Add(365 * 24 * time.Hour), Certificate: []byte(validTestCert),
+	}
+	client := clientAuthorityCert("ref-only-authority")
+	// A second, untouched upstream cert keeps the cert store's reload
+	// (triggered by the delete below) from finding zero loadable sources —
+	// unrelated to the referential-integrity behaviour this test targets.
+	mockDB.certs = []*models.StoredCertificate{upstream, client, seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true)))
+
+	handler := newDeleteCertHandler(server, upstream.UUID)
+	req := httptest.NewRequest(http.MethodDelete, "/certificates/"+upstream.UUID, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+}
+
+// TestListCertificates_ReferencedByApis_CountsNamingAPIsOnly guards that
+// GET /certificates' referencedByApis counts only APIs that explicitly name
+// an authority in their accept list — an API that merely inherits the pool
+// contributes nothing to the count, even though it does depend on the
+// authority in a looser sense.
+func TestListCertificates_ReferencedByApis_CountsNamingAPIsOnly(t *testing.T) {
+	mockDB := NewMockStorage()
+	named := clientAuthorityCert("ref-partner-a")
+	inheritedOnly := clientAuthorityCert("ref-partner-b")
+	mockDB.certs = []*models.StoredCertificate{named, inheritedOnly}
+
+	server := createTestAPIServerWithDB(mockDB)
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-naming-api", true, "ref-partner-a")))
+	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true))) // no accept
+
+	handler := newCertListHandler(server)
+	req := httptest.NewRequest(http.MethodGet, "/certificates?usage=client", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	items, ok := resp["certificates"].([]any)
+	require.True(t, ok)
+
+	byName := map[string]map[string]any{}
+	for _, raw := range items {
+		item := raw.(map[string]any)
+		byName[fmt.Sprint(item["name"])] = item
+	}
+
+	require.Contains(t, byName, "ref-partner-a")
+	require.Contains(t, byName, "ref-partner-b")
+	assert.Equal(t, float64(1), byName["ref-partner-a"]["referencedByApis"])
+	assert.Equal(t, float64(0), byName["ref-partner-b"]["referencedByApis"])
+}
+
+// ============================================================================
+// Certificate upload validation: match narrowing (slice 4)
+// ============================================================================
+
+func uploadCertificateRawJSON(t *testing.T, server *APIServer, jsonBody string) *httptest.ResponseRecorder {
+	t.Helper()
+	handler := newUploadCertHandler(server)
+	req := httptest.NewRequest(http.MethodPost, "/certificates", strings.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	return w
+}
+
+func TestUploadCertificate_MatchWithRoleClient_Rejected(t *testing.T) {
+	mockDB := NewMockStorage()
+	server := createTestAPIServerWithDB(mockDB)
+
+	root := pki.NewRootCA(t, "Match Role Client CA")
+	w := uploadCertificateBody(t, server, UploadCertificateRequest{
+		Name:        "pool-match-role-client",
+		Usage:       models.CertificateUsageClient,
+		Role:        models.CertificateRoleClient,
+		Certificate: string(root.PEM()),
+		Match:       &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}},
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	entry := firstFieldError(t, w.Body.Bytes(), "match")
+	assert.Equal(t, "match applies only to role: relay entries", entry["message"])
+}
+
+func TestUploadCertificate_MatchWithUsageUpstream_Rejected(t *testing.T) {
+	mockDB := NewMockStorage()
+	server := createTestAPIServerWithDB(mockDB)
+
+	root := pki.NewRootCA(t, "Match Usage Upstream CA")
+	w := uploadCertificateBody(t, server, UploadCertificateRequest{
+		Name:        "pool-match-usage-upstream",
+		Usage:       models.CertificateUsageUpstream,
+		Certificate: string(root.PEM()),
+		Match:       &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}},
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	entry := firstFieldError(t, w.Body.Bytes(), "match")
+	assert.Equal(t, "match applies only to role: relay entries", entry["message"])
+}
+
+// TestUploadCertificate_EmptyDNSSANsList_Rejected posts raw JSON (rather than
+// marshaling UploadCertificateRequest) because Match.DNSSANs carries
+// `json:"dnsSANs,omitempty"` — an empty-but-non-nil Go slice would be dropped
+// entirely by json.Marshal, silently turning this into the "omitted" case
+// instead of the "empty list" case this test targets.
+func TestUploadCertificate_EmptyDNSSANsList_Rejected(t *testing.T) {
+	mockDB := NewMockStorage()
+	server := createTestAPIServerWithDB(mockDB)
+
+	root := pki.NewRootCA(t, "Empty DNS SANs CA")
+	certJSON, err := json.Marshal(string(root.PEM()))
+	require.NoError(t, err)
+
+	body := fmt.Sprintf(`{"name":"pool-empty-dns-sans","usage":"client","role":"relay","certificate":%s,"match":{"dnsSANs":[]}}`, certJSON)
+	w := uploadCertificateRawJSON(t, server, body)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	entry := firstFieldError(t, w.Body.Bytes(), "match.dnsSANs")
+	assert.Equal(t, "list at least one non-empty SAN", entry["message"])
+}
+
+func TestUploadCertificate_DNSSANsElementEmpty_RejectedAtIndexZero(t *testing.T) {
+	mockDB := NewMockStorage()
+	server := createTestAPIServerWithDB(mockDB)
+
+	root := pki.NewRootCA(t, "DNS SANs Element Empty CA")
+	certJSON, err := json.Marshal(string(root.PEM()))
+	require.NoError(t, err)
+
+	body := fmt.Sprintf(`{"name":"pool-dns-sans-empty-element","usage":"client","role":"relay","certificate":%s,"match":{"dnsSANs":[""]}}`, certJSON)
+	w := uploadCertificateRawJSON(t, server, body)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	entry := firstFieldError(t, w.Body.Bytes(), "match.dnsSANs[0]")
+	assert.Equal(t, "list at least one non-empty SAN", entry["message"])
+}
+
+// TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList guards that a
+// relay entry's match narrowing round-trips: present in the 201 upload
+// response AND on the listed item afterwards.
+func TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+
+	root := pki.NewRootCA(t, "Relay With Match CA")
+	w := uploadCertificateBody(t, server, UploadCertificateRequest{
+		Name:        "pool-relay-with-match",
+		Usage:       models.CertificateUsageClient,
+		Role:        models.CertificateRoleRelay,
+		Certificate: string(root.PEM()),
+		Match:       &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}},
+	})
+	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	matchRaw, ok := resp["match"].(map[string]any)
+	require.True(t, ok, "expected match in the upload response, got %v", resp["match"])
+	dnsSANs, ok := matchRaw["dnsSANs"].([]any)
+	require.True(t, ok)
+	require.Len(t, dnsSANs, 1)
+	assert.Equal(t, "lb.corp.test", dnsSANs[0])
+
+	listHandler := newCertListHandler(server)
+	listReq := httptest.NewRequest(http.MethodGet, "/certificates?usage=client", nil)
+	listW := httptest.NewRecorder()
+	listHandler.ServeHTTP(listW, listReq)
+	require.Equal(t, http.StatusOK, listW.Code)
+
+	var listResp map[string]any
+	require.NoError(t, json.Unmarshal(listW.Body.Bytes(), &listResp))
+	items, ok := listResp["certificates"].([]any)
+	require.True(t, ok)
+
+	var found map[string]any
+	for _, raw := range items {
+		item := raw.(map[string]any)
+		if item["name"] == "pool-relay-with-match" {
+			found = item
+		}
+	}
+	require.NotNil(t, found, "uploaded relay cert not found in listing")
+	listMatch, ok := found["match"].(map[string]any)
+	require.True(t, ok, "expected match on the listed relay item, got %v", found["match"])
+	listDNSSANs, ok := listMatch["dnsSANs"].([]any)
+	require.True(t, ok)
+	require.Len(t, listDNSSANs, 1)
+	assert.Equal(t, "lb.corp.test", listDNSSANs[0])
+}

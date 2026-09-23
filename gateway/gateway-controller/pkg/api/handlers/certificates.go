@@ -28,12 +28,14 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/utils"
@@ -87,27 +89,29 @@ func (t *certExpiryWarnThrottle) shouldLog(certUUID string, now time.Time) bool 
 
 // UploadCertificateRequest represents the request body for certificate upload
 type UploadCertificateRequest struct {
-	Certificate string `json:"certificate" binding:"required"` // PEM-encoded certificate
-	Name        string `json:"name" binding:"required"`        // Unique certificate name
-	Usage       string `json:"usage"`                          // "upstream" (default) or "client"
-	Role        string `json:"role"`                           // "client" (default) or "relay"; usage: client only
+	Certificate string                   `json:"certificate" binding:"required"` // PEM-encoded certificate
+	Name        string                   `json:"name" binding:"required"`        // Unique certificate name
+	Usage       string                   `json:"usage"`                          // "upstream" (default) or "client"
+	Role        string                   `json:"role"`                           // "client" (default) or "relay"; usage: client only
+	Match       *models.CertificateMatch `json:"match,omitempty"`                // Only valid for role: relay
 }
 
 // CertificateResponse represents a certificate information response
 type CertificateResponse struct {
-	ID               string             `json:"id"`
-	Name             string             `json:"name"`
-	Subject          string             `json:"subject,omitempty"`
-	Issuer           string             `json:"issuer,omitempty"`
-	NotAfter         string             `json:"notAfter,omitempty"`
-	Count            int                `json:"count"` // Number of certs in file
-	Usage            string             `json:"usage"`
-	Role             string             `json:"role,omitempty"`
-	IsLeaf           bool               `json:"isLeaf"`
-	Warnings         []clientca.Warning `json:"warnings,omitempty"`
-	ReferencedByApis *int               `json:"referencedByApis,omitempty"`
-	Message          string             `json:"message,omitempty"`
-	Status           string             `json:"status"` // success, error
+	ID               string                   `json:"id"`
+	Name             string                   `json:"name"`
+	Subject          string                   `json:"subject,omitempty"`
+	Issuer           string                   `json:"issuer,omitempty"`
+	NotAfter         string                   `json:"notAfter,omitempty"`
+	Count            int                      `json:"count"` // Number of certs in file
+	Usage            string                   `json:"usage"`
+	Role             string                   `json:"role,omitempty"`
+	Match            *models.CertificateMatch `json:"match,omitempty"`
+	IsLeaf           bool                     `json:"isLeaf"`
+	Warnings         []clientca.Warning       `json:"warnings,omitempty"`
+	ReferencedByApis *int                     `json:"referencedByApis,omitempty"`
+	Message          string                   `json:"message,omitempty"`
+	Status           string                   `json:"status"` // success, error
 }
 
 // ListCertificatesResponse represents the response for listing certificates
@@ -142,6 +146,31 @@ func (v *certUploadValidation) addFieldError(field, message string) {
 
 func (v *certUploadValidation) hasProblems() bool {
 	return len(v.fieldErrors) > 0 || v.legacyUpstreamCertErr != nil
+}
+
+// validateMatchLists validates a role: relay entry's optional match narrowing:
+// each of dnsSANs/uriSANs, when present at all, must list at least one
+// non-empty SAN. A list omitted entirely (nil) is not an error — it simply
+// doesn't narrow on that dimension.
+func (v *certUploadValidation) validateMatchLists(match *models.CertificateMatch) {
+	v.validateMatchList("match.dnsSANs", match.DNSSANs)
+	v.validateMatchList("match.uriSANs", match.URISANs)
+}
+
+func (v *certUploadValidation) validateMatchList(fieldPath string, list []string) {
+	if list == nil {
+		return
+	}
+	const emptyMessage = "list at least one non-empty SAN"
+	if len(list) == 0 {
+		v.addFieldError(fieldPath, emptyMessage)
+		return
+	}
+	for i, s := range list {
+		if strings.TrimSpace(s) == "" {
+			v.addFieldError(fmt.Sprintf("%s[%d]", fieldPath, i), emptyMessage)
+		}
+	}
 }
 
 // UploadCertificate handles certificate upload via REST API
@@ -275,6 +304,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		CertCount:   count,
 		Usage:       effectiveUsage,
 		Role:        effectiveRole,
+		Match:       req.Match,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -366,6 +396,9 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 	if effectiveUsage == models.CertificateUsageClient {
 		resp.Role = effectiveRole
+		if effectiveRole == models.CertificateRoleRelay {
+			resp.Match = req.Match
+		}
 	}
 
 	httputil.WriteJSON(w, http.StatusCreated, resp)
@@ -421,6 +454,14 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 			v.addFieldError("role", "role applies only to usage: client certificates")
 		} else if usageValid {
 			effectiveRole = req.Role
+		}
+	}
+
+	if req.Match != nil {
+		if effectiveRole != models.CertificateRoleRelay {
+			v.addFieldError("match", "match applies only to role: relay entries")
+		} else {
+			v.validateMatchLists(req.Match)
 		}
 	}
 
@@ -517,9 +558,19 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 				role = models.CertificateRoleClient
 			}
 			item.Role = role
+			if role == models.CertificateRoleRelay {
+				item.Match = cert.Match
+			}
 
-			referencedByApis := 0
-			item.ReferencedByApis = &referencedByApis
+			if referencedByApis, err := s.countClientCertificateReferences(cert.Name); err != nil {
+				log.Warn("Failed to compute referencedByApis for client-CA authority",
+					slog.String("name", cert.Name), slog.Any("error", err))
+				// item.ReferencedByApis stays nil (absent in the response) rather
+				// than a possibly-wrong count — see checkClientAuthorityDeletable's
+				// doc comment for why a read failure isn't "no references".
+			} else {
+				item.ReferencedByApis = &referencedByApis
+			}
 
 			if identity, err := clientca.IdentityCertificate(cert.Certificate); err == nil {
 				item.IsLeaf = !identity.IsCA
@@ -589,6 +640,24 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 	// deployment needs re-pushing) — a lookup failure here doesn't block the
 	// delete itself, which re-validates existence and reports 404 on its own.
 	preDeleteCert, _ := s.db.GetCertificate(id)
+
+	// A client-CA authority (never a relay entry — header mode simply turns
+	// off when its last relay row goes away) cannot be removed while a
+	// deployed API still depends on it: either by naming it explicitly in an
+	// accept list, or — when it's the pool's last non-relay authority — by
+	// inheriting the pool at all. See checkClientAuthorityDeletable.
+	if preDeleteCert != nil {
+		role := preDeleteCert.Role
+		if role == "" {
+			role = models.CertificateRoleClient
+		}
+		if preDeleteCert.Usage == models.CertificateUsageClient && role != models.CertificateRoleRelay {
+			if errResp, statusCode, blocked := s.checkClientAuthorityDeletable(preDeleteCert); blocked {
+				httputil.WriteJSON(w, statusCode, errResp)
+				return
+			}
+		}
+	}
 
 	// Delete from database
 	if err := s.db.DeleteCertificate(id); err != nil {
@@ -690,6 +759,191 @@ func (s *APIServer) ReloadCertificates(w http.ResponseWriter, r *http.Request) {
 }
 
 // Helper functions
+
+// deployedRestAPIConfigs returns every currently-deployed RestApi
+// configuration, read from the database rather than the in-memory
+// ConfigStore. The in-memory store converges from the database
+// asynchronously via the event-hub listener, so a certificate-delete
+// referential-integrity check racing a just-completed API delete would see a
+// stale, already-removed API if it read the in-memory store instead — the
+// database reflects the committed state synchronously, which is what this
+// check needs.
+//
+// A non-nil error means the database read itself failed — callers decide
+// how to handle that: the DELETE path (checkClientAuthorityDeletable) must
+// fail closed (refuse the delete) rather than silently treat a failed read
+// as "no references found"; the GET listing (countClientCertificateReferences)
+// may instead log and report the count as absent for that one request. A
+// nil s.db (not wired, e.g. some unit tests) is not treated as an error —
+// it simply yields no configs, consistent with there being nothing to check.
+func (s *APIServer) deployedRestAPIConfigs() ([]*models.StoredConfig, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+	configs, err := s.db.GetAllConfigsByKind(string(models.KindRestApi))
+	if err != nil {
+		return nil, err
+	}
+	deployed := make([]*models.StoredConfig, 0, len(configs))
+	for _, cfg := range configs {
+		if cfg.DesiredState == models.StateDeployed {
+			deployed = append(deployed, cfg)
+		}
+	}
+	return deployed, nil
+}
+
+// countClientCertificateReferences counts the deployed RestApi configurations
+// whose mtls-auth instances (API- or operation-level) explicitly name
+// certName in an accept entry's `ca`. An API that merely inherits the pool
+// (accept omitted) is never counted — only an explicit reference. A non-nil
+// error means the underlying database read failed; the caller (ListCertificates)
+// logs it and reports referencedByApis as absent for that response, rather
+// than a possibly-wrong count.
+func (s *APIServer) countClientCertificateReferences(certName string) (int, error) {
+	restAPIs, err := s.deployedRestAPIConfigs()
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, cfg := range restAPIs {
+		restCfg, ok := cfg.Configuration.(api.RestAPI)
+		if !ok {
+			continue
+		}
+		if len(config.NamedAcceptEntryFieldPaths(&restCfg, certName)) > 0 {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// clientAuthorityReference is one deployed API's dependency on a client-CA
+// pool authority, either by naming it explicitly or by attaching mtls-auth
+// (used for the "last non-relay authority" check, where inheriting counts
+// too).
+type clientAuthorityReference struct {
+	apiHandle string
+	fieldPath string
+}
+
+// pluralDeployedAPIs renders the "N deployed APIs" / "1 deployed API" clause
+// used by both certificate-delete referential-integrity messages below.
+func pluralDeployedAPIs(n int) string {
+	if n == 1 {
+		return "1 deployed API"
+	}
+	return fmt.Sprintf("%d deployed APIs", n)
+}
+
+// checkClientAuthorityDeletable reports whether cert (a usage: client,
+// non-relay authority — callers must check this before calling) can be
+// removed from the pool right now. It never mutates anything; callers still
+// perform the actual delete.
+//
+// Two refusal conditions, checked in order (the first one that applies wins,
+// since a named reference is the more specific problem even when the
+// authority also happens to be the pool's last one):
+//
+//  1. The authority is explicitly named in some deployed API's accept list —
+//     removing it would silently invalidate that API's own configuration.
+//  2. Removing it would leave the pool with zero non-relay client
+//     authorities while some deployed API still attaches mtls-auth (whether
+//     or not it names an authority explicitly) — that API could never
+//     authenticate any caller again.
+//
+// A third condition, checked first of all: if the deployed-config read
+// itself fails, this fails CLOSED — refuse the delete with a 500 rather than
+// silently proceeding as though no API referenced the authority. A read
+// failure is not evidence of an empty reference set.
+//
+// Returns the ready-to-write ErrorResponse body, the HTTP status to write it
+// with, and true when refused; false (with an empty body/status) when the
+// deletion may proceed.
+func (s *APIServer) checkClientAuthorityDeletable(cert *models.StoredCertificate) (api.ErrorResponse, int, bool) {
+	restAPIs, err := s.deployedRestAPIConfigs()
+	if err != nil {
+		s.logger.Error("Failed to read deployed RestApi configurations for client-CA referential-integrity check",
+			slog.String("certificate", cert.Name), slog.Any("error", err))
+		return api.ErrorResponse{Status: "error", Message: "Failed to verify certificate references"},
+			http.StatusInternalServerError, true
+	}
+
+	var namedRefs []clientAuthorityReference
+	for _, cfg := range restAPIs {
+		restCfg, ok := cfg.Configuration.(api.RestAPI)
+		if !ok {
+			continue
+		}
+		paths := config.NamedAcceptEntryFieldPaths(&restCfg, cert.Name)
+		if len(paths) == 0 {
+			continue
+		}
+		namedRefs = append(namedRefs, clientAuthorityReference{apiHandle: cfg.Handle, fieldPath: paths[0]})
+	}
+	if len(namedRefs) > 0 {
+		errs := make([]api.ValidationError, len(namedRefs))
+		for i, ref := range namedRefs {
+			errs[i] = api.ValidationError{
+				Field:   stringPtr(ref.fieldPath),
+				Message: stringPtr(fmt.Sprintf("referenced by API '%s'", ref.apiHandle)),
+			}
+		}
+		message := fmt.Sprintf("client-CA authority '%s' is named by %s; remove those references first",
+			cert.Name, pluralDeployedAPIs(len(namedRefs)))
+		return api.ErrorResponse{Status: "error", Message: message, Errors: &errs}, http.StatusConflict, true
+	}
+
+	remainingNonRelay := 0
+	if clientCerts, err := s.db.ListCertificatesByUsage(models.CertificateUsageClient); err == nil {
+		for _, c := range clientCerts {
+			if c.UUID == cert.UUID {
+				continue // the one about to be deleted
+			}
+			role := c.Role
+			if role == "" {
+				role = models.CertificateRoleClient
+			}
+			if role != models.CertificateRoleRelay {
+				remainingNonRelay++
+			}
+		}
+	}
+	if remainingNonRelay > 0 {
+		return api.ErrorResponse{}, 0, false
+	}
+
+	var attachRefs []clientAuthorityReference
+	for _, cfg := range restAPIs {
+		restCfg, ok := cfg.Configuration.(api.RestAPI)
+		if !ok {
+			continue
+		}
+		paths := config.MtlsAuthAttachmentFieldPaths(&restCfg)
+		if len(paths) == 0 {
+			continue
+		}
+		attachRefs = append(attachRefs, clientAuthorityReference{apiHandle: cfg.Handle, fieldPath: paths[0]})
+	}
+	if len(attachRefs) == 0 {
+		return api.ErrorResponse{}, 0, false
+	}
+
+	errs := make([]api.ValidationError, len(attachRefs))
+	for i, ref := range attachRefs {
+		errs[i] = api.ValidationError{
+			Field:   stringPtr(ref.fieldPath),
+			Message: stringPtr(fmt.Sprintf("referenced by API '%s'", ref.apiHandle)),
+		}
+	}
+	verb := "attach"
+	if len(attachRefs) == 1 {
+		verb = "attaches"
+	}
+	message := fmt.Sprintf("cannot remove the last client-CA authority while %s %s mtls-auth; add a replacement first or remove those APIs",
+		pluralDeployedAPIs(len(attachRefs)), verb)
+	return api.ErrorResponse{Status: "error", Message: message, Errors: &errs}, http.StatusConflict, true
+}
 
 // extractCertificateMetadata extracts metadata from the first certificate in the chain
 func (s *APIServer) extractCertificateMetadata(data []byte) (subject, issuer string, notBefore, notAfter time.Time, err error) {

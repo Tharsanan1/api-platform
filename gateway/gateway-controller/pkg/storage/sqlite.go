@@ -111,10 +111,12 @@ func (s *SQLiteStorage) initSchema() error {
 	return nil
 }
 
-// migrateSchemaV4ToV5 adds the certificates.usage and certificates.role
-// columns (nullable-free, defaulted) to an already-provisioned database at
-// schema version 4, then advances user_version to 5. This is additive only:
-// no existing column is retyped, widened, or renamed.
+// migrateSchemaV4ToV5 adds the certificates.usage, certificates.role and
+// certificates.match_json columns (nullable-free/defaulted, except
+// match_json which is nullable with no default — NULL means "unnarrowed")
+// to an already-provisioned database at schema version 4, then advances
+// user_version to 5. This is additive only: no existing column is retyped,
+// widened, or renamed.
 func (s *SQLiteStorage) migrateSchemaV4ToV5() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -129,6 +131,9 @@ func (s *SQLiteStorage) migrateSchemaV4ToV5() error {
 	}
 	if _, err := tx.Exec(`ALTER TABLE certificates ADD COLUMN role TEXT NOT NULL DEFAULT 'client'`); err != nil {
 		return fmt.Errorf("failed to add certificates.role column: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE certificates ADD COLUMN match_json TEXT`); err != nil {
+		return fmt.Errorf("failed to add certificates.match_json column: %w", err)
 	}
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
 		return fmt.Errorf("failed to set schema version: %w", err)

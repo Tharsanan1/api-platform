@@ -16,7 +16,7 @@
 # under the License.
 # --------------------------------------------------------------------
 
-.PHONY: all test test-postgres test-sqlserver test-vhosts-single test-vhosts-multi test-dp-to-cp-nosync test-all test-verbose clean deps check-docker coverage-report build-coverage ensure-test-tags pki
+.PHONY: all test test-postgres test-sqlserver test-vhosts-single test-vhosts-multi test-mtls-header-bypass test-mtls-header-forward test-dp-to-cp-nosync test-all test-verbose clean deps check-docker coverage-report build-coverage ensure-test-tags pki
 
 VERSION ?= $(shell cat ../VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.0.1-SNAPSHOT")
 DOCKER_REGISTRY ?= ghcr.io/wso2/api-platform
@@ -81,6 +81,16 @@ test-vhosts-single:
 test-vhosts-multi:
 	COMPOSE_FILE=docker-compose.test.vhosts-multi.yaml IT_FEATURE_PATHS=features/vhost-routing-multi.feature $(MAKE) test
 
+# Run the header-relay bypass tests against a gateway with
+# router.downstream_tls.client_certificate_header.trust_any = true
+test-mtls-header-bypass:
+	COMPOSE_FILE=docker-compose.test.mtls-header-bypass.yaml IT_FEATURE_PATHS=features/mtls-header-bypass.feature $(MAKE) test
+
+# Run the header-relay forwarding tests against a gateway with
+# router.downstream_tls.client_certificate_header.forward_to_backend = true
+test-mtls-header-forward:
+	COMPOSE_FILE=docker-compose.test.mtls-header-forward.yaml IT_FEATURE_PATHS=features/mtls-header-forward.feature $(MAKE) test
+
 # Run the DP->CP push tests with control-plane sync DISABLED. Layers a tiny override on the
 # base compose (deployment_sync_enabled=false via COMPOSE_FILE=base:override) and asserts
 # gateway-originated artifacts are NOT pushed. Not part of the default suite (which runs with
@@ -101,6 +111,8 @@ clean:
 	docker compose -f docker-compose.test.sqlserver.yaml -p gateway-it down -v --remove-orphans 2>/dev/null || true
 	docker compose -f docker-compose.test.vhosts-single.yaml -p gateway-it down -v --remove-orphans 2>/dev/null || true
 	docker compose -f docker-compose.test.vhosts-multi.yaml -p gateway-it down -v --remove-orphans 2>/dev/null || true
+	docker compose -f docker-compose.test.mtls-header-bypass.yaml -p gateway-it down -v --remove-orphans 2>/dev/null || true
+	docker compose -f docker-compose.test.mtls-header-forward.yaml -p gateway-it down -v --remove-orphans 2>/dev/null || true
 	docker compose -f docker-compose.test.postgres.vhosts-single.yaml -p gateway-it down -v --remove-orphans 2>/dev/null || true
 	docker compose -f docker-compose.test.postgres.vhosts-multi.yaml -p gateway-it down -v --remove-orphans 2>/dev/null || true
 	rm -rf coverage/*.out coverage/*.txt coverage/*.html coverage/merged coverage/gateway-controller reports/*.json

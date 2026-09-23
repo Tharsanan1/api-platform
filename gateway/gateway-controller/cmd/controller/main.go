@@ -157,6 +157,11 @@ func main() {
 		log.Warn("No authentication configured: both basic auth and IDP are disabled. Gateway Controller API will allow all requests without authentication")
 	}
 
+	if cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny {
+		log.Warn("client certificate header is trusted from any connection (trust_any = true); " +
+			"every request may impersonate any client on a network that is not fully trusted")
+	}
+
 	// In immutable mode, delete any stale SQLite files before opening the DB to
 	// guarantee a fresh, reproducible state on every boot.
 	if cfg.ImmutableGateway.Enabled {
@@ -360,7 +365,8 @@ func main() {
 	// Fail closed (GO-AUTH-011): a persisted RestAPI that attaches mtls-auth
 	// while the HTTPS listener is disabled can never authenticate any
 	// caller, so refuse to start rather than run in that state.
-	if err := config.ValidateMTLSStartupInvariant(configStore.GetAll(), cfg.Router.HTTPSEnabled); err != nil {
+	if err := config.ValidateMTLSStartupInvariantForRouter(configStore.GetAll(), cfg.Router.HTTPSEnabled,
+		cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny); err != nil {
 		log.Error("Refusing to start", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -560,7 +566,8 @@ func main() {
 	// Create validator with policy validation support
 	validator := config.NewAPIValidator()
 	policyValidator := config.NewPolicyValidator(policyDefinitions)
-	policyValidator.SetMtlsAuthValidator(config.NewMtlsAuthValidator(db, cfg.Router.HTTPSEnabled))
+	policyValidator.SetMtlsAuthValidator(config.NewMtlsAuthValidator(db, cfg.Router.HTTPSEnabled).
+		SetHeaderTrustAny(cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny))
 	validator.SetPolicyValidator(policyValidator)
 
 	// Build the single shared outbound *http.Client used by every control-plane /

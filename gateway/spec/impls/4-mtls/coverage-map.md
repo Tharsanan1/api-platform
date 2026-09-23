@@ -110,3 +110,35 @@ Decisions taken while writing slice 2 tests: unknown-parameter message is `unkno
   `common` and `httpkit`) so the image build compiles against the workspace SDK before it is tagged.
 - The legacy per-API translation path (used only when no transformers are wired) has no header
   stripping; production always wires transformers.
+
+## Slice 4 — pool references and revocation levers (§8.4, §8.13 delete rows, S8, S19), header relay (§3.1.3, §5.3, §8.18, S21)
+
+| Spec case | Test |
+|---|---|
+| §8.13 GET `referencedByApis` counts naming APIs only | IT mtls-pool-references: *The listing counts the APIs that name an authority…*; UT handlers |
+| §8.13 DELETE named in `accept` → 409 (S19) | IT: *An authority named in an API's accept list cannot be removed…*; UT |
+| §8.13 DELETE referenced only by inheriting APIs → allowed, silent stop | IT: *An authority referenced only by inheriting APIs can be removed…* |
+| §8.13 DELETE last authority while mTLS APIs exist → 409 (S8) | IT: *The last client authority cannot be removed…*; UT |
+| §3.1.3 last relay entry deletable | IT: *A relay entry can be removed even when it is the last one…* |
+| §8.13 upstream row DELETE unchanged | IT: *An upstream trust certificate keeps today's removal behaviour* |
+| §8.4 revoke by removing a SAN; by removing an entry; thumbprint cut-over; renewed 401 until listed | IT: *Removing one SAN…*, *Removing one partner's entry…*, *A fingerprint cut-over…*; slice 3 thumbprint scenarios |
+| §8.4 pool removal → new handshakes only; inheriting APIs stop silently | IT inheriting-removal scenario (per-request accept resolution makes it immediate in practice) |
+| §8.8 same authority twice in `accept`; twice in pool under two names | IT: *Listing the same authority twice…*, *The same authority pooled under two names…* |
+| §8.18 H1–H13, H16, H19, H20 (default config) | IT mtls-header-relay (outline + scenarios); UT mtlsauth_test header relay |
+| §8.18 H14, H15 + `HEADER_CERT_BYPASS_ACTIVE` (trust_any) | IT mtls-header-bypass via `make test-mtls-header-bypass` |
+| §8.18 H17, H18 (forward_to_backend) | IT mtls-header-forward via `make test-mtls-header-forward` (H17 narrowed: see decision) |
+| §3.1.3 relay entry narrowed by `match` | IT: *A relay entry narrowed by SAN vouches only for the proxy carrying that SAN*; UT |
+| §3.1.3 header decodings: URL-encoded PEM, PEM, bare base64; garbage → 401 | IT outline rows + garbage scenario; UT (found and fixed the space-joined PEM gap) |
+| §5.3 TOML block, defaults, startup WARN | UT config; startup WARN by review |
+| §3.1.5 https_enabled false allowed with trust_any | UT validator / startup invariant |
+| S21 impersonation via header from a direct partner connection | IT relay outline row (client-valid + header carrying client-wrong-ca → 200 as A) and (client-wrong-ca + header client-valid → 401) |
+
+### Decisions taken in slice 4
+
+- **Forwarding applies only where `mtls-auth` evaluated the header.** No component evaluates the
+  header on a public route, so a believed-header forward on a public route (spec H17) is not
+  implementable without a kernel-level feature; public routes always strip the configured header.
+- **Relay narrowing is stored on the certificate row** (`match_json`, nullable), folded into the one
+  additive migration this feature ships (schema 4 → 5).
+- `Properties.source` values are `handshake`, `header`, `bypass` (the slice 3 tests said `connection`;
+  corrected to the spec's wording).

@@ -127,6 +127,8 @@ func getFeaturePaths() []string {
 		"features/mtls-client-ca-pool.feature",
 		"features/mtls-listener.feature",
 		"features/mtls-auth.feature",
+		"features/mtls-pool-references.feature",
+		"features/mtls-header-relay.feature",
 		"features/config-dump.feature",
 		"features/api-management.feature",
 		"features/api-error-responses.feature",
@@ -161,6 +163,8 @@ func getFeaturePaths() []string {
 		// These tests require different gateway configurations and are not included in the default suite run.
 		// "features/vhost-routing-single.feature", // cd it && make test-vhosts-single
 		// "features/vhost-routing-multi.feature", // cd it && make test-vhosts-multi
+		// "features/mtls-header-bypass.feature", // cd it && make test-mtls-header-bypass
+		// "features/mtls-header-forward.feature", // cd it && make test-mtls-header-forward
 	}
 
 	raw := strings.TrimSpace(os.Getenv("IT_FEATURE_PATHS"))

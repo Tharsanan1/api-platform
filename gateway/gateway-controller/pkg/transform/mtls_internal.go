@@ -47,14 +47,27 @@ const (
 	// path-building material for the policy, independent of what this
 	// particular API accepts.
 	mtlsInternalPoolParam = "__wso2_internal_mtls_pool"
+
+	// mtlsInternalRelaysParam is an ordered array of
+	// {"name", "certificates", "match"?} objects, one per usage: client,
+	// role: relay pool row — the set of connections whose presented
+	// certificate can make a relayed header believed. "match" is present
+	// only when the relay entry itself was stored with a narrowing match.
+	mtlsInternalRelaysParam = "__wso2_internal_mtls_relays"
+
+	// mtlsInternalHeaderParam is {"name", "trustAny", "forwardToBackend"},
+	// mirroring router.downstream_tls.client_certificate_header — the
+	// policy's only source of that config, since it runs outside the
+	// controller process.
+	mtlsInternalHeaderParam = "__wso2_internal_mtls_header"
 )
 
 // injectMtlsInternalParams mutates every mtls-auth PolicyInstance in chain in
-// place, adding the two __wso2_internal_mtls_* parameters above. A nil store
+// place, adding the __wso2_internal_mtls_* parameters above. A nil store
 // (not yet wired, e.g. in a test transformer) or a chain with no mtls-auth
 // instance is a no-op. Certificate PEM material is never logged by any of
 // the helpers this function calls.
-func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store config.MtlsAuthCertificateStore) {
+func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store config.MtlsAuthCertificateStore, headerConfig config.ClientCertificateHeader) {
 	if store == nil {
 		return
 	}
@@ -82,6 +95,13 @@ func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store confi
 		}
 	}
 
+	relays := buildMtlsRelaysMaterial(clientCerts)
+	header := map[string]interface{}{
+		"name":             headerConfig.Name,
+		"trustAny":         headerConfig.TrustAny,
+		"forwardToBackend": headerConfig.ForwardToBackend,
+	}
+
 	for i := range chain {
 		if chain[i].Name != config.MtlsAuthPolicyName {
 			continue
@@ -91,7 +111,41 @@ func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store confi
 		}
 		chain[i].Parameters[mtlsInternalAcceptParam] = resolveMtlsAcceptMaterial(chain[i].Parameters, store, clientCerts)
 		chain[i].Parameters[mtlsInternalPoolParam] = pool
+		chain[i].Parameters[mtlsInternalRelaysParam] = relays
+		chain[i].Parameters[mtlsInternalHeaderParam] = header
 	}
+}
+
+// buildMtlsRelaysMaterial builds the __wso2_internal_mtls_relays material:
+// one entry per usage: client, role: relay row in clientCerts, in the same
+// (pool) order the rows were returned.
+func buildMtlsRelaysMaterial(clientCerts []*models.StoredCertificate) []interface{} {
+	relays := make([]interface{}, 0)
+	for _, cert := range clientCerts {
+		role := cert.Role
+		if role == "" {
+			role = models.CertificateRoleClient
+		}
+		if role != models.CertificateRoleRelay {
+			continue
+		}
+		entry := map[string]interface{}{
+			"name":         cert.Name,
+			"certificates": stringsToInterfaces(splitCertificatePEMs(cert.Certificate)),
+		}
+		if cert.Match != nil {
+			matchParam := map[string]interface{}{}
+			if len(cert.Match.DNSSANs) > 0 {
+				matchParam["dnsSANs"] = stringsToInterfaces(cert.Match.DNSSANs)
+			}
+			if len(cert.Match.URISANs) > 0 {
+				matchParam["uriSANs"] = stringsToInterfaces(cert.Match.URISANs)
+			}
+			entry["match"] = matchParam
+		}
+		relays = append(relays, entry)
+	}
+	return relays
 }
 
 // resolveMtlsAcceptMaterial resolves one mtls-auth instance's own `accept`

@@ -434,6 +434,40 @@ func (cm *ComposeManager) DumpLogs(outputFile string) error {
 	return nil
 }
 
+// serviceLogsSinceMargin widens the --since boundary passed to `docker
+// compose logs` by this much, so a small clock skew between the test host
+// and the Docker daemon (e.g. Docker Desktop's VM clock drifting from the
+// host's) can never cause a line actually emitted at/after the caller's
+// `since` to be excluded. Matching is by content (a caller greps the
+// returned text), so a slightly wider window is harmless — it only ever
+// risks including a little extra log text, never dropping a real match.
+const serviceLogsSinceMargin = 5 * time.Second
+
+// ServiceLogs returns one service's container log lines emitted since
+// roughly the given time (see serviceLogsSinceMargin), via `docker compose
+// logs --no-color --since <RFC3339> <service>`. Unlike DumpLogs (the whole
+// stack, written to a file at shutdown for post-mortem), this is for a step
+// that polls a single service's log for a specific line appearing during a
+// running scenario.
+func (cm *ComposeManager) ServiceLogs(service string, since time.Time) (string, error) {
+	if cm == nil {
+		return "", fmt.Errorf("compose manager is nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	args := append([]string{"compose", "-p", cm.projectName}, cm.composeFileFlags()...)
+	args = append(args, "logs", "--no-color", "--since", since.Add(-serviceLogsSinceMargin).UTC().Format(time.RFC3339Nano), service)
+	cmd := execCommandContext(ctx, "docker", args...)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("failed to collect logs for service %s: %w", service, err)
+	}
+	return string(out), nil
+}
+
 // CheckDockerAvailable verifies that Docker is running and accessible
 func CheckDockerAvailable() error {
 	// Check Docker by running a simple command

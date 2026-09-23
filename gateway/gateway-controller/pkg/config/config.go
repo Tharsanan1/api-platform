@@ -1309,6 +1309,11 @@ func defaultConfig() *Config {
 					"respTxDur":  "%RESPONSE_TX_DURATION%",
 					"reqDur":     "%REQUEST_DURATION%",
 					"respDur":    "%RESPONSE_DURATION%",
+					"sni":        "%REQUESTED_SERVER_NAME%",
+					"tlsVer":     "%DOWNSTREAM_TLS_VERSION%",
+					"peerSubj":   "%DOWNSTREAM_PEER_SUBJECT%",
+					"peerFp":     "%DOWNSTREAM_PEER_FINGERPRINT_256%",
+					"upTlsFail":  "%UPSTREAM_TRANSPORT_FAILURE_REASON%",
 				},
 				// routerLogComponentTag identifies the router on the container's shared
 				// stdout; keep it when overriding. The JSON variant uses the "component"

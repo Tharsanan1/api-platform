@@ -82,8 +82,8 @@ Feature: Seeing what client and backend certificates did
   Scenario: A request without a certificate logs the certificate fields empty
     When I send a GET request to "http://localhost:8080/obs/v1.0/anything"
     Then the response status code should be 401
-    And the "gateway-runtime" container log should contain "\"peerSubj\":\"\"" within 10 seconds
-    And the "gateway-runtime" container log should contain "\"tlsVer\":\"\"" within 10 seconds
+    And the "gateway-runtime" container log should contain "\"peerSubj\":null" within 10 seconds
+    And the "gateway-runtime" container log should contain "\"tlsVer\":null" within 10 seconds
 
   Scenario: A backend TLS failure is logged with its reason while the caller sees the sterile body
     Given the gateway identity fixture "gw-identity-a" is stored as "obs-identity-a"

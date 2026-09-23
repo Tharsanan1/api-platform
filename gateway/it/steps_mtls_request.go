@@ -107,6 +107,14 @@ func (m *mtlsSteps) httpsListenerShouldNotRequestClientCertificate() error {
 // its intermediate chain) for the TLS handshake. Keep-alives are disabled so
 // each step is a fresh connection — the certificate is negotiated per
 // connection, not per request.
+//
+// The certificate is presented unconditionally. Go's default selection
+// withholds a certificate whose issuer is not among the authorities the
+// server names in its CertificateRequest, which would turn every
+// "certificate from an authority outside the pool" scenario into a
+// no-certificate handshake; presenting it regardless is what curl and
+// OpenSSL-based clients do, and it is the only way to exercise the listener
+// accepting an untrusted certificate and the policy rejecting it.
 func (m *mtlsSteps) tlsClientWithCertificate(name string, includeChain bool) (*http.Client, error) {
 	certPEM, err := m.readFixtureCert(name)
 	if err != nil {
@@ -136,7 +144,9 @@ func (m *mtlsSteps) tlsClientWithCertificate(name string, includeChain bool) (*h
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true, // the listener uses a self-signed default cert
 				MinVersion:         tls.VersionTLS12,
-				Certificates:       []tls.Certificate{cert},
+				GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+					return &cert, nil
+				},
 			},
 			DisableKeepAlives: true,
 		},

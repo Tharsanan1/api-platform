@@ -231,3 +231,16 @@ Decisions taken while writing slice 2 tests: unknown-parameter message is `unkno
   an application.
 - The integration stack's router access log switches to the JSON format so the five fields can be
   asserted; no scenario depended on the text format.
+- Go- and Java-style TLS clients withhold a certificate whose issuer is not among the authorities the
+  listener names in its CertificateRequest (the pool), so the gateway sees no certificate at all
+  and the policy reports `no_certificate`; curl and OpenSSL-based clients present it and the policy
+  reports `untrusted_chain`. Both end in the same 401. The integration client presents its
+  certificate unconditionally so the accept-untrusted verdict path is exercised. Worth a line in the
+  user documentation: which reason an operator sees for a foreign certificate depends on the client.
+- Envoy renders an empty access-log operator as JSON `null`, not an empty string; the
+  no-certificate scenario asserts `null`.
+- `policy_executions_total` gains the `status="denied"` value for a policy that short-circuits with
+  an immediate response (previously every executed policy counted as `executed`); this applies to
+  every policy, not only mtls-auth.
+- The warning `code` fields in the OpenAPI document are closed enums; a unit test checks every code
+  the controller can emit is listed.

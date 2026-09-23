@@ -574,6 +574,31 @@ func TestConfig_Validate_AccessLogFields(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_AccessLogJSONFields(t *testing.T) {
+	cfg := defaultConfig()
+
+	expected := map[string]string{
+		"sni":       "%REQUESTED_SERVER_NAME%",
+		"tlsVer":    "%DOWNSTREAM_TLS_VERSION%",
+		"peerSubj":  "%DOWNSTREAM_PEER_SUBJECT%",
+		"peerFp":    "%DOWNSTREAM_PEER_FINGERPRINT_256%",
+		"upTlsFail": "%UPSTREAM_TRANSPORT_FAILURE_REASON%",
+	}
+	for key, want := range expected {
+		got, ok := cfg.Router.AccessLogs.JSONFields[key]
+		assert.True(t, ok, "expected default json_fields to contain key %q", key)
+		assert.Equal(t, want, got, "unexpected value for json_fields key %q", key)
+	}
+
+	const unchangedTextFormat = routerLogComponentTag + "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" " +
+		"%REQ(:PATH)% %UPSTREAM_PROTOCOL% %RESPONSE_CODE% %RESPONSE_FLAGS% %RESPONSE_CODE_DETAILS% " +
+		"%CONNECTION_TERMINATION_DETAILS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% " +
+		"%REQUEST_TX_DURATION% %RESPONSE_TX_DURATION% %REQUEST_DURATION% %RESPONSE_DURATION% " +
+		"\"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" " +
+		"\"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\"\n"
+	assert.Equal(t, unchangedTextFormat, cfg.Router.AccessLogs.TextFormat, "text access log format must stay unchanged")
+}
+
 func TestConfig_Validate_LogLevel(t *testing.T) {
 	tests := []struct {
 		name    string

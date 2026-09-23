@@ -90,9 +90,14 @@ type Bundle struct {
 const MsgNotPEMCertificate = "the value is not a PEM-encoded certificate"
 
 const (
-	codeClientCAIsLeaf      = "CLIENT_CA_IS_LEAF"
-	codeClientCANotYetValid = "CLIENT_CA_NOT_YET_VALID"
-	codeCertExpiresSoon     = "CERT_EXPIRES_SOON"
+	// CodeClientCAIsLeaf, CodeClientCANotYetValid and CodeCertExpiresSoon are
+	// exported (unlike the field/message constants alongside them) so a
+	// cross-check against the OpenAPI CertificateWarning.code enum can
+	// reference the same values this package actually emits, rather than a
+	// second hardcoded copy of each string.
+	CodeClientCAIsLeaf      = "CLIENT_CA_IS_LEAF"
+	CodeClientCANotYetValid = "CLIENT_CA_NOT_YET_VALID"
+	CodeCertExpiresSoon     = "CERT_EXPIRES_SOON"
 	fieldCertificate        = "certificate"
 	fieldNotAfter           = "notAfter"
 	msgPrivateKeyPresent    = "the upload contains a private key; a client-CA entry accepts certificates only"
@@ -158,7 +163,7 @@ func inspectBundle(certs []*x509.Certificate, identity *x509.Certificate, now ti
 	if !identity.IsCA {
 		bundle.IsLeaf = true
 		bundle.Warnings = append(bundle.Warnings, Warning{
-			Code:    codeClientCAIsLeaf,
+			Code:    CodeClientCAIsLeaf,
 			Field:   fieldCertificate,
 			Message: msgLeafNotAuthority,
 		})
@@ -166,7 +171,7 @@ func inspectBundle(certs []*x509.Certificate, identity *x509.Certificate, now ti
 
 	if identity.NotBefore.After(now) {
 		bundle.Warnings = append(bundle.Warnings, Warning{
-			Code:    codeClientCANotYetValid,
+			Code:    CodeClientCANotYetValid,
 			Field:   fieldCertificate,
 			Message: fmt.Sprintf("the certificate is not valid before %s", identity.NotBefore.Format(time.RFC3339)),
 		})
@@ -182,7 +187,7 @@ func ExpiryWarning(notAfter, now time.Time) *Warning {
 		return nil
 	}
 	return &Warning{
-		Code:    codeCertExpiresSoon,
+		Code:    CodeCertExpiresSoon,
 		Field:   fieldNotAfter,
 		Message: fmt.Sprintf("the certificate expires on %s", notAfter.Format(time.RFC3339)),
 	}

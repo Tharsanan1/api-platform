@@ -28,6 +28,7 @@ import (
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/certmetrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
@@ -172,6 +173,10 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 			"message": "certificate updated but failed to update SDS",
 		})
 		return
+	}
+
+	if _, err := certmetrics.Refresh(s.db); err != nil {
+		log.Warn("Failed to refresh certificate metrics after update", slog.Any("error", err))
 	}
 
 	zero := 0

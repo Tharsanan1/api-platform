@@ -80,6 +80,9 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
@@ -118,25 +121,35 @@ const (
 	// whenever a certificate was presented on this connection.
 	xfccHeaderName = "x-forwarded-client-cert"
 
-	// Deny reasons. These are for telemetry/Debug logging only (see
-	// evaluationResult) — every deny produces the identical configured
-	// failure response regardless of reason, per error-handling.md's
-	// unified-auth-failure directive.
+	// Deny reasons. These are for telemetry/Debug logging and the
+	// mtls_auth.reason span attribute only (see evaluationResult) — every
+	// deny produces the identical configured failure response regardless of
+	// reason, per error-handling.md's unified-auth-failure directive.
 	reasonAttributeAbsent = "attribute_absent"
 	reasonNoCertificate   = "no_certificate"
 	reasonExpired         = "expired"
 	reasonNotYetValid     = "not_yet_valid"
 	reasonUntrustedChain  = "untrusted_chain"
 	reasonInvalidCert     = "invalid_certificate"
-	reasonNoMatchingEntry = "no_matching_entry"
 
-	// evaluationResult.source values. sourceConnection is "handshake" per
+	// The three accept-list rejection reasons, in increasing order of
+	// specificity: authority_not_accepted (no entry's authority verified the
+	// certificate at all) < san_mismatch (an entry's authority matched but
+	// its SAN narrowing didn't) < thumbprint_mismatch (authority and SAN both
+	// matched but the thumbprint narrowing didn't). evaluateAcceptList
+	// reports the most specific of these reached across every entry, not
+	// just the first or last.
+	reasonAuthorityNotAccepted = "authority_not_accepted"
+	reasonSANMismatch          = "san_mismatch"
+	reasonThumbprintMismatch   = "thumbprint_mismatch"
+
+	// evaluationResult.source values. sourceHandshake is "handshake" per
 	// directive 1: the certificate came from the TLS handshake itself, as
 	// opposed to a header a front proxy relayed (sourceHeader) or an
 	// unconditionally-believed header (sourceBypass).
-	sourceConnection = "handshake"
-	sourceHeader     = "header"
-	sourceBypass     = "bypass"
+	sourceHandshake = "handshake"
+	sourceHeader    = "header"
+	sourceBypass    = "bypass"
 )
 
 // acceptEntry is one parsed, ready-to-verify entry of the controller-resolved
@@ -192,20 +205,31 @@ type evaluationResult struct {
 	reason        string
 	entryIndex    int // index into accept of the matched entry; -1 when authenticated is false
 
-	// Populated only when authenticated is true — everything OnRequestHeaders
-	// needs to build policy.AuthContext.
-	subject      string
-	issuerCA     string
+	// subject and issuerCA are populated only when authenticated is true —
+	// everything else OnRequestHeaders needs to build policy.AuthContext
+	// beyond what's below.
+	subject  string
+	issuerCA string
+
+	// credentialID (the canonical SHA-256 thumbprint), subjectDN, and
+	// notAfter are populated whenever a leaf certificate was successfully
+	// parsed and date-checked, on both allow and deny — every step past that
+	// point evaluated an actual certificate, so OnRequestHeaders' span
+	// attributes (tls.client.hash.sha256/tls.client.subject/tls.client.not_after)
+	// still have something to report even on a reject.
 	credentialID string
 	subjectDN    string
 	issuerDN     string
 	serialNumber string
 	notAfter     time.Time
 
-	// source, relayedBy, and relaySubject are exposed for tests and, on
-	// success, copied into AuthContext.Properties by OnRequestHeaders.
-	// source is one of sourceConnection/sourceHeader/sourceBypass;
-	// relayedBy/relaySubject are populated only when source == sourceHeader.
+	// source, relayedBy, and relaySubject are exposed for tests and copied
+	// into span attributes by OnRequestHeaders on every outcome — never
+	// gated on authenticated. source is one of
+	// sourceHandshake/sourceHeader/sourceBypass; relayedBy/relaySubject are
+	// populated whenever source == sourceHeader, allow or deny alike (the
+	// connection already proved itself a trusted relay before the header's
+	// own certificate was ever evaluated).
 	source       string
 	relayedBy    string
 	relaySubject string
@@ -297,6 +321,8 @@ func (p *MtlsAuthPolicy) Mode() policy.ProcessingMode {
 func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[string]interface{}) evaluationResult {
 	now := time.Now()
 
+	p.warnUnpooledAcceptAuthorities()
+
 	if p.headerModeOn() {
 		if headerValue, present := p.headerRawValue(reqCtx); present {
 			if p.header.trustAny {
@@ -315,13 +341,26 @@ func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[str
 	return p.evaluateConnectionCertificate(reqCtx, now)
 }
 
+// withLeafInfo attaches leaf-derived, non-sensitive attributes (canonical
+// SHA-256 thumbprint, subject DN, NotAfter) to a result whose certificate was
+// successfully parsed and date-checked — including a deny result, so
+// OnRequestHeaders can still report tls.client.subject/tls.client.hash.sha256/
+// tls.client.not_after span attributes for a certificate that failed
+// authentication, not only one that passed it.
+func withLeafInfo(result evaluationResult, leaf *x509.Certificate) evaluationResult {
+	result.subjectDN = leaf.Subject.String()
+	result.credentialID = sha256Hex(leaf.Raw)
+	result.notAfter = leaf.NotAfter
+	return result
+}
+
 // evaluateConnectionCertificate evaluates the connection's own certificate
 // against the accept list. This is
 // what runs whenever the header is absent, ignored (header mode off, or on
 // but no relay vouches for this connection), ignored-but-logged (step 4
 // above), or simply never in play at all.
 func (p *MtlsAuthPolicy) evaluateConnectionCertificate(reqCtx *policy.RequestHeaderContext, now time.Time) evaluationResult {
-	deny := evaluationResult{authenticated: false, entryIndex: -1}
+	deny := evaluationResult{authenticated: false, entryIndex: -1, source: sourceHandshake}
 
 	// Step 1: no gateway assertion about this connection's certificate at
 	// all. Nil MUST be treated as authentication failure, never as "no
@@ -346,7 +385,11 @@ func (p *MtlsAuthPolicy) evaluateConnectionCertificate(reqCtx *policy.RequestHea
 		return deny
 	}
 	if !*tls.PeerCertValid {
-		deny.reason = p.deriveRejectReason(tls, now)
+		reason, rejectedLeaf := p.deriveRejectReason(tls, now)
+		deny.reason = reason
+		if rejectedLeaf != nil {
+			deny = withLeafInfo(deny, rejectedLeaf)
+		}
 		return deny
 	}
 
@@ -360,17 +403,15 @@ func (p *MtlsAuthPolicy) evaluateConnectionCertificate(reqCtx *policy.RequestHea
 	}
 	if now.After(leaf.NotAfter) {
 		deny.reason = reasonExpired
-		return deny
+		return withLeafInfo(deny, leaf)
 	}
 	if now.Before(leaf.NotBefore) {
 		deny.reason = reasonNotYetValid
-		return deny
+		return withLeafInfo(deny, leaf)
 	}
 
 	result := p.evaluateAcceptList(leaf, p.intermediatesPool(reqCtx, tls), now, tls.SHA256Thumbprint)
-	if result.authenticated {
-		result.source = sourceConnection
-	}
+	result.source = sourceHandshake
 	return result
 }
 
@@ -379,8 +420,17 @@ func (p *MtlsAuthPolicy) evaluateConnectionCertificate(reqCtx *policy.RequestHea
 // connection path, but with Intermediates limited to pool material only —
 // there is no Envoy verdict and no XFCC chain for a header-carried
 // certificate — and with no Envoy-thumbprint cross-check (same reason).
+//
+// relayName/relaySubject are carried onto every outcome (allow AND deny)
+// whenever source == sourceHeader: the connection already proved itself a
+// trusted relay before the header's own certificate was evaluated at all, so
+// that fact belongs on the result regardless of what this header's
+// certificate turns out to do.
 func (p *MtlsAuthPolicy) evaluateHeaderCertificate(raw string, now time.Time, source, relayName, relaySubject string) evaluationResult {
-	deny := evaluationResult{authenticated: false, entryIndex: -1}
+	deny := evaluationResult{
+		authenticated: false, entryIndex: -1,
+		source: source, relayedBy: relayName, relaySubject: relaySubject,
+	}
 
 	leaf, err := decodeHeaderCertificate(raw)
 	if err != nil {
@@ -389,27 +439,48 @@ func (p *MtlsAuthPolicy) evaluateHeaderCertificate(raw string, now time.Time, so
 	}
 	if now.After(leaf.NotAfter) {
 		deny.reason = reasonExpired
-		return deny
+		return withLeafInfo(deny, leaf)
 	}
 	if now.Before(leaf.NotBefore) {
 		deny.reason = reasonNotYetValid
-		return deny
+		return withLeafInfo(deny, leaf)
 	}
 
 	result := p.evaluateAcceptList(leaf, p.poolOnlyIntermediates(), now, "")
-	if !result.authenticated {
-		return result
-	}
 	result.source = source
 	result.relayedBy = relayName
 	result.relaySubject = relaySubject
 	return result
 }
 
+// acceptRejectRank orders the three accept-list rejection reasons by
+// specificity, least to most, so evaluateAcceptList can track the single
+// most specific one reached across every entry rather than the first or
+// last. Any other reason (there shouldn't be one, deny starts unset) ranks
+// below all three.
+func acceptRejectRank(reason string) int {
+	switch reason {
+	case reasonThumbprintMismatch:
+		return 3
+	case reasonSANMismatch:
+		return 2
+	case reasonAuthorityNotAccepted:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // evaluateAcceptList is the accept-list matching loop shared by both the
 // connection path and the believed-header path: the first accept entry that
 // verifies leaf against its roots (via intermediates for path-building) AND
-// satisfies every narrowing it carries wins.
+// satisfies every narrowing it carries wins. On a deny, the reported reason
+// is the MOST SPECIFIC rejection reached across every entry (see
+// acceptRejectRank) — an entry whose authority matched but SAN narrowing
+// failed makes the deny at least san_mismatch, one whose authority and SAN
+// both matched but thumbprint narrowing failed makes it thumbprint_mismatch,
+// and authority_not_accepted only stands when no entry's authority verified
+// the certificate at all.
 //
 // connectionThumbprint is the Envoy-reported SHA-256 digest for THIS SAME
 // connection's certificate, used only as a defense-in-depth cross-check
@@ -418,8 +489,20 @@ func (p *MtlsAuthPolicy) evaluateHeaderCertificate(raw string, now time.Time, so
 // against (skipping the cross-check, not disabling the thumbprint narrowing
 // itself).
 func (p *MtlsAuthPolicy) evaluateAcceptList(leaf *x509.Certificate, intermediates *x509.CertPool, now time.Time, connectionThumbprint string) evaluationResult {
-	deny := evaluationResult{authenticated: false, entryIndex: -1}
 	canonicalThumbprint := sha256Hex(leaf.Raw)
+	deny := evaluationResult{
+		authenticated: false, entryIndex: -1,
+		reason:       reasonAuthorityNotAccepted,
+		subjectDN:    leaf.Subject.String(),
+		credentialID: canonicalThumbprint,
+		notAfter:     leaf.NotAfter,
+	}
+
+	upgrade := func(reason string) {
+		if acceptRejectRank(reason) > acceptRejectRank(deny.reason) {
+			deny.reason = reason
+		}
+	}
 
 	for i, entry := range p.accept {
 		if !verifyLeafAgainstRoots(leaf, entry.roots, intermediates, now) {
@@ -428,17 +511,20 @@ func (p *MtlsAuthPolicy) evaluateAcceptList(leaf *x509.Certificate, intermediate
 
 		subject, ok := sanNarrowedSubject(leaf, entry.uriSANs, entry.dnsSANs)
 		if !ok {
+			upgrade(reasonSANMismatch)
 			continue
 		}
 
 		if len(entry.thumbprints) > 0 {
 			if !slices.Contains(entry.thumbprints, canonicalThumbprint) {
+				upgrade(reasonThumbprintMismatch)
 				continue
 			}
 			// Defense in depth: our own PEM-derived digest must agree with
 			// what Envoy reported for this same connection (skipped when
 			// there is no Envoy verdict to check against — see doc comment).
 			if connectionThumbprint != "" && normalizeThumbprint(connectionThumbprint) != canonicalThumbprint {
+				upgrade(reasonThumbprintMismatch)
 				continue
 			}
 		}
@@ -456,7 +542,6 @@ func (p *MtlsAuthPolicy) evaluateAcceptList(leaf *x509.Certificate, intermediate
 		}
 	}
 
-	deny.reason = reasonNoMatchingEntry
 	return deny
 }
 
@@ -507,6 +592,39 @@ func (p *MtlsAuthPolicy) logIgnoredHeader(tls *policy.DownstreamTLS) {
 	slog.Debug("mtls-auth: client certificate header present on a non-relay connection",
 		slog.String("subject", subject),
 	)
+}
+
+// warnUnpooledAcceptAuthorities logs a WARN for every accept entry whose
+// named authority is not found among this policy instance's own client-CA
+// pool material — a sign the pool has drifted since this policy was bound
+// (e.g. the authority was removed from the pool but this API's accept list
+// still carries its own embedded copy). Logging on every request is
+// deliberate — this kind of drift should be visible immediately rather than
+// smoothed over by a throttle.
+func (p *MtlsAuthPolicy) warnUnpooledAcceptAuthorities() {
+	for _, entry := range p.accept {
+		if authorityInPool(entry.roots, p.pool) {
+			continue
+		}
+		slog.Warn("mtls-auth: accept entry names an authority not present in the gateway's client-CA pool",
+			slog.String("ca", entry.ca),
+		)
+	}
+}
+
+// authorityInPool reports whether any certificate in roots (an accept
+// entry's own embedded authority certificates) is also present, by exact
+// match, in pool (the gateway's whole client-CA pool material this policy
+// instance holds).
+func authorityInPool(roots []*x509.Certificate, pool []*x509.Certificate) bool {
+	for _, root := range roots {
+		for _, poolCert := range pool {
+			if root.Equal(poolCert) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // headerRawValue reads the configured client-certificate header from the
@@ -609,16 +727,21 @@ func sanNarrowedSubject(leaf *x509.Certificate, uriSANs, dnsSANs []string) (stri
 // deriveRejectReason is called only when Envoy has already rejected the
 // certificate (tls.PeerCertValid is a non-nil false); its result is for
 // telemetry/Debug logging only and never changes the deny decision itself.
-func (p *MtlsAuthPolicy) deriveRejectReason(tls *policy.DownstreamTLS, now time.Time) string {
+// deriveRejectReason returns the deny reason and, when the leaf parsed
+// successfully, the parsed certificate itself — so the caller can still
+// attach tls.client.* span attributes (via withLeafInfo) to a certificate
+// Envoy rejected outright. A nil certificate means parsing itself failed;
+// the reason is always reasonInvalidCert in that case.
+func (p *MtlsAuthPolicy) deriveRejectReason(tls *policy.DownstreamTLS, now time.Time) (string, *x509.Certificate) {
 	leaf, err := parseCertificatePEM(tls.PeerCertificatePEM)
 	if err != nil {
-		return reasonInvalidCert
+		return reasonInvalidCert, nil
 	}
 	if now.After(leaf.NotAfter) {
-		return reasonExpired
+		return reasonExpired, leaf
 	}
 	if now.Before(leaf.NotBefore) {
-		return reasonNotYetValid
+		return reasonNotYetValid, leaf
 	}
 
 	// Not a date problem — check whether a path exists to ANY certificate in
@@ -635,9 +758,9 @@ func (p *MtlsAuthPolicy) deriveRejectReason(tls *policy.DownstreamTLS, now time.
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 		CurrentTime:   now,
 	}); err != nil {
-		return reasonUntrustedChain
+		return reasonUntrustedChain, leaf
 	}
-	return reasonInvalidCert
+	return reasonInvalidCert, leaf
 }
 
 // chainCertificatesFromXFCC extracts every certificate in the Chain= element
@@ -654,12 +777,14 @@ func (p *MtlsAuthPolicy) chainCertificatesFromXFCC(reqCtx *policy.RequestHeaderC
 }
 
 // OnRequestHeaders performs mTLS authentication in the request-header phase.
-func (p *MtlsAuthPolicy) OnRequestHeaders(_ context.Context, reqCtx *policy.RequestHeaderContext, params map[string]interface{}) policy.RequestHeaderAction {
+func (p *MtlsAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, params map[string]interface{}) policy.RequestHeaderAction {
 	onFailureStatusCode := getIntParam(params, "onFailureStatusCode", defaultOnFailureStatusCode)
 	errorMessageFormat := getStringParam(params, "errorMessageFormat", defaultErrorMessageFormat)
 	errorMessage := getStringParam(params, "errorMessage", defaultErrorMessage)
 
 	result := p.evaluate(reqCtx, params)
+	setSpanAttributes(ctx, result, reqCtx.PeerCertificate())
+
 	if !result.authenticated {
 		slog.Debug("mtls-auth: rejecting request",
 			slog.String("reason", result.reason),
@@ -705,6 +830,69 @@ func (p *MtlsAuthPolicy) OnRequestHeaders(_ context.Context, reqCtx *policy.Requ
 		action.HeadersToRemove = []string{p.header.name}
 	}
 	return action
+}
+
+// setSpanAttributes records this request's mTLS authentication outcome on
+// the span already open in ctx (the per-policy span the executor started for
+// this call — see internal/executor/chain.go), so a trace shows exactly what
+// this policy decided and why without needing the access log or the 401
+// body. A no-op when nothing is recording, per OTel convention: attribute
+// construction below is cheap, but still gated so it's never paid for
+// nothing.
+//
+// tls is the connection's own TLS attributes (nil-safe): it's read
+// independently of result because tls.protocol.version is a property of the
+// CONNECTION, not of whichever certificate (connection or header-relayed)
+// ended up being evaluated.
+//
+// Never sets an attribute from a PEM, a certificate chain, or a raw header
+// value — only derived, already-non-sensitive fields (subject DN, canonical
+// thumbprint, NotAfter, entry index, reason code).
+func setSpanAttributes(ctx context.Context, result evaluationResult, tls *policy.DownstreamTLS) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() {
+		return
+	}
+
+	outcome := "deny"
+	if result.authenticated {
+		outcome = "allow"
+	}
+	attrs := make([]attribute.KeyValue, 0, 10)
+	attrs = append(attrs, attribute.String("mtls_auth.result", outcome))
+	if result.source != "" {
+		attrs = append(attrs, attribute.String("mtls_auth.source", result.source))
+	}
+
+	if result.authenticated {
+		attrs = append(attrs,
+			attribute.Int("mtls_auth.matched_entry", result.entryIndex),
+			attribute.String("enduser.id", result.subject),
+		)
+	} else {
+		attrs = append(attrs, attribute.String("mtls_auth.reason", result.reason))
+	}
+	if result.relayedBy != "" {
+		attrs = append(attrs, attribute.String("mtls_auth.relayed_by", result.relayedBy))
+	}
+
+	if result.subjectDN != "" {
+		attrs = append(attrs, attribute.String("tls.client.subject", result.subjectDN))
+	}
+	if result.authenticated && result.issuerCA != "" {
+		attrs = append(attrs, attribute.String("tls.client.issuer", result.issuerCA))
+	}
+	if result.credentialID != "" {
+		attrs = append(attrs, attribute.String("tls.client.hash.sha256", result.credentialID))
+	}
+	if !result.notAfter.IsZero() {
+		attrs = append(attrs, attribute.String("tls.client.not_after", result.notAfter.UTC().Format(time.RFC3339)))
+	}
+	if tls != nil && tls.TLSVersion != "" {
+		attrs = append(attrs, attribute.String("tls.protocol.version", tls.TLSVersion))
+	}
+
+	span.SetAttributes(attrs...)
 }
 
 // handleAuthFailure builds the uniform rejection response and records the

@@ -103,8 +103,11 @@ type mtlsSteps struct {
 
 // RegisterMTLSSteps registers step definitions for the client certificate
 // authority pool feature (features/mtls-client-ca-pool.feature) and the
-// client-certificate-authentication feature (features/mtls-auth.feature).
-func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps, jwtSteps *JWTSteps) {
+// client-certificate-authentication feature (features/mtls-auth.feature). It
+// returns the mtlsSteps instance so another registration function (e.g.
+// RegisterMTLSObservabilitySteps) can reuse its fixture-reading helpers
+// (thumbprintOf, parseFixtureCert) rather than re-implementing them.
+func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps, jwtSteps *JWTSteps) *mtlsSteps {
 	m := &mtlsSteps{state: state, httpSteps: httpSteps, jwtSteps: jwtSteps}
 
 	ctx.Before(func(c context.Context, sc *godog.Scenario) (context.Context, error) {
@@ -197,6 +200,8 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^the response should include a warning with code "([^"]*)" for field "([^"]*)"$`, m.responseShouldIncludeWarningWithCodeForField)
 	ctx.Step(`^the response should include a warning with code "([^"]*)"$`, m.responseShouldIncludeWarningWithCode)
 	ctx.Step(`^the response should include no warnings$`, m.responseShouldIncludeNoWarnings)
+
+	return m
 }
 
 // ============ Fixture reading ============

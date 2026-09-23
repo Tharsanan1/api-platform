@@ -75,7 +75,7 @@ func (c *ChainExecutor) ExecuteRequestHeaderPolicies(
 		spec := specs[i]
 		policyStartTime := time.Now()
 
-		_, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyRequestFormat, spec.Name),
+		spanCtx, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyRequestFormat, spec.Name),
 			trace.WithSpanKind(trace.SpanKindInternal))
 		if span.IsRecording() {
 			span.SetAttributes(
@@ -142,7 +142,7 @@ func (c *ChainExecutor) ExecuteRequestHeaderPolicies(
 
 		// spec.Parameters.Raw is an immutable snapshot published at chain-build time and
 		// shared read-only across concurrent requests; policies must not mutate it.
-		action := headerPol.OnRequestHeaders(ctx, reqCtx, spec.Parameters.Raw)
+		action := headerPol.OnRequestHeaders(spanCtx, reqCtx, spec.Parameters.Raw)
 		executionTime := time.Since(policyStartTime)
 
 		// Apply header mutations to reqCtx so subsequent policies and CEL conditions see the mutated state
@@ -162,7 +162,7 @@ func (c *ChainExecutor) ExecuteRequestHeaderPolicies(
 			}
 		}
 
-		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, "executed").Inc()
+		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, executionStatus(action)).Inc()
 		metrics.PolicyDurationSeconds.WithLabelValues(spec.Name, spec.Version, api, route).Observe(executionTime.Seconds())
 
 		if span.IsRecording() {
@@ -230,7 +230,7 @@ func (c *ChainExecutor) ExecuteRequestPolicies(ctx context.Context, policyList [
 		policyStartTime := time.Now()
 
 		// Create span for individual policy execution - NoOp if tracing disabled
-		_, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyRequestFormat, spec.Name),
+		spanCtx, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyRequestFormat, spec.Name),
 			trace.WithSpanKind(trace.SpanKindInternal))
 
 		// Add policy metadata attributes
@@ -306,11 +306,11 @@ func (c *ChainExecutor) ExecuteRequestPolicies(ctx context.Context, policyList [
 		// spec.Parameters.Raw is an immutable snapshot published at chain-build time and
 		// shared read-only across concurrent requests; policies must not mutate it.
 		slog.Debug("[body] calling OnRequestBody", "policy", spec.Name, "version", spec.Version, "route", route)
-		action := rp.OnRequestBody(ctx, reqCtx, spec.Parameters.Raw)
+		action := rp.OnRequestBody(spanCtx, reqCtx, spec.Parameters.Raw)
 		executionTime := time.Since(policyStartTime)
 
 		// Record policy execution metrics
-		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, "executed").Inc()
+		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, executionStatus(action)).Inc()
 		metrics.PolicyDurationSeconds.WithLabelValues(spec.Name, spec.Version, api, route).Observe(executionTime.Seconds())
 
 		// Add execution time attribute
@@ -398,7 +398,7 @@ func (c *ChainExecutor) ExecuteResponseHeaderPolicies(
 		spec := specs[i]
 		policyStartTime := time.Now()
 
-		_, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyResponseFormat, spec.Name),
+		spanCtx, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyResponseFormat, spec.Name),
 			trace.WithSpanKind(trace.SpanKindInternal))
 		if span.IsRecording() {
 			span.SetAttributes(
@@ -462,7 +462,7 @@ func (c *ChainExecutor) ExecuteResponseHeaderPolicies(
 
 		// spec.Parameters.Raw is an immutable snapshot published at chain-build time and
 		// shared read-only across concurrent requests; policies must not mutate it.
-		action := headerPol.OnResponseHeaders(ctx, respCtx, spec.Parameters.Raw)
+		action := headerPol.OnResponseHeaders(spanCtx, respCtx, spec.Parameters.Raw)
 		executionTime := time.Since(policyStartTime)
 
 		// Apply header mutations to respCtx so subsequent policies and CEL conditions see the mutated state
@@ -476,7 +476,7 @@ func (c *ChainExecutor) ExecuteResponseHeaderPolicies(
 			}
 		}
 
-		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, "executed").Inc()
+		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, executionStatus(action)).Inc()
 		metrics.PolicyDurationSeconds.WithLabelValues(spec.Name, spec.Version, api, route).Observe(executionTime.Seconds())
 
 		if span.IsRecording() {
@@ -545,7 +545,7 @@ func (c *ChainExecutor) ExecuteResponsePolicies(ctx context.Context, policyList 
 		policyStartTime := time.Now()
 
 		// Create span for individual policy execution - NoOp if tracing disabled
-		_, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyResponseFormat, spec.Name),
+		spanCtx, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyResponseFormat, spec.Name),
 			trace.WithSpanKind(trace.SpanKindInternal))
 
 		// Add policy metadata attributes
@@ -621,11 +621,11 @@ func (c *ChainExecutor) ExecuteResponsePolicies(ctx context.Context, policyList 
 		// spec.Parameters.Raw is an immutable snapshot published at chain-build time and
 		// shared read-only across concurrent requests; policies must not mutate it.
 		slog.Debug("[body] calling OnResponseBody", "policy", spec.Name, "version", spec.Version, "route", route)
-		action := rp.OnResponseBody(ctx, respCtx, spec.Parameters.Raw)
+		action := rp.OnResponseBody(spanCtx, respCtx, spec.Parameters.Raw)
 		executionTime := time.Since(policyStartTime)
 
 		// Record policy execution metrics
-		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, "executed").Inc()
+		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, executionStatus(action)).Inc()
 		metrics.PolicyDurationSeconds.WithLabelValues(spec.Name, spec.Version, api, route).Observe(executionTime.Seconds())
 
 		// Add execution time attribute
@@ -712,7 +712,7 @@ func (c *ChainExecutor) ExecuteStreamingRequestPolicies(
 		spec := specs[i]
 		policyStartTime := time.Now()
 
-		_, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyRequestFormat, spec.Name),
+		spanCtx, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyRequestFormat, spec.Name),
 			trace.WithSpanKind(trace.SpanKindInternal))
 		if span.IsRecording() {
 			span.SetAttributes(
@@ -774,10 +774,10 @@ func (c *ChainExecutor) ExecuteStreamingRequestPolicies(
 		// spec.Parameters.Raw is an immutable snapshot published at chain-build time and
 		// shared read-only across concurrent requests; policies must not mutate it.
 		slog.Debug("[streaming] calling OnRequestBodyChunk", "policy", spec.Name, "version", spec.Version, "route", route, "end_of_stream", currentChunk.EndOfStream)
-		action := streamingPol.OnRequestBodyChunk(ctx, reqCtx, currentChunk, spec.Parameters.Raw)
+		action := streamingPol.OnRequestBodyChunk(spanCtx, reqCtx, currentChunk, spec.Parameters.Raw)
 		executionTime := time.Since(policyStartTime)
 
-		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, "executed").Inc()
+		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, executionStatus(action)).Inc()
 		metrics.PolicyDurationSeconds.WithLabelValues(spec.Name, spec.Version, api, route).Observe(executionTime.Seconds())
 
 		if span.IsRecording() {
@@ -852,7 +852,7 @@ func (c *ChainExecutor) ExecuteStreamingResponsePolicies(
 		spec := specs[i]
 		policyStartTime := time.Now()
 
-		_, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyResponseFormat, spec.Name),
+		spanCtx, span := c.tracer.Start(ctx, fmt.Sprintf(constants.SpanPolicyResponseFormat, spec.Name),
 			trace.WithSpanKind(trace.SpanKindInternal))
 		if span.IsRecording() {
 			span.SetAttributes(
@@ -919,10 +919,10 @@ func (c *ChainExecutor) ExecuteStreamingResponsePolicies(
 		// spec.Parameters.Raw is an immutable snapshot published at chain-build time and
 		// shared read-only across concurrent requests; policies must not mutate it.
 		slog.Debug("[streaming] calling OnResponseBodyChunk", "policy", spec.Name, "version", spec.Version, "route", route, "end_of_stream", currentChunk.EndOfStream)
-		action := streamingPol.OnResponseBodyChunk(ctx, respCtx, currentChunk, spec.Parameters.Raw)
+		action := streamingPol.OnResponseBodyChunk(spanCtx, respCtx, currentChunk, spec.Parameters.Raw)
 		executionTime := time.Since(policyStartTime)
 
-		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, "executed").Inc()
+		metrics.PolicyExecutionsTotal.WithLabelValues(spec.Name, spec.Version, api, route, executionStatus(action)).Inc()
 		metrics.PolicyDurationSeconds.WithLabelValues(spec.Name, spec.Version, api, route).Observe(executionTime.Seconds())
 
 		if span.IsRecording() {
@@ -1059,6 +1059,20 @@ type CELEvaluator interface {
 	EvaluateResponseBodyCondition(expression string, ctx *policy.ResponseContext) (bool, error)
 	EvaluateStreamingRequestCondition(expression string, ctx *policy.RequestStreamContext) (bool, error)
 	EvaluateStreamingResponseCondition(expression string, ctx *policy.ResponseStreamContext) (bool, error)
+}
+
+// executionStatus reports the policy_executions_total "status" label value
+// for a policy's action: "denied" when the policy short-circuited the chain
+// with an immediate response, "executed" otherwise. Streaming actions
+// (ForwardRequestChunk/ForwardResponseChunk) never carry ImmediateResponse —
+// request/response headers are already committed to upstream/downstream by
+// the time chunks are processed (see policy.StreamingRequestAction's doc
+// comment) — so they always report "executed".
+func executionStatus(action any) string {
+	if _, ok := action.(policy.ImmediateResponse); ok {
+		return "denied"
+	}
+	return "executed"
 }
 
 // NewChainExecutor creates a new ChainExecutor execution engine

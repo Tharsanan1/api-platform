@@ -125,8 +125,9 @@ func buildRestAPIResourceResponseWithWarnings(resolvedCfg api.RestAPI, stored *m
 	if len(warnings) > 0 {
 		apiWarnings := make([]api.Warning, len(warnings))
 		for i, w := range warnings {
+			code := api.WarningCode(w.Code)
 			apiWarnings[i] = api.Warning{
-				Code:    stringPtr(w.Code),
+				Code:    &code,
 				Field:   stringPtr(w.Field),
 				Message: stringPtr(w.Message),
 			}

@@ -21,7 +21,6 @@ package handlers
 import (
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
@@ -31,38 +30,6 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/httpkit/httputil"
 )
-
-// certExpiryWarnLogInterval bounds how often the CERT_EXPIRES_SOON warning
-// is logged (at WARN) for any single certificate, independent of how often
-// GET /certificates is called. The warning itself is still returned in the
-// response body on every call — only the log line is throttled.
-const certExpiryWarnLogInterval = 24 * time.Hour
-
-// certExpiryWarnThrottle is a small in-memory, mutex-guarded rate limiter
-// for the CERT_EXPIRES_SOON WARN log line, keyed by certificate UUID. It is
-// intentionally not configurable (no config key) — the interval is fixed.
-// Zero value is ready to use: no explicit initialization required.
-type certExpiryWarnThrottle struct {
-	mu   sync.Mutex
-	last map[string]time.Time // certificate UUID -> last time this warning was logged
-}
-
-// shouldLog reports whether a CERT_EXPIRES_SOON WARN should be logged now
-// for the given certificate UUID, and records the attempt either way so the
-// next call within the interval is suppressed.
-func (t *certExpiryWarnThrottle) shouldLog(certUUID string, now time.Time) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if last, ok := t.last[certUUID]; ok && now.Sub(last) < certExpiryWarnLogInterval {
-		return false
-	}
-	if t.last == nil {
-		t.last = make(map[string]time.Time)
-	}
-	t.last[certUUID] = now
-	return true
-}
 
 // ListCertificates lists all custom certificates, optionally filtered by usage
 // GET /certificates
@@ -155,16 +122,10 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 			}
 
 			if warning := clientca.ExpiryWarning(cert.NotAfter, now); warning != nil {
+				// The expiry sweep (see pkg/certmetrics) is what logs this
+				// warning on a fixed schedule; the listing only returns it
+				// in the response body.
 				item.Warnings = []clientca.Warning{*warning}
-				// The warning always goes back in the response body; the log
-				// line is throttled to once per certificate per day so that
-				// polling this endpoint doesn't flood logs.
-				if s.certExpiryWarnThrottle.shouldLog(cert.UUID, now) {
-					log.Warn("Client certificate authority expiry warning",
-						slog.String("code", warning.Code),
-						slog.String("name", cert.Name),
-						slog.Time("notAfter", cert.NotAfter))
-				}
 			}
 		} else if usage == models.CertificateUsageIdentity {
 			item.KeyAlgorithm = cert.KeyAlgorithm
@@ -186,12 +147,6 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 
 			if warning := clientca.ExpiryWarning(cert.NotAfter, now); warning != nil {
 				item.Warnings = []clientca.Warning{*warning}
-				if s.certExpiryWarnThrottle.shouldLog(cert.UUID, now) {
-					log.Warn("Gateway identity expiry warning",
-						slog.String("code", warning.Code),
-						slog.String("name", cert.Name),
-						slog.Time("notAfter", cert.NotAfter))
-				}
 			}
 		} else {
 			if firstCert, err := firstX509Certificate(cert.Certificate); err == nil {

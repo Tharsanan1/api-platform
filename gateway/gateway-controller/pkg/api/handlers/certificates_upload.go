@@ -32,6 +32,7 @@ import (
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/certmetrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/gatewayidentity"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
@@ -233,6 +234,16 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A client-CA authority or gateway identity uploaded already within its
+	// expiry horizon gets the same CERT_EXPIRES_SOON warning the listing
+	// endpoint would report for it later — the caller shouldn't have to poll
+	// GET /certificates just to learn what upload already knew.
+	if effectiveUsage == models.CertificateUsageClient || effectiveUsage == models.CertificateUsageIdentity {
+		if warning := clientca.ExpiryWarning(notAfter, time.Now()); warning != nil {
+			warnings = append(warnings, *warning)
+		}
+	}
+
 	for _, warning := range warnings {
 		fields := []any{slog.String("code", warning.Code), slog.String("name", req.Name)}
 		log.Warn("Client certificate authority warning", fields...)
@@ -335,6 +346,10 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	log.Info("SDS snapshot updated with new certificate",
 		slog.String("id", certID),
 		slog.String("name", req.Name))
+
+	if _, err := certmetrics.Refresh(s.db); err != nil {
+		log.Warn("Failed to refresh certificate metrics after upload", slog.Any("error", err))
+	}
 
 	// The client-CA pool just changed: keep every deployed mtls-auth API's
 	// policy chain current so an API that inherits the pool sees the new

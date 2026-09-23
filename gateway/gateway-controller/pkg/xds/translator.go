@@ -52,6 +52,7 @@ import (
 	extproc "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	luav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/lua/v3"
 	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
+	tlsinspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	otelresourcedetectorsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/tracers/opentelemetry/resource_detectors/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
@@ -1611,6 +1612,7 @@ func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS b
 	}
 
 	// Add TLS configuration if HTTPS
+	var listenerFilters []*listener.ListenerFilter
 	if isHTTPS {
 		tlsContext, err := t.createDownstreamTLSContext(requireDownstreamClientCA)
 		if err != nil {
@@ -1628,6 +1630,24 @@ func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS b
 				TypedConfig: tlsContextAny,
 			},
 		}
+
+		// The TLS Inspector listener filter peeks the ClientHello before the
+		// transport socket terminates the handshake — without it, Envoy never
+		// populates connection.requested_server_name (the %REQUESTED_SERVER_NAME%
+		// access-log/SNI attribute), regardless of what SNI the client actually
+		// sent. This listener has a single filter chain (no SNI-based filter
+		// chain matching), so the inspector's only job here is making that
+		// attribute observable, not routing.
+		tlsInspectorAny, err := anypb.New(&tlsinspectorv3.TlsInspector{})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal TLS inspector listener filter: %w", err)
+		}
+		listenerFilters = append(listenerFilters, &listener.ListenerFilter{
+			Name: "envoy.filters.listener.tls_inspector",
+			ConfigType: &listener.ListenerFilter_TypedConfig{
+				TypedConfig: tlsInspectorAny,
+			},
+		})
 	}
 
 	return &listener.Listener{
@@ -1643,6 +1663,7 @@ func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS b
 				},
 			},
 		},
+		ListenerFilters:               listenerFilters,
 		FilterChains:                  []*listener.FilterChain{filterChain},
 		PerConnectionBufferLimitBytes: wrapperspb.UInt32(t.routerConfig.HTTPListener.PerConnectionBufferLimitBytes),
 	}, routeConfig, nil

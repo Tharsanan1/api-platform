@@ -46,7 +46,12 @@ func RegisterMetricsSteps(ctx *godog.ScenarioContext, state *TestState, httpStep
 	ctx.Step(`^I send a GET request to the gateway controller metrics endpoint$`, m.iSendGETRequestToGatewayControllerMetrics)
 	ctx.Step(`^I send a GET request to the policy engine metrics endpoint$`, m.iSendGETRequestToPolicyEngineMetrics)
 	ctx.Step(`^the response should contain Prometheus metrics$`, m.theResponseShouldContainPrometheusMetrics)
-	ctx.Step(`^the response should contain metric "([^"]*)"$`, m.theResponseShouldContainMetric)
+	// (.*) rather than [^"]* — a metric argument itself carries a quoted
+	// Prometheus label value (e.g. `cert_name=\"obs-expiring\"`), and godog
+	// does not unescape a step's `\"` sequences, so the argument text can
+	// contain literal embedded quote characters that [^"]* would stop at.
+	ctx.Step(`^the response should contain metric "(.*)"$`, m.theResponseShouldContainMetric)
+	ctx.Step(`^the response should not contain metric "(.*)"$`, m.theResponseShouldNotContainMetric)
 }
 
 // iSendGETRequestToGatewayControllerMetrics sends a GET request to the gateway controller metrics endpoint
@@ -98,13 +103,42 @@ func (m *MetricsSteps) theResponseShouldContainPrometheusMetrics() error {
 	return nil
 }
 
+// unescapeGherkinQuotes undoes a step author's `\"` escaping of a literal
+// quote inside a step's own quoted "..." argument. Godog/gherkin does not
+// interpret step text as a language with escape sequences — a step's text is
+// stored verbatim, backslashes included — so a step definition matching an
+// argument that itself needs to carry a quote (e.g. a Prometheus label value
+// like `cert_name="obs-expiring"`) sees the literal two-character sequence
+// `\"` in its captured group, not a bare `"`. This turns that back into the
+// real value the feature author meant, before it's compared against actual
+// response/log text that has no such escaping.
+func unescapeGherkinQuotes(s string) string {
+	return strings.ReplaceAll(s, `\"`, `"`)
+}
+
 // theResponseShouldContainMetric verifies the response contains a specific metric
 func (m *MetricsSteps) theResponseShouldContainMetric(metricName string) error {
+	metricName = unescapeGherkinQuotes(metricName)
 	body := m.httpSteps.LastBody()
 	bodyStr := string(body)
 
 	if !strings.Contains(bodyStr, metricName) {
 		return fmt.Errorf("response does not contain metric '%s'", metricName)
+	}
+
+	return nil
+}
+
+// theResponseShouldNotContainMetric verifies the response does NOT contain a
+// specific metric (or metric series) — the deletion/absence counterpart to
+// theResponseShouldContainMetric.
+func (m *MetricsSteps) theResponseShouldNotContainMetric(metricName string) error {
+	metricName = unescapeGherkinQuotes(metricName)
+	body := m.httpSteps.LastBody()
+	bodyStr := string(body)
+
+	if strings.Contains(bodyStr, metricName) {
+		return fmt.Errorf("response unexpectedly contains metric '%s'", metricName)
 	}
 
 	return nil

@@ -130,6 +130,7 @@ func getFeaturePaths() []string {
 		"features/mtls-pool-references.feature",
 		"features/mtls-header-relay.feature",
 		"features/mtls-outbound.feature",
+		"features/mtls-observability.feature",
 		"features/config-dump.feature",
 		"features/api-management.feature",
 		"features/api-error-responses.feature",
@@ -362,12 +363,13 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 		RegisterLLMSteps(ctx, testState, httpSteps)
 		RegisterJWTSteps(ctx, testState, httpSteps, jwtSteps)
 		RegisterPolicyEngineSteps(ctx, testState, httpSteps)
-		RegisterAnalyticsSteps(ctx, testState, httpSteps)
+		analyticsSteps := RegisterAnalyticsSteps(ctx, testState, httpSteps)
 		RegisterSubscriptionSteps(ctx, testState, httpSteps)
 		RegisterSecretSteps(ctx, testState, httpSteps)
 		RegisterTemplateSteps(ctx, testState, httpSteps)
 		RegisterDPToCPSteps(ctx, testState)
-		RegisterMTLSSteps(ctx, testState, httpSteps, jwtSteps)
+		mtlsStepDefs := RegisterMTLSSteps(ctx, testState, httpSteps, jwtSteps)
+		RegisterMTLSObservabilitySteps(ctx, composeManager, mtlsStepDefs, analyticsSteps)
 	}
 
 	// Register common HTTP and assertion steps

@@ -81,13 +81,6 @@ type APIServer struct {
 	subscriptionSnapshotUpdater utils.SubscriptionSnapshotUpdater
 	subscriptionResourceService *utils.SubscriptionResourceService
 
-	// certExpiryWarnThrottle rate-limits the CERT_EXPIRES_SOON WARN log line
-	// emitted by ListCertificates (see certificates.go) so that polling the
-	// list endpoint doesn't flood logs. Zero-value usable: no initialization
-	// required in NewAPIServer or in tests constructing an APIServer literal
-	// directly.
-	certExpiryWarnThrottle certExpiryWarnThrottle
-
 	// encryptionManager encrypts a gateway identity's private key at rest.
 	// Set post-construction via SetEncryptionManager, since the encryption
 	// provider manager is built from operator config that may configure no

@@ -40,12 +40,12 @@ type AnalyticsSteps struct {
 // AnalyticsEvent represents the structure of a Moesif analytics event
 type AnalyticsEvent struct {
 	Request struct {
-		Time      string                 `json:"time"`
-		URI       string                 `json:"uri"`
-		Verb      string                 `json:"verb"`
-		Headers   map[string]string      `json:"headers"`
-		APIVersion string                `json:"api_version"`
-		IPAddress string                 `json:"ip_address"`
+		Time       string            `json:"time"`
+		URI        string            `json:"uri"`
+		Verb       string            `json:"verb"`
+		Headers    map[string]string `json:"headers"`
+		APIVersion string            `json:"api_version"`
+		IPAddress  string            `json:"ip_address"`
 	} `json:"request"`
 	Response struct {
 		Time    string            `json:"time"`
@@ -53,12 +53,16 @@ type AnalyticsEvent struct {
 		Headers map[string]string `json:"headers"`
 	} `json:"response"`
 	Metadata map[string]interface{} `json:"metadata"`
+	UserID   string                 `json:"user_id"`
 }
 
-// RegisterAnalyticsSteps registers all analytics step definitions
-func RegisterAnalyticsSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) {
+// RegisterAnalyticsSteps registers all analytics step definitions and
+// returns the AnalyticsSteps instance so another registration function
+// (e.g. RegisterMTLSObservabilitySteps) can reuse its "latest event" lookup
+// rather than re-implementing it against the collector's HTTP API.
+func RegisterAnalyticsSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) *AnalyticsSteps {
 	a := &AnalyticsSteps{state: state, httpSteps: httpSteps}
-	
+
 	ctx.Step(`^I reset the analytics collector$`, a.iResetTheAnalyticsCollector)
 	ctx.Step(`^I wait (\d+) seconds for analytics to be published$`, a.iWaitSecondsForAnalytics)
 	ctx.Step(`^the analytics collector should have received (\d+) events?$`, a.theAnalyticsCollectorShouldHaveReceivedEvents)
@@ -68,6 +72,7 @@ func RegisterAnalyticsSteps(ctx *godog.ScenarioContext, state *TestState, httpSt
 	ctx.Step(`^the latest analytics event should have response status (\d+)$`, a.theLatestAnalyticsEventShouldHaveResponseStatus)
 	ctx.Step(`^the latest analytics event should have metadata field "([^"]*)" with value "([^"]*)"$`, a.theLatestAnalyticsEventShouldHaveMetadataField)
 	ctx.Step(`^I send a GET request to the analytics collector events endpoint$`, a.iSendGETRequestToAnalyticsCollectorEvents)
+	return a
 }
 
 // iResetTheAnalyticsCollector resets all events in the mock analytics collector
@@ -106,66 +111,66 @@ func (a *AnalyticsSteps) iWaitSecondsForAnalytics(seconds int) error {
 // theAnalyticsCollectorShouldHaveReceivedEvents verifies exact event count
 func (a *AnalyticsSteps) theAnalyticsCollectorShouldHaveReceivedEvents(expectedCount int) error {
 	url := fmt.Sprintf("http://localhost:8086/test/events/count")
-	
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create count request: %w", err)
 	}
-	
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to get event count: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("count request failed with status %d", resp.StatusCode)
 	}
-	
+
 	var result map[string]int
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("failed to decode count response: %w", err)
 	}
-	
+
 	actualCount := result["count"]
 	if actualCount != expectedCount {
 		return fmt.Errorf("expected %d events, but got %d", expectedCount, actualCount)
 	}
-	
+
 	return nil
 }
 
 // theAnalyticsCollectorShouldHaveReceivedAtLeastEvents verifies minimum event count
 func (a *AnalyticsSteps) theAnalyticsCollectorShouldHaveReceivedAtLeastEvents(minCount int) error {
 	url := fmt.Sprintf("http://localhost:8086/test/events/count")
-	
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create count request: %w", err)
 	}
-	
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to get event count: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("count request failed with status %d", resp.StatusCode)
 	}
-	
+
 	var result map[string]int
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("failed to decode count response: %w", err)
 	}
-	
+
 	actualCount := result["count"]
 	if actualCount < minCount {
 		return fmt.Errorf("expected at least %d events, but got %d", minCount, actualCount)
 	}
-	
+
 	return nil
 }
 
@@ -233,16 +238,23 @@ func (a *AnalyticsSteps) theLatestAnalyticsEventShouldHaveRequestURI(expectedURI
 	return nil
 }
 
+// latestEventOrFetch returns the event a previous filtering assertion
+// (theLatestAnalyticsEventShouldHaveRequestURI) already matched this
+// scenario, or fetches the collector's latest event with no filter when
+// none has run yet. Every "the latest analytics event should have ..."
+// assertion shares this fallback rather than each reimplementing it.
+func (a *AnalyticsSteps) latestEventOrFetch() (*AnalyticsEvent, error) {
+	if a.lastMatchedEvent != nil {
+		return a.lastMatchedEvent, nil
+	}
+	return a.getLatestAnalyticsEvent("")
+}
+
 // theLatestAnalyticsEventShouldHaveRequestMethod verifies the request method in the latest event
 func (a *AnalyticsSteps) theLatestAnalyticsEventShouldHaveRequestMethod(expectedMethod string) error {
-	// Use the last matched event if available, otherwise fetch latest without filter
-	event := a.lastMatchedEvent
-	if event == nil {
-		var err error
-		event, err = a.getLatestAnalyticsEvent("")
-		if err != nil {
-			return err
-		}
+	event, err := a.latestEventOrFetch()
+	if err != nil {
+		return err
 	}
 
 	if event.Request.Verb != expectedMethod {
@@ -254,14 +266,9 @@ func (a *AnalyticsSteps) theLatestAnalyticsEventShouldHaveRequestMethod(expected
 
 // theLatestAnalyticsEventShouldHaveResponseStatus verifies the response status in the latest event
 func (a *AnalyticsSteps) theLatestAnalyticsEventShouldHaveResponseStatus(expectedStatus int) error {
-	// Use the last matched event if available, otherwise fetch latest without filter
-	event := a.lastMatchedEvent
-	if event == nil {
-		var err error
-		event, err = a.getLatestAnalyticsEvent("")
-		if err != nil {
-			return err
-		}
+	event, err := a.latestEventOrFetch()
+	if err != nil {
+		return err
 	}
 
 	if event.Response.Status != expectedStatus {
@@ -273,14 +280,9 @@ func (a *AnalyticsSteps) theLatestAnalyticsEventShouldHaveResponseStatus(expecte
 
 // theLatestAnalyticsEventShouldHaveMetadataField verifies a metadata field in the latest event
 func (a *AnalyticsSteps) theLatestAnalyticsEventShouldHaveMetadataField(fieldName, expectedValue string) error {
-	// Use the last matched event if available, otherwise fetch latest without filter
-	event := a.lastMatchedEvent
-	if event == nil {
-		var err error
-		event, err = a.getLatestAnalyticsEvent("")
-		if err != nil {
-			return err
-		}
+	event, err := a.latestEventOrFetch()
+	if err != nil {
+		return err
 	}
 
 	if event.Metadata == nil {

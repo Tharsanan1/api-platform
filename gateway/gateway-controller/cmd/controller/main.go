@@ -30,6 +30,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/handlers"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/certmetrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/controlplane"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/immutable"
@@ -721,6 +722,12 @@ func main() {
 	// configured — upload/update is then refused fail-closed).
 	apiServer.SetEncryptionManager(encryptionProviderManager)
 
+	// Recompute certificate metrics and re-emit expiry warnings on a fixed
+	// schedule, independent of any particular request. Runs once immediately
+	// (covering startup) and then every 24h until shut down below.
+	certSweepCtx, certSweepCancel := context.WithCancel(context.Background())
+	go certmetrics.Sweep(certSweepCtx, db, log)
+
 	// Load immutable gateway artifacts from the filesystem (no-op when immutable mode is disabled).
 	if err := igw.LoadArtifacts(log); err != nil {
 		log.Error("Failed to load immutable gateway artifacts", slog.Any("error", err))
@@ -903,6 +910,9 @@ func main() {
 	<-quit
 
 	log.Info("Shutting down Gateway-Controller")
+
+	// Stop the certificate metrics/expiry sweep goroutine.
+	certSweepCancel()
 
 	// Graceful shutdown with timeout
 	ctx, cancel = context.WithTimeout(context.Background(), cfg.Controller.Server.ShutdownTimeout)

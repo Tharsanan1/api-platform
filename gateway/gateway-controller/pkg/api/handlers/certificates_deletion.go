@@ -26,6 +26,7 @@ import (
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/certmetrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/httpkit/httputil"
@@ -133,6 +134,10 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 
 	log.Info("SDS snapshot updated after certificate deletion", slog.String("id", id))
 
+	if _, err := certmetrics.Refresh(s.db); err != nil {
+		log.Warn("Failed to refresh certificate metrics after delete", slog.Any("error", err))
+	}
+
 	// The client-CA pool just changed: keep every deployed mtls-auth API's
 	// policy chain current (see repushMtlsAuthDeployments).
 	if preDeleteCert != nil && preDeleteCert.Usage == models.CertificateUsageClient {
@@ -185,6 +190,10 @@ func (s *APIServer) ReloadCertificates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info("Certificates reloaded and SDS snapshot updated")
+
+	if _, err := certmetrics.Refresh(s.db); err != nil {
+		log.Warn("Failed to refresh certificate metrics after reload", slog.Any("error", err))
+	}
 
 	combinedCerts := certStore.GetCombinedCertificates()
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{

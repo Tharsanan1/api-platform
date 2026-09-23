@@ -60,6 +60,10 @@ policies:
     gomodule: github.com/wso2/gateway-controllers/policies/model-round-robin@v1
   - name: model-weighted-round-robin
     gomodule: github.com/wso2/gateway-controllers/policies/model-weighted-round-robin@v1
+  # mTLS mutual-TLS authentication policy (feature branch dev policy — remove
+  # this filePath entry before merging to main; see dev-policies/README.md).
+  - name: mtls-auth
+    filePath: ./dev-policies/mtls-auth
   - name: nvidia-nemoguard-content-safety
     pipPackage: github.com/wso2/gateway-controllers/policies/nvidia-nemoguard-content-safety@v0
   - name: oauth2-generator

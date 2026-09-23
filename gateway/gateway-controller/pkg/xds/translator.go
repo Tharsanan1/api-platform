@@ -108,6 +108,16 @@ type Translator struct {
 	config            *config.Config
 	transformers      map[string]models.ConfigTransformer // kind → transformer (optional)
 	eventGatewayHooks EventGatewayXDSHooks                // optional, set by an event-gateway-controller binary
+
+	// requireDownstreamClientCA is set once per TranslateConfigs call, before
+	// the HTTPS listener is built, to whether at least one deployed config
+	// attaches mtls-auth (see configAttachesMTLSAuth). Read by
+	// createDownstreamTLSContext. A struct field rather than a parameter so
+	// createListener/createDownstreamTLSContext keep their existing call
+	// signatures; safe because TranslateConfigs (and therefore every write to
+	// this field) always runs under SnapshotManager's mutex — never
+	// concurrently with another translation on the same Translator.
+	requireDownstreamClientCA bool
 }
 
 // resolvedTimeout represents parsed timeout values for an upstream.
@@ -700,6 +710,12 @@ func (t *Translator) TranslateConfigs(
 	allRoutes := make([]*route.Route, 0)
 	clusterMap := make(map[string]*cluster.Cluster)
 
+	// anyMTLSAuth is true when at least one deployed config's RestAPI
+	// representation attaches mtls-auth (API-level or on any operation) — the
+	// HTTPS listener's request for a client certificate is derived entirely
+	// from this, never a router-config switch (see createDownstreamTLSContext).
+	anyMTLSAuth := false
+
 	for _, cfg := range configs {
 		// Skip undeployed APIs - they should not appear in xDS routes
 		if cfg.DesiredState == models.StateUndeployed {
@@ -707,6 +723,10 @@ func (t *Translator) TranslateConfigs(
 				slog.String("id", cfg.UUID),
 				slog.String("displayName", cfg.DisplayName))
 			continue
+		}
+
+		if configAttachesMTLSAuth(cfg) {
+			anyMTLSAuth = true
 		}
 
 		// Include all non-undeployed configs (both deployed and pending) in the snapshot.
@@ -877,6 +897,10 @@ func (t *Translator) TranslateConfigs(
 	// Variable to hold the shared route configuration (created once, used by both listeners)
 	var sharedRouteConfig *route.RouteConfiguration
 
+	// requireDownstreamClientCA is read by createDownstreamTLSContext, called
+	// (only for the HTTPS listener) from within createListener below.
+	t.requireDownstreamClientCA = anyMTLSAuth
+
 	// Always create the HTTP listener, even with no APIs deployed
 	httpListener, routeConfig, err := t.createListener(virtualHosts, false)
 	if err != nil {
@@ -888,7 +912,8 @@ func (t *Translator) TranslateConfigs(
 	// Create HTTPS listener if enabled
 	if t.routerConfig.HTTPSEnabled {
 		log.Info("HTTPS is enabled, creating HTTPS listener",
-			slog.Int("https_port", t.routerConfig.HTTPSPort))
+			slog.Int("https_port", t.routerConfig.HTTPSPort),
+			slog.Bool("requires_client_cert_validation", anyMTLSAuth))
 		httpsListener, _, err := t.createListener(virtualHosts, true)
 		if err != nil {
 			log.Error("Failed to create HTTPS listener", slog.Any("error", err))
@@ -2357,15 +2382,24 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 	return upstreamTLSContext
 }
 
-// ClusterResourcesReferenceUpstreamCASecret reports whether any cluster in
-// clusters attaches the upstream CA bundle via SDS (ValidationContextSdsSecretConfig
-// named SecretNameUpstreamCA). Envoy only issues a watch for the Secret type URL
-// once a Cluster it has actually accepted references that secret name, so the
-// snapshot manager uses this to decide whether including the Secret resource in
-// a given snapshot version is warranted, rather than pushing it unconditionally
-// and having Envoy log "Ignoring unwatched type URL ... Secret" when no
-// HTTPS-scheme upstream is configured.
-func ClusterResourcesReferenceUpstreamCASecret(clusters []types.Resource) bool {
+// SnapshotReferencesSDSSecret reports whether any cluster OR listener in
+// this snapshot references the SDS secret named secretName — as a cluster's
+// upstream CombinedValidationContext (SecretNameUpstreamCA), a listener's
+// downstream ValidationContextSdsSecretConfig (SecretNameDownstreamClientCA),
+// or a listener's TlsCertificateSdsSecretConfigs entry
+// (SecretNameDownstreamListenerCert). Envoy only issues a watch for the
+// Secret type URL once a Cluster or Listener it has actually accepted
+// references that secret name, so the snapshot manager uses this to decide
+// whether including a given Secret resource in a snapshot version is
+// warranted, rather than pushing every known secret unconditionally and
+// having Envoy log "Ignoring unwatched type URL ... Secret" for any name
+// nothing currently references.
+//
+// This generalises the original cluster-only check (formerly
+// ClusterResourcesReferenceUpstreamCASecret) to also cover listeners, since
+// the downstream_client_ca and downstream_listener_cert secrets are
+// referenced by a Listener's DownstreamTlsContext, never a Cluster.
+func SnapshotReferencesSDSSecret(clusters, listeners []types.Resource, secretName string) bool {
 	for _, res := range clusters {
 		c, ok := res.(*cluster.Cluster)
 		if !ok {
@@ -2384,41 +2418,64 @@ func ClusterResourcesReferenceUpstreamCASecret(clusters []types.Resource) bool {
 			if !ok {
 				continue
 			}
-			if combined.CombinedValidationContext.GetValidationContextSdsSecretConfig().GetName() == SecretNameUpstreamCA {
+			if combined.CombinedValidationContext.GetValidationContextSdsSecretConfig().GetName() == secretName {
 				return true
 			}
 		}
 	}
+
+	for _, res := range listeners {
+		l, ok := res.(*listener.Listener)
+		if !ok {
+			continue
+		}
+		for _, fc := range l.GetFilterChains() {
+			typedConfig := fc.GetTransportSocket().GetTypedConfig()
+			if typedConfig == nil {
+				continue
+			}
+			var tlsCtx tlsv3.DownstreamTlsContext
+			if err := typedConfig.UnmarshalTo(&tlsCtx); err != nil {
+				continue
+			}
+			common := tlsCtx.GetCommonTlsContext()
+			if common.GetValidationContextSdsSecretConfig().GetName() == secretName {
+				return true
+			}
+			for _, tc := range common.GetTlsCertificateSdsSecretConfigs() {
+				if tc.GetName() == secretName {
+					return true
+				}
+			}
+		}
+	}
+
 	return false
 }
 
-// createDownstreamTLSContext creates a downstream TLS context for HTTPS listeners
+// createDownstreamTLSContext creates a downstream TLS context for HTTPS
+// listeners. The listener's own certificate/key are never inlined — both are
+// delivered via SDS (SecretNameDownstreamListenerCert), so the LDS resource
+// itself never contains private key material (see
+// go-control-plane-xds-security.md directive 3, applied to the downstream
+// listener the same way it already applied to upstream secrets).
+//
+// t.requireDownstreamClientCA is true precisely when at least one deployed
+// API attaches mtls-auth (computed once per TranslateConfigs call, from
+// every route chain being translated). When true, the listener additionally
+// requests (but does not require) a client certificate, and Envoy validates
+// whatever is presented against the client-CA pool via SDS
+// (SecretNameDownstreamClientCA), reporting the verdict on the connection
+// (connection.peer_certificate_valid and friends) rather than acting on it
+// itself: RequireClientCertificate stays false, so the listener never closes
+// a connection over that verdict — no certificate, an untrusted/expired/
+// self-signed one, all reach the policy chain the same way. mtls-auth is
+// what turns that verdict into an HTTP outcome: it denies on a false
+// verdict, and on a true one additionally applies the API's own accept list
+// (which authority, which SANs/thumbprint) before authenticating the
+// caller. There is no router-config switch for any of this: the listener's
+// behavior is entirely derived from what's deployed.
 func (t *Translator) createDownstreamTLSContext() (*tlsv3.DownstreamTlsContext, error) {
-	// Read certificate and key files
-	certBytes, err := os.ReadFile(t.routerConfig.DownstreamTLS.CertPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read certificate file: %w", err)
-	}
-
-	keyBytes, err := os.ReadFile(t.routerConfig.DownstreamTLS.KeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read key file: %w", err)
-	}
-
-	// Create TLS certificate configuration
-	tlsCert := &tlsv3.TlsCertificate{
-		CertificateChain: &core.DataSource{
-			Specifier: &core.DataSource_InlineBytes{
-				InlineBytes: certBytes,
-			},
-		},
-		PrivateKey: &core.DataSource{
-			Specifier: &core.DataSource_InlineBytes{
-				InlineBytes: keyBytes,
-			},
-		},
-	}
-
 	// Parse cipher suites
 	var cipherSuites []string
 	if t.routerConfig.DownstreamTLS.Ciphers != "" {
@@ -2431,28 +2488,91 @@ func (t *Translator) createDownstreamTLSContext() (*tlsv3.DownstreamTlsContext, 
 		ecdhCurves = t.parseCipherSuites(t.routerConfig.DownstreamTLS.EcdhCurves)
 	}
 
-	// Create downstream TLS context
-	downstreamTLSContext := &tlsv3.DownstreamTlsContext{
-		CommonTlsContext: &tlsv3.CommonTlsContext{
-			TlsCertificates: []*tlsv3.TlsCertificate{tlsCert},
-			TlsParams: &tlsv3.TlsParameters{
-				TlsMinimumProtocolVersion: t.createTLSProtocolVersion(
-					t.routerConfig.DownstreamTLS.MinimumProtocolVersion,
-				),
-				TlsMaximumProtocolVersion: t.createTLSProtocolVersion(
-					t.routerConfig.DownstreamTLS.MaximumProtocolVersion,
-				),
-				CipherSuites: cipherSuites,
-				EcdhCurves:   ecdhCurves,
-			},
-			AlpnProtocols: []string{constants.ALPNProtocolHTTP2, constants.ALPNProtocolHTTP11},
+	sdsConfigSource := &core.ConfigSource{
+		ResourceApiVersion: core.ApiVersion_V3,
+		ConfigSourceSpecifier: &core.ConfigSource_Ads{
+			Ads: &core.AggregatedConfigSource{},
 		},
+	}
+
+	commonTLSContext := &tlsv3.CommonTlsContext{
+		TlsCertificateSdsSecretConfigs: []*tlsv3.SdsSecretConfig{
+			{
+				Name:      SecretNameDownstreamListenerCert,
+				SdsConfig: sdsConfigSource,
+			},
+		},
+		TlsParams: &tlsv3.TlsParameters{
+			TlsMinimumProtocolVersion: t.createTLSProtocolVersion(
+				t.routerConfig.DownstreamTLS.MinimumProtocolVersion,
+			),
+			TlsMaximumProtocolVersion: t.createTLSProtocolVersion(
+				t.routerConfig.DownstreamTLS.MaximumProtocolVersion,
+			),
+			CipherSuites: cipherSuites,
+			EcdhCurves:   ecdhCurves,
+		},
+		AlpnProtocols: []string{constants.ALPNProtocolHTTP2, constants.ALPNProtocolHTTP11},
+	}
+
+	downstreamTLSContext := &tlsv3.DownstreamTlsContext{
+		CommonTlsContext: commonTLSContext,
+	}
+
+	if t.requireDownstreamClientCA {
+		commonTLSContext.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContextSdsSecretConfig{
+			ValidationContextSdsSecretConfig: &tlsv3.SdsSecretConfig{
+				Name:      SecretNameDownstreamClientCA,
+				SdsConfig: sdsConfigSource,
+			},
+		}
+		// Request, never require: a caller presenting no certificate (or an
+		// untrusted/expired/self-signed one) must still reach mtls-auth's own
+		// evaluation rather than have the connection closed underneath it.
+		downstreamTLSContext.RequireClientCertificate = wrapperspb.Bool(false)
 	}
 
 	return downstreamTLSContext, nil
 }
 
 // createTLSProtocolVersion converts string TLS version to Envoy TLS version enum
+// mtlsAuthPolicyName is the policy that derives the HTTPS listener's request
+// for a client certificate — see createDownstreamTLSContext.
+const mtlsAuthPolicyName = "mtls-auth"
+
+// configAttachesMTLSAuth reports whether cfg's RestAPI representation
+// attaches mtls-auth at API level or on any operation. Mirrors the
+// cfg.Configuration.(api.RestAPI) pattern used by translateAPIConfig: every
+// non-RestAPI-shaped config (nothing has rehydrated it into api.RestAPI yet)
+// never matches.
+func configAttachesMTLSAuth(cfg *models.StoredConfig) bool {
+	restCfg, ok := cfg.Configuration.(api.RestAPI)
+	if !ok {
+		return false
+	}
+	if policiesAttachMTLSAuth(restCfg.Spec.Policies) {
+		return true
+	}
+	for _, op := range restCfg.Spec.Operations {
+		if policiesAttachMTLSAuth(op.Policies) {
+			return true
+		}
+	}
+	return false
+}
+
+func policiesAttachMTLSAuth(policies *[]api.Policy) bool {
+	if policies == nil {
+		return false
+	}
+	for _, p := range *policies {
+		if p.Name == mtlsAuthPolicyName {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *Translator) createTLSProtocolVersion(version string) tlsv3.TlsParameters_TlsProtocol {
 	switch strings.ToUpper(version) {
 	case constants.TLSVersion10:
@@ -3201,7 +3321,18 @@ func (t *Translator) createExtProcFilter() (*hcm.HttpFilter, error) {
 		// Always allow mode override: the policy engine sets the per-request body mode
 		// (skip/buffered/streamed); without this Envoy would ignore it and never send bodies.
 		AllowModeOverride: true,
-		RequestAttributes: []string{constants.ExtProcRequestAttributeRouteName},
+		RequestAttributes: []string{
+			constants.ExtProcRequestAttributeRouteName,
+			constants.ExtProcRequestAttributeConnectionMTLS,
+			constants.ExtProcRequestAttributeConnectionPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionPeerCertificateDigest,
+			constants.ExtProcRequestAttributeConnectionSubjectPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionURISANPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionDNSSANPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionTLSVersion,
+			constants.ExtProcRequestAttributeConnectionRequestedServerName,
+			constants.ExtProcRequestAttributeConnectionPeerCertificateValid,
+		},
 		ProcessingMode: &extproc.ProcessingMode{
 			RequestHeaderMode: extproc.ProcessingMode_SEND,
 		},

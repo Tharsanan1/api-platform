@@ -20,8 +20,8 @@ package config
 
 import (
 	"fmt"
-	"regexp"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -35,6 +35,7 @@ import (
 type PolicyValidator struct {
 	policyDefinitions map[string]models.PolicyDefinition
 	latestVersions    map[string]string // policyName -> latest full semver, pre-computed at construction
+	mtlsAuthValidator *MtlsAuthValidator
 }
 
 // NewPolicyValidator creates a new policy validator
@@ -43,6 +44,15 @@ func NewPolicyValidator(policyDefinitions map[string]models.PolicyDefinition) *P
 		policyDefinitions: policyDefinitions,
 		latestVersions:    BuildLatestVersionIndex(policyDefinitions),
 	}
+}
+
+// SetMtlsAuthValidator wires the mtls-auth-specific validator (client-CA pool
+// lookups + HTTPS-listener enablement), mirroring APIValidator's
+// SetPolicyValidator setter pattern. A nil validator (the zero value, never
+// explicitly set) disables mtls-auth-specific validation entirely — callers
+// that don't wire one (e.g. most unit tests) simply skip it.
+func (pv *PolicyValidator) SetMtlsAuthValidator(v *MtlsAuthValidator) {
+	pv.mtlsAuthValidator = v
 }
 
 // BuildLatestVersionIndex scans policy definitions once and builds a map of
@@ -97,6 +107,14 @@ func (pv *PolicyValidator) ValidateRestAPIPolicies(apiConfig *api.RestAPI) []Val
 				errors = append(errors, errs...)
 			}
 		}
+	}
+
+	// mtls-auth validation is cross-cutting (duplicate-in-scope, attached at
+	// both API and operation level, client-CA pool state) and needs the whole
+	// API's policy chains at once, so it runs here rather than inside the
+	// per-policy loop above.
+	if pv.mtlsAuthValidator != nil {
+		errors = append(errors, pv.mtlsAuthValidator.ValidateRestAPI(apiConfig)...)
 	}
 
 	return errors
@@ -158,7 +176,15 @@ func (pv *PolicyValidator) validatePolicy(policy api.Policy, fieldPath string) [
 	}
 
 	// Coerce then validate policy parameters against the declared JSON schema.
-	if policyDef.Parameters != nil {
+	//
+	// mtls-auth is exempt from the generic gojsonschema pass: its own
+	// validator (MtlsAuthValidator, invoked from ValidateRestAPIPolicies)
+	// produces the exact human messages for every structural problem
+	// (unknown parameter, malformed accept entry, etc.), and running both
+	// would duplicate a single problem as two errors — a generic
+	// "Additional property X is not allowed" alongside the specific
+	// "unknown parameter X".
+	if policyDef.Parameters != nil && policy.Name != MtlsAuthPolicyName {
 		params := make(map[string]interface{})
 		if policy.Params != nil {
 			params = *policy.Params

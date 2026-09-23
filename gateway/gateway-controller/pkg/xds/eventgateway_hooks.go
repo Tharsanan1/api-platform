@@ -135,7 +135,15 @@ func (t *Translator) CreateTracingConfig() (*hcm.HttpConnectionManager_Tracing, 
 	return t.createTracingConfig()
 }
 
-// CreateDownstreamTLSContext exposes createDownstreamTLSContext for use by EventGatewayXDSHooks implementations.
+// CreateDownstreamTLSContext exposes createDownstreamTLSContext for use by
+// EventGatewayXDSHooks implementations. The WebSub hub's own internal
+// listener never requests a client certificate — mtls-auth only derives
+// behavior for the main HTTPS listener built by TranslateConfigs/createListener
+// — so this always builds a validation-context-free TLS context regardless
+// of what t.requireDownstreamClientCA is currently set to.
 func (t *Translator) CreateDownstreamTLSContext() (*tlsv3.DownstreamTlsContext, error) {
+	saved := t.requireDownstreamClientCA
+	t.requireDownstreamClientCA = false
+	defer func() { t.requireDownstreamClientCA = saved }()
 	return t.createDownstreamTLSContext()
 }

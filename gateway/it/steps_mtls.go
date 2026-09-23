@@ -21,15 +21,18 @@ package it
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/cucumber/godog"
 	"github.com/wso2/api-platform/gateway/it/steps"
@@ -39,6 +42,34 @@ import (
 // and key fixtures. Tests run with the working directory set to the `it`
 // module root, so this relative path resolves correctly.
 const mtlsFixturesDir = "resources/mtls-pki"
+
+// httpsListenerAddr is the derived HTTPS listener's dial address, probed
+// directly at the TCP/TLS level (rather than through httpSteps) to observe
+// whether the server asked for a client certificate.
+const httpsListenerAddr = "localhost:8443"
+
+// mtlsListenerProbeRetries/Interval bound the retry loop used only for the
+// positive case (listener should now be requesting a certificate), to absorb
+// xDS propagation lag after a deploy. The negative case probes once
+// immediately — the feature file waits explicitly wherever propagation lag
+// matters there.
+const (
+	mtlsListenerProbeRetries  = 10
+	mtlsListenerProbeInterval = 500 * time.Millisecond
+)
+
+// mtlsListenerAPINames lists every API name the mtls-listener feature
+// deploys via the existing "I deploy this API configuration:" step. Nothing
+// in this codebase tracks deployed API names generically, so the
+// after-scenario cleanup below removes these fixed names directly instead —
+// deleting a name that was never deployed in a given scenario is a no-op
+// (404, ignored).
+var mtlsListenerAPINames = []string{
+	"mtls-listener-api",
+	"plain-neighbour-api",
+	"mtls-refused-api",
+	"mtls-warned-api",
+}
 
 // mtlsPemPlaceholder and mtlsKeyPlaceholder match {{pem "name"}} / {{key "name"}}
 // template markers inside a docstring request body.
@@ -72,6 +103,11 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 		return c, nil
 	})
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
+		// Delete any API deployed by this scenario before cleaning up pooled
+		// certificates: an mtls-auth deployment can reference a pooled
+		// authority, so removing the API first avoids leaving that ordering
+		// to chance if the scenario failed before its own cleanup step ran.
+		m.cleanupDeployedAPIs()
 		m.cleanup()
 		return c, nil
 	})
@@ -108,6 +144,22 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 
 	// ---- Deletion ----
 	ctx.Step(`^I delete the certificate named "([^"]*)"$`, m.deleteCertificateNamed)
+
+	// ---- HTTPS listener probing ----
+	ctx.Step(`^the HTTPS listener should request a client certificate$`, m.httpsListenerShouldRequestClientCertificate)
+	ctx.Step(`^the HTTPS listener should not request a client certificate$`, m.httpsListenerShouldNotRequestClientCertificate)
+
+	// ---- Requests carrying (or omitting) a client certificate ----
+	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and its chain$`, m.getWithClientCertificateAndChain)
+	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)"$`, m.getWithClientCertificate)
+	ctx.Step(`^I send a GET request to "([^"]*)" with no client certificate$`, m.getWithNoClientCertificate)
+
+	// ---- Client authority pool state ----
+	ctx.Step(`^the client authority pool is empty$`, m.clientAuthorityPoolIsEmpty)
+
+	// ---- Deploy-response warnings ----
+	ctx.Step(`^the response should include a warning with code "([^"]*)" for field "([^"]*)"$`, m.responseShouldIncludeWarningWithCodeForField)
+	ctx.Step(`^the response should include no warnings$`, m.responseShouldIncludeNoWarnings)
 }
 
 // ============ Fixture reading ============
@@ -537,6 +589,227 @@ func (m *mtlsSteps) jsonFieldShouldBeSubjectOfFixture(field, fixture string) err
 	return nil
 }
 
+// ============ HTTPS listener probing ============
+
+// probeClientCertRequested opens a direct TLS connection to the derived
+// HTTPS listener with a GetClientCertificate callback that records whether
+// it was invoked, then completes the handshake with no certificate (an
+// empty tls.Certificate). The listener validates optionally rather than
+// requiring a certificate (see the "never drops a connection" scenario), so
+// the handshake is expected to succeed either way — the callback having run
+// is itself the signal that a CertificateRequest was sent.
+func (m *mtlsSteps) probeClientCertRequested() (bool, error) {
+	invoked := false
+	conf := &tls.Config{
+		InsecureSkipVerify: true, // the listener uses a self-signed default cert
+		MinVersion:         tls.VersionTLS12,
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			invoked = true
+			return &tls.Certificate{}, nil
+		},
+	}
+	conn, err := tls.Dial("tcp", httpsListenerAddr, conf)
+	if err != nil {
+		return false, fmt.Errorf("failed to complete a TLS handshake against %s: %w", httpsListenerAddr, err)
+	}
+	defer conn.Close()
+	return invoked, nil
+}
+
+func (m *mtlsSteps) httpsListenerShouldRequestClientCertificate() error {
+	var lastErr error
+	for attempt := 0; attempt < mtlsListenerProbeRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(mtlsListenerProbeInterval)
+		}
+		invoked, err := m.probeClientCertRequested()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if invoked {
+			return nil
+		}
+		lastErr = fmt.Errorf("HTTPS listener at %s did not request a client certificate", httpsListenerAddr)
+	}
+	return lastErr
+}
+
+func (m *mtlsSteps) httpsListenerShouldNotRequestClientCertificate() error {
+	invoked, err := m.probeClientCertRequested()
+	if err != nil {
+		return err
+	}
+	if invoked {
+		return fmt.Errorf("HTTPS listener at %s requested a client certificate, expected none", httpsListenerAddr)
+	}
+	return nil
+}
+
+// ============ Requests carrying (or omitting) a client certificate ============
+
+// tlsClientWithCertificate builds a one-off *http.Client whose transport
+// presents the named certificate fixture (and, when includeChain is true,
+// its intermediate chain) for the TLS handshake. Keep-alives are disabled so
+// each step is a fresh connection — the certificate is negotiated per
+// connection, not per request.
+func (m *mtlsSteps) tlsClientWithCertificate(name string, includeChain bool) (*http.Client, error) {
+	certPEM, err := m.readFixtureCert(name)
+	if err != nil {
+		return nil, err
+	}
+	if includeChain {
+		chainPEM, err := m.readFixtureFile(name, ".chain.crt")
+		if err != nil {
+			return nil, err
+		}
+		combined := make([]byte, 0, len(certPEM)+len(chainPEM))
+		combined = append(combined, certPEM...)
+		combined = append(combined, chainPEM...)
+		certPEM = combined
+	}
+	keyPEM, err := m.readFixtureFile(name, ".key")
+	if err != nil {
+		return nil, err
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate fixture %q: %w", name, err)
+	}
+	return &http.Client{
+		Timeout: m.state.Config.HTTPTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, // the listener uses a self-signed default cert
+				MinVersion:         tls.VersionTLS12,
+				Certificates:       []tls.Certificate{cert},
+			},
+			DisableKeepAlives: true,
+		},
+	}, nil
+}
+
+// tlsClientNoCertificate builds a one-off *http.Client whose transport
+// presents no client certificate at all.
+func (m *mtlsSteps) tlsClientNoCertificate() *http.Client {
+	return &http.Client{
+		Timeout: m.state.Config.HTTPTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+				MinVersion:         tls.VersionTLS12,
+			},
+			DisableKeepAlives: true,
+		},
+	}
+}
+
+func (m *mtlsSteps) getWithClientCertificate(url, name string) error {
+	client, err := m.tlsClientWithCertificate(name, false)
+	if err != nil {
+		return err
+	}
+	return m.httpSteps.SendRequestWithClient(client, http.MethodGet, url)
+}
+
+func (m *mtlsSteps) getWithClientCertificateAndChain(url, name string) error {
+	client, err := m.tlsClientWithCertificate(name, true)
+	if err != nil {
+		return err
+	}
+	return m.httpSteps.SendRequestWithClient(client, http.MethodGet, url)
+}
+
+func (m *mtlsSteps) getWithNoClientCertificate(url string) error {
+	return m.httpSteps.SendRequestWithClient(m.tlsClientNoCertificate(), http.MethodGet, url)
+}
+
+// ============ Client authority pool state ============
+
+// clientAuthorityPoolIsEmpty empties the client-usage certificate pool by
+// listing every "client" usage entry and deleting it, as the current
+// authenticated user (the feature runs as admin throughout). A delete
+// returning anything other than 2xx/404 is treated as a failure; a 404 (the
+// entry already gone) is ignored.
+func (m *mtlsSteps) clientAuthorityPoolIsEmpty() error {
+	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates?usage=client"); err != nil {
+		return err
+	}
+	var parsed struct {
+		Certificates []map[string]any `json:"certificates"`
+	}
+	if err := json.Unmarshal(m.httpSteps.LastBody(), &parsed); err != nil {
+		return fmt.Errorf("failed to parse certificate list while emptying the client authority pool: %w", err)
+	}
+
+	for _, item := range parsed.Certificates {
+		id := fmt.Sprint(item["id"])
+		if err := m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id); err != nil {
+			return err
+		}
+		resp := m.httpSteps.LastResponse()
+		if resp != nil && resp.StatusCode != http.StatusNotFound && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+			return fmt.Errorf("failed to delete certificate %q (id %s) while emptying the client authority pool: status %d", item["name"], id, resp.StatusCode)
+		}
+	}
+	return nil
+}
+
+// ============ Deploy-response warnings ============
+
+// responseWarnings reads the warnings array off the last response body,
+// wherever the deploy response places it: nested under "status.warnings" (a
+// k8s-style management resource) or top-level "warnings".
+func (m *mtlsSteps) responseWarnings() ([]map[string]any, error) {
+	var parsed map[string]any
+	if err := json.Unmarshal(m.httpSteps.LastBody(), &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON response while inspecting warnings: %w", err)
+	}
+	if status, ok := parsed["status"].(map[string]any); ok {
+		if raw, ok := status["warnings"].([]any); ok {
+			return toWarningEntries(raw), nil
+		}
+	}
+	if raw, ok := parsed["warnings"].([]any); ok {
+		return toWarningEntries(raw), nil
+	}
+	return nil, nil
+}
+
+func toWarningEntries(raw []any) []map[string]any {
+	var out []map[string]any
+	for _, w := range raw {
+		if entry, ok := w.(map[string]any); ok {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func (m *mtlsSteps) responseShouldIncludeWarningWithCodeForField(code, field string) error {
+	warnings, err := m.responseWarnings()
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		if fmt.Sprint(w["code"]) == code && fmt.Sprint(w["field"]) == field {
+			return nil
+		}
+	}
+	return fmt.Errorf("no warning with code %q for field %q found in %v", code, field, warnings)
+}
+
+func (m *mtlsSteps) responseShouldIncludeNoWarnings() error {
+	warnings, err := m.responseWarnings()
+	if err != nil {
+		return err
+	}
+	if len(warnings) != 0 {
+		return fmt.Errorf("expected no warnings, got %v", warnings)
+	}
+	return nil
+}
+
 // ============ Deletion ============
 
 func (m *mtlsSteps) findCertificateIDByName(name string) (string, error) {
@@ -566,6 +839,25 @@ func (m *mtlsSteps) deleteCertificateNamed(name string) error {
 }
 
 // ============ Cleanup ============
+
+// cleanupDeployedAPIs deletes every fixed API name the mtls-listener feature
+// deploys, authenticating as admin, so a scenario that fails before its own
+// "I delete the API ..." step still leaves the gateway clean. Deleting a name
+// that was never deployed in this run is a no-op (404, ignored) — this
+// cleanup runs for every scenario registered through RegisterMTLSSteps, not
+// only mtls-listener ones.
+func (m *mtlsSteps) cleanupDeployedAPIs() {
+	admin, ok := m.state.Config.Users["admin"]
+	if !ok {
+		return
+	}
+	creds := base64.StdEncoding.EncodeToString([]byte(admin.Username + ":" + admin.Password))
+	m.httpSteps.SetHeader("Authorization", "Basic "+creds)
+
+	for _, name := range mtlsListenerAPINames {
+		_ = m.httpSteps.SendDELETEToService("gateway-controller", "/rest-apis/"+name)
+	}
+}
 
 // cleanup deletes every certificate name this scenario attempted to upload,
 // authenticating as admin regardless of which role the scenario last used

@@ -470,20 +470,27 @@ func (h *HTTPSteps) sendRequest(method, url string, body []byte) error {
 		}
 	}
 
+	return h.doRequest(h.client, req)
+}
+
+// doRequest sends an already-built request using the given client and
+// records the request/response/body into the shared HTTPSteps state exactly
+// as every send*/assertion step expects. sendRequest and SendRequestWithClient
+// both funnel through this so the two paths stay in sync.
+func (h *HTTPSteps) doRequest(client *http.Client, req *http.Request) error {
 	h.lastRequest = req
 
 	reqDump, _ := httputil.DumpRequestOut(req, true)
 	fmt.Printf("REQUEST:\n%s\n", string(redactRequestDump(reqDump)))
-	// Log the request for debugging
-	log.Printf("DEBUG: Sending %s request to %s", method, url)
+	log.Printf("DEBUG: Sending %s request to %s", req.Method, req.URL.String())
 
-	resp, err := h.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("ERROR: Failed to send request to %s: %v", url, err)
-		return fmt.Errorf("failed to send request to %s: %w", url, err)
+		log.Printf("ERROR: Failed to send request to %s: %v", req.URL.String(), err)
+		return fmt.Errorf("failed to send request to %s: %w", req.URL.String(), err)
 	}
 
-	log.Printf("DEBUG: Received response from %s: status=%d", url, resp.StatusCode)
+	log.Printf("DEBUG: Received response from %s: status=%d", req.URL.String(), resp.StatusCode)
 	// Log response headers
 	for name, values := range resp.Header {
 		for _, value := range values {
@@ -508,6 +515,30 @@ func (h *HTTPSteps) sendRequest(method, url string, body []byte) error {
 	log.Printf("DEBUG: Response body: %s", bodyStr)
 
 	return nil
+}
+
+// SendRequestWithClient builds and sends a GET-equivalent request for the
+// given method/url using the given client instead of the shared HTTPSteps
+// client, applying the same persistent headers (set via "I set header" /
+// basic auth) and Host override as every other send* step, and records the
+// response into the shared state so every existing assertion step (status
+// code, body, headers, JSON fields) keeps working unchanged. Used by steps
+// that need a fresh per-connection client — e.g. one carrying a specific TLS
+// client certificate, where the certificate is negotiated per connection.
+func (h *HTTPSteps) SendRequestWithClient(client *http.Client, method, url string) error {
+	req, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	for name, value := range h.headers {
+		req.Header.Set(name, value)
+	}
+	if host := h.resolveRequestHost("", ""); host != "" {
+		req.Host = host
+	}
+
+	return h.doRequest(client, req)
 }
 
 func (h *HTTPSteps) SendMcpRequest(url string, body *godog.DocString) error {

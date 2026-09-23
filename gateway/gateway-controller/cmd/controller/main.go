@@ -357,6 +357,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Fail closed (GO-AUTH-011): a persisted RestAPI that attaches mtls-auth
+	// while the HTTPS listener is disabled can never authenticate any
+	// caller, so refuse to start rather than run in that state.
+	if err := config.ValidateMTLSStartupInvariant(configStore.GetAll(), cfg.Router.HTTPSEnabled); err != nil {
+		log.Error("Refusing to start", slog.Any("error", err))
+		os.Exit(1)
+	}
+
 	// Initialize xDS snapshot manager with router config
 	snapshotManager := xds.NewSnapshotManager(configStore, log, &cfg.Router, db, cfg)
 
@@ -370,6 +378,11 @@ func main() {
 			snapshotManager.GetCache(),
 			"router-node", // Same node ID as main xDS
 			log,
+		)
+		sdsSecretManager.SetDownstreamListenerCert(
+			cfg.Router.DownstreamTLS.CertPath,
+			cfg.Router.DownstreamTLS.KeyPath,
+			cfg.Router.HTTPSEnabled,
 		)
 		// Update SDS secrets with current certificates
 		if err := sdsSecretManager.UpdateSecrets(); err != nil {
@@ -541,6 +554,7 @@ func main() {
 	// Create validator with policy validation support
 	validator := config.NewAPIValidator()
 	policyValidator := config.NewPolicyValidator(policyDefinitions)
+	policyValidator.SetMtlsAuthValidator(config.NewMtlsAuthValidator(db, cfg.Router.HTTPSEnabled))
 	validator.SetPolicyValidator(policyValidator)
 
 	// Build the single shared outbound *http.Client used by every control-plane /

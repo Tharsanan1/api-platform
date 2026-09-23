@@ -32,12 +32,14 @@ import (
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tracev3 "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
+	extproc "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	otelresourcedetectorsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/tracers/opentelemetry/resource_detectors/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	matcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	metadatav3 "github.com/envoyproxy/go-control-plane/envoy/type/metadata/v3"
 	tracingv3 "github.com/envoyproxy/go-control-plane/envoy/type/tracing/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resource "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1714,6 +1716,38 @@ func TestTranslator_CreateExtProcFilter(t *testing.T) {
 		assert.NotNil(t, filter)
 		assert.Equal(t, constants.ExtProcFilterName, filter.Name)
 	})
+
+	// Guards the mTLS-aware ext_proc request attributes: mtls-auth (and any
+	// future connection-aware policy) needs the route name plus every
+	// connection.* fact — mTLS negotiated state, the peer certificate
+	// (digest/subject/SANs), TLS version, SNI and Envoy's own X.509
+	// verification verdict — surfaced as ext_proc request attributes. Missing
+	// any one of these silently starves the policy engine of a fact it needs.
+	t.Run("RequestAttributes carries every connection.* fact plus the route name", func(t *testing.T) {
+		routerCfg := testRouterConfig()
+		cfg := testConfig()
+		translator := NewTranslator(logger, routerCfg, nil, cfg)
+
+		filter, err := translator.createExtProcFilter()
+		require.NoError(t, err)
+
+		var extProcConfig extproc.ExternalProcessor
+		require.NoError(t, filter.GetTypedConfig().UnmarshalTo(&extProcConfig))
+
+		want := []string{
+			constants.ExtProcRequestAttributeRouteName,
+			constants.ExtProcRequestAttributeConnectionMTLS,
+			constants.ExtProcRequestAttributeConnectionPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionPeerCertificateDigest,
+			constants.ExtProcRequestAttributeConnectionSubjectPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionURISANPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionDNSSANPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionTLSVersion,
+			constants.ExtProcRequestAttributeConnectionRequestedServerName,
+			constants.ExtProcRequestAttributeConnectionPeerCertificateValid,
+		}
+		assert.ElementsMatch(t, want, extProcConfig.RequestAttributes)
+	})
 }
 
 func TestTranslator_CreateRouteConfiguration(t *testing.T) {
@@ -2670,16 +2704,67 @@ func TestTranslator_CreateListener_PerConnectionBufferLimitBytes(t *testing.T) {
 	assert.Equal(t, uint32(2097152), listener.GetPerConnectionBufferLimitBytes().GetValue())
 }
 
-func TestTranslator_CreateDownstreamTLSContext_NoCert(t *testing.T) {
+// TestTranslator_CreateDownstreamTLSContext_ListenerCertViaSDS guards that the
+// listener's own certificate/key are never inlined into the LDS resource:
+// createDownstreamTLSContext must reference the downstream_listener_cert SDS
+// secret by name, and TlsCertificates (the inline-bytes field) must stay
+// empty regardless of whether any cert/key files exist on disk — the whole
+// point of the SDS path is that this function never reads them.
+func TestTranslator_CreateDownstreamTLSContext_ListenerCertViaSDS(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
 	translator := NewTranslator(logger, routerCfg, nil, cfg)
 
 	tlsContext, err := translator.createDownstreamTLSContext()
-	// Should fail because no certs are configured
-	assert.Error(t, err)
-	assert.Nil(t, tlsContext)
+	require.NoError(t, err)
+	require.NotNil(t, tlsContext)
+
+	sdsConfigs := tlsContext.CommonTlsContext.GetTlsCertificateSdsSecretConfigs()
+	require.Len(t, sdsConfigs, 1)
+	assert.Equal(t, SecretNameDownstreamListenerCert, sdsConfigs[0].GetName())
+	assert.Empty(t, tlsContext.CommonTlsContext.GetTlsCertificates(),
+		"the listener certificate/key must never be inlined into the LDS resource")
+}
+
+// TestTranslator_CreateDownstreamTLSContext_NoClientCARequired guards the
+// "no deployed API attaches mtls-auth" case: no validation context at all,
+// and RequireClientCertificate left nil (Envoy's own default, equivalent to
+// false) — the listener does not ask for a client certificate.
+func TestTranslator_CreateDownstreamTLSContext_NoClientCARequired(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	cfg := testConfig()
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator.requireDownstreamClientCA = false
+
+	tlsContext, err := translator.createDownstreamTLSContext()
+	require.NoError(t, err)
+
+	assert.Nil(t, tlsContext.CommonTlsContext.GetValidationContextType())
+	assert.Nil(t, tlsContext.RequireClientCertificate)
+}
+
+// TestTranslator_CreateDownstreamTLSContext_ClientCARequired guards the "at
+// least one deployed API attaches mtls-auth" case: the validation context
+// references the client-CA pool's SDS secret by name, and
+// RequireClientCertificate is explicitly false — the listener requests but
+// never requires a certificate, so a connection presenting none (or one the
+// pool doesn't trust) is never closed over it.
+func TestTranslator_CreateDownstreamTLSContext_ClientCARequired(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	cfg := testConfig()
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator.requireDownstreamClientCA = true
+
+	tlsContext, err := translator.createDownstreamTLSContext()
+	require.NoError(t, err)
+
+	require.NotNil(t, tlsContext.CommonTlsContext.GetValidationContextSdsSecretConfig())
+	assert.Equal(t, SecretNameDownstreamClientCA, tlsContext.CommonTlsContext.GetValidationContextSdsSecretConfig().GetName())
+	require.NotNil(t, tlsContext.RequireClientCertificate)
+	assert.False(t, tlsContext.RequireClientCertificate.GetValue())
 }
 
 func TestTranslator_CreateRoute_Basic(t *testing.T) {
@@ -3269,4 +3354,168 @@ func TestTranslateRuntimeConfig_PeerHostnameOnEveryEndpoint(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 4, checked, "expected to have checked all 4 endpoints across both clusters (1 + 3)")
+}
+
+// makeRestAPIWithOperationLevelMTLSAuth mirrors makeRestAPI (snapshot_test.go)
+// but attaches mtls-auth to its one operation, so TranslateConfigs treats
+// this config as requiring the HTTPS listener to request a client
+// certificate (see configAttachesMTLSAuth).
+func makeRestAPIWithOperationLevelMTLSAuth(uuid, name, ctx string) *models.StoredConfig {
+	cfg := api.RestAPI{
+		Kind:     api.RestAPIKindRestApi,
+		Metadata: api.Metadata{Name: name},
+		Spec: api.APIConfigData{
+			DisplayName: name,
+			Version:     "v1.0",
+			Context:     ctx,
+			Upstream: struct {
+				Main    api.Upstream  `json:"main" yaml:"main"`
+				Sandbox *api.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+			}{
+				Main: api.Upstream{Url: api.Ptr("http://backend:8080")},
+			},
+			Operations: []api.Operation{
+				{
+					Method: api.Ptr(api.OperationMethodGET),
+					Path:   api.Ptr("/resource"),
+					Policies: &[]api.Policy{
+						{Name: "mtls-auth", Version: "v1"},
+					},
+				},
+			},
+		},
+	}
+	return &models.StoredConfig{
+		UUID:                uuid,
+		Kind:                models.KindRestApi,
+		Handle:              name,
+		DisplayName:         name,
+		Version:             "v1.0",
+		DesiredState:        models.StateDeployed,
+		Configuration:       cfg,
+		SourceConfiguration: cfg,
+	}
+}
+
+func findListenerByPort(t *testing.T, resources []types.Resource, port int) *listener.Listener {
+	t.Helper()
+	for _, res := range resources {
+		l, ok := res.(*listener.Listener)
+		if !ok {
+			continue
+		}
+		if l.GetAddress().GetSocketAddress().GetPortValue() == uint32(port) {
+			return l
+		}
+	}
+	t.Fatalf("no listener found bound to port %d", port)
+	return nil
+}
+
+func extractDownstreamTLSContext(t *testing.T, l *listener.Listener) *tlsv3.DownstreamTlsContext {
+	t.Helper()
+	require.Len(t, l.FilterChains, 1)
+	typedConfig := l.FilterChains[0].GetTransportSocket().GetTypedConfig()
+	require.NotNil(t, typedConfig, "listener %q has no transport socket configured", l.GetName())
+	var tlsCtx tlsv3.DownstreamTlsContext
+	require.NoError(t, typedConfig.UnmarshalTo(&tlsCtx))
+	return &tlsCtx
+}
+
+// TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClientCA
+// is the end-to-end guard for the derived (never configured) HTTPS listener
+// behavior: once at least one deployed RestAPI attaches mtls-auth at
+// operation level, the HTTPS listener's own DownstreamTlsContext must
+// reference the client-CA pool's SDS secret and request (not require) a
+// client certificate.
+func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClientCA(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.HTTPSEnabled = true
+	routerCfg.HTTPSPort = 8443
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+
+	configs := []*models.StoredConfig{makeRestAPIWithOperationLevelMTLSAuth("uuid-mtls-1", "mtls-api", "/mtls-api")}
+	resources, err := translator.TranslateConfigs(configs, "test-correlation-id")
+	require.NoError(t, err)
+
+	httpsListener := findListenerByPort(t, resources[resource.ListenerType], routerCfg.HTTPSPort)
+	tlsCtx := extractDownstreamTLSContext(t, httpsListener)
+
+	require.NotNil(t, tlsCtx.CommonTlsContext.GetValidationContextSdsSecretConfig())
+	assert.Equal(t, SecretNameDownstreamClientCA, tlsCtx.CommonTlsContext.GetValidationContextSdsSecretConfig().GetName())
+	require.NotNil(t, tlsCtx.RequireClientCertificate)
+	assert.False(t, tlsCtx.RequireClientCertificate.GetValue())
+}
+
+// TestTranslator_TranslateConfigs_HTTPSListener_NoMTLSAuth_NoClientCA is the
+// converse: with no deployed API attaching mtls-auth anywhere, the HTTPS
+// listener must not carry a client-CA validation context at all — the
+// listener's behavior is entirely derived from what's deployed, never a
+// standing router-config switch.
+func TestTranslator_TranslateConfigs_HTTPSListener_NoMTLSAuth_NoClientCA(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.HTTPSEnabled = true
+	routerCfg.HTTPSPort = 8443
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+
+	configs := []*models.StoredConfig{makeRestAPI("uuid-plain-1", "plain-api", "/plain-api")}
+	resources, err := translator.TranslateConfigs(configs, "test-correlation-id")
+	require.NoError(t, err)
+
+	httpsListener := findListenerByPort(t, resources[resource.ListenerType], routerCfg.HTTPSPort)
+	tlsCtx := extractDownstreamTLSContext(t, httpsListener)
+
+	assert.Nil(t, tlsCtx.CommonTlsContext.GetValidationContextType())
+	assert.Nil(t, tlsCtx.RequireClientCertificate)
+}
+
+// TestSnapshotReferencesSDSSecret covers every referencing shape
+// SnapshotReferencesSDSSecret must recognise: a listener's
+// ValidationContextSdsSecretConfig (client-CA pool), a listener's
+// TlsCertificateSdsSecretConfigs entry (the listener's own cert/key), and a
+// cluster's CombinedValidationContext (upstream trust) — plus the negative
+// case where the requested secret name isn't referenced by anything in the
+// snapshot.
+func TestSnapshotReferencesSDSSecret(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.HTTPSEnabled = true
+	routerCfg.HTTPSPort = 8443
+	routerCfg.Upstream.TLS.DisableSslVerification = false
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	// Only t.certStore != nil matters for createUpstreamTLSContext's SDS
+	// path — construct one directly rather than routing through
+	// NewTranslator's CustomCertsPath init, which calls LoadCertificates
+	// against a real db.Storage (see TestTranslator_CreateUpstreamTLSContext_SDSViaADS).
+	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
+	translator.requireDownstreamClientCA = true
+
+	httpsListener, _, err := translator.createListener(nil, true)
+	require.NoError(t, err)
+	listeners := []types.Resource{httpsListener}
+
+	weightedCluster := translator.createWeightedCluster(
+		"upstream-cluster",
+		[]models.Endpoint{{Host: "backend.example.com", Port: 8443}},
+		&models.UpstreamTLS{Enabled: true},
+		nil,
+	)
+	clusters := []types.Resource{weightedCluster}
+
+	assert.True(t, SnapshotReferencesSDSSecret(nil, listeners, SecretNameDownstreamClientCA),
+		"a listener's ValidationContextSdsSecretConfig must be recognised")
+	assert.True(t, SnapshotReferencesSDSSecret(nil, listeners, SecretNameDownstreamListenerCert),
+		"a listener's TlsCertificateSdsSecretConfigs entry must be recognised")
+	assert.True(t, SnapshotReferencesSDSSecret(clusters, nil, SecretNameUpstreamCA),
+		"a cluster's CombinedValidationContext must be recognised")
+	assert.False(t, SnapshotReferencesSDSSecret(clusters, listeners, "some-unreferenced-secret"),
+		"a secret name referenced by nothing in the snapshot must report false")
 }

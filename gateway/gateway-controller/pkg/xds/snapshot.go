@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	xdslog "github.com/envoyproxy/go-control-plane/pkg/log"
@@ -137,18 +138,42 @@ func (sm *SnapshotManager) UpdateSnapshot(ctx context.Context, correlationID str
 		return fmt.Errorf("failed to translate configurations: %w", err)
 	}
 
-	// Add the SDS secret only when this snapshot's clusters actually reference it.
-	// Envoy never issues a watch for the Secret type URL unless a Cluster it accepted
-	// points at that secret name via SDS, so pushing it unconditionally just produces
-	// an "Ignoring unwatched type URL ... Secret" warning whenever no HTTPS-scheme
-	// upstream is configured.
-	if sm.sdsSecretManager != nil && ClusterResourcesReferenceUpstreamCASecret(resources[resource.ClusterType]) {
-		secret, err := sm.sdsSecretManager.GetSecret()
+	// Build every SDS secret this manager can currently serve, then include
+	// only the subset actually referenced by a cluster or listener accepted
+	// into THIS snapshot (see SnapshotReferencesSDSSecret) — Envoy never
+	// issues a watch for the Secret type URL otherwise, so pushing an
+	// unreferenced secret just produces an "Ignoring unwatched type URL ...
+	// Secret" warning. A failure here (downstream_listener_cert's cert/key
+	// unreadable, once HTTPS is enabled) is fatal to this snapshot, matching
+	// how the old inline-bytes path failed translation outright when it
+	// read the same files directly.
+	if sm.sdsSecretManager != nil {
+		secrets, err := sm.sdsSecretManager.GetSecrets()
 		if err != nil {
-			log.Warn("Failed to get SDS secret, continuing without it", slog.Any("error", err))
-		} else {
-			resources[resource.SecretType] = []types.Resource{secret}
-			log.Debug("Added SDS secret to snapshot", slog.String("secret_name", SecretNameUpstreamCA))
+			log.Error("Failed to build SDS secrets", slog.Any("error", err))
+			metrics.SnapshotGenerationTotal.WithLabelValues("main", "error", trigger).Inc()
+			metrics.TranslationErrorsTotal.WithLabelValues("sds_secrets_failed").Inc()
+			if sm.statusCallback != nil {
+				for _, cfg := range configs {
+					sm.statusCallback(cfg.UUID, false, correlationID)
+				}
+			}
+			return fmt.Errorf("failed to build SDS secrets: %w", err)
+		}
+
+		var included []types.Resource
+		for _, secret := range secrets {
+			s, ok := secret.(*tlsv3.Secret)
+			if !ok {
+				continue
+			}
+			if SnapshotReferencesSDSSecret(resources[resource.ClusterType], resources[resource.ListenerType], s.GetName()) {
+				included = append(included, secret)
+				log.Debug("Added SDS secret to snapshot", slog.String("secret_name", s.GetName()))
+			}
+		}
+		if len(included) > 0 {
+			resources[resource.SecretType] = included
 		}
 	}
 

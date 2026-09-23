@@ -54,3 +54,22 @@ Legend: **IT** = `gateway/it/features/<file>.feature` scenario title; **UT** = G
 - `referencedByApis` is present only on `usage: client` items; upstream items are byte-compatible
   with today's response apart from the new `usage` field.
 - Upload body cap is a constant 1 MiB, enforced with `http.MaxBytesReader`; no configuration key.
+
+## Slice 2 — derived listener, mtls-auth skeleton, deploy rules (§3.1.1, §3.1.4 steps 1–4, §3.1.5, §3.1.6, §3.1.8, D8, §5.2.1 accept rows, §5.2.2)
+
+| Spec case | Test |
+|---|---|
+| §3.1.5 listener asks iff an API attaches `mtls-auth`; no switch | IT mtls-listener: *The listener asks for a client certificate only while an API attaches mtls-auth*; UT `TestTranslator_TranslateConfigs_HTTPSListener_*` |
+| §3.1.1 request-not-require; ACCEPT_UNTRUSTED never drops (D9) | IT: *Callers of other APIs are not affected…* (no cert, valid, wrong CA, expired, self-signed all 200); *The listener validates against the pool without requiring…*; UT `TestTranslator_CreateDownstreamTLSContext_ClientCARequired`, `TestSDSSecretManager_GetSecrets_*` (ACCEPT_UNTRUSTED) |
+| §3.1.8 uniform 401 body, no WWW-Authenticate | IT: *A protected operation denies a caller who presents no certificate with the uniform body*; UT dev-policies/mtls-auth (json/plain/minimal/status) |
+| D8 listener key via SDS, never inline | IT: *The listener's private key is delivered as a secret…*; UT `..._ListenerCertViaSDS`, `TestSnapshotReferencesSDSSecret` |
+| §3.1.4 (3) snapshot gate covers listener-referenced secrets | UT `TestSnapshotReferencesSDSSecret` |
+| §3.1.4 (4) ext_proc connection.* attributes | UT `TestTranslator_CreateExtProcFilter` (attributes subtest) |
+| S7 client CA bundle disjoint from upstream bundle | UT `TestSDSSecretManager_GetSecrets_UpstreamAndClientRows_HTTPSEnabled`, `TestCertStore_GetClientCABundle_OnlyClientRows` |
+| §3.1.5 deploy refusals: pool empty; accept []; no ca; unknown ca; relay ca; upstream ca; empty/blank SANs; empty/malformed thumbprints; unknown params; twice per scope; API+operation | IT: *Attaching mtls-auth while the pool is empty is refused*; outline *An accept list that cannot select anyone is refused…* (11 rows); *mtls-auth may appear once per scope*; *…both API and operation level is refused*; UT `TestMtlsAuthValidator_ValidateRestAPI_*` |
+| §3.1.5 `https_enabled` false → deploy 400 and startup refusal (GO-AUTH-011) | UT `_HTTPSDisabled`, `ValidateMTLSStartupInvariant` (the IT stack always has HTTPS on) |
+| §3.1.5 refused deploy leaves listener unchanged | IT: *A refused deployment leaves the listener alone* |
+| §5.2.2 `MTLS_ACCEPT_INHERITS_POOL` + resolved echo; `MTLS_ACCEPT_UNNARROWED`; `MTLS_AUTH_NOT_FIRST`; `MTLS_THUMBPRINT_NORMALISED`; no warning for single authority | IT warnings scenarios; UT `ResolveMtlsAuthForResponse` tests |
+| §3.1.5 stored config unchanged by resolution | UT (input untouched assertion) |
+
+Decisions taken while writing slice 2 tests: unknown-parameter message is `unknown parameter <name>` generically, with the `thumbprints` hint only for `thumbprint`; warnings and the resolved `accept` echo appear on create/update responses only, not on later GETs.

@@ -20,6 +20,7 @@ package handlers
 
 import (
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 )
 
@@ -110,6 +111,29 @@ func buildResourceResponse(cfg any, status api.ResourceStatus) any {
 		return cp
 	}
 	return cfg
+}
+
+// buildRestAPIResourceResponseWithWarnings merges a resolved RestAPI value
+// (the mtls-auth `accept` echo already applied — see
+// config.MtlsAuthValidator.ResolveMtlsAuthForResponse) with the stored
+// config's status block, attaching warnings when there are any. resolvedCfg
+// is expected to be the RESPONSE-ONLY view: it must never be the value that
+// gets persisted, since persisting it would bake the resolved accept list
+// into storage instead of leaving it to keep tracking pool changes.
+func buildRestAPIResourceResponseWithWarnings(resolvedCfg api.RestAPI, stored *models.StoredConfig, warnings []clientca.Warning) any {
+	status := buildResourceStatus(stored)
+	if len(warnings) > 0 {
+		apiWarnings := make([]api.Warning, len(warnings))
+		for i, w := range warnings {
+			apiWarnings[i] = api.Warning{
+				Code:    stringPtr(w.Code),
+				Field:   stringPtr(w.Field),
+				Message: stringPtr(w.Message),
+			}
+		}
+		status.Warnings = &apiWarnings
+	}
+	return buildResourceResponse(resolvedCfg, status)
 }
 
 // buildResourceResponseFromStored is a convenience wrapper that extracts the

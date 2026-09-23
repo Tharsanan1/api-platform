@@ -96,7 +96,7 @@ func (h *RestAPIHandler) CreateRestAPI(w http.ResponseWriter, r *http.Request) {
 	metrics.APIOperationDurationSeconds.WithLabelValues(operation, "rest_api").Observe(time.Since(startTime).Seconds())
 	metrics.APIsTotal.WithLabelValues("rest_api", "active").Inc()
 
-	httputil.WriteJSON(w, http.StatusCreated, buildResourceResponseFromStored(result.StoredConfig.SourceConfiguration, result.StoredConfig))
+	httputil.WriteJSON(w, http.StatusCreated, h.buildDeployResponse(result.StoredConfig.SourceConfiguration, result.StoredConfig))
 }
 
 // ListRestAPIs implements ServerInterface.ListRestAPIs
@@ -194,7 +194,27 @@ func (h *RestAPIHandler) UpdateRestAPI(w http.ResponseWriter, r *http.Request, i
 	metrics.APIOperationsTotal.WithLabelValues(operation, "success", "rest_api").Inc()
 	metrics.APIOperationDurationSeconds.WithLabelValues(operation, "rest_api").Observe(time.Since(startTime).Seconds())
 
-	httputil.WriteJSON(w, http.StatusOK, buildResourceResponseFromStored(result.Config.SourceConfiguration, result.Config))
+	httputil.WriteJSON(w, http.StatusOK, h.buildDeployResponse(result.Config.SourceConfiguration, result.Config))
+}
+
+// buildDeployResponse builds the create/update response body. For a RestAPI
+// SourceConfiguration it resolves mtls-auth's `accept` echo and attaches any
+// warnings (see restapi.RestAPIService.ResolveMtlsAuthForResponse); every
+// other configuration shape falls back to the plain resource response.
+func (h *RestAPIHandler) buildDeployResponse(sourceConfig any, stored *models.StoredConfig) any {
+	switch cfg := sourceConfig.(type) {
+	case api.RestAPI:
+		resolved, warnings := h.service.ResolveMtlsAuthForResponse(cfg)
+		return buildRestAPIResourceResponseWithWarnings(resolved, stored, warnings)
+	case *api.RestAPI:
+		if cfg == nil {
+			return buildResourceResponseFromStored(sourceConfig, stored)
+		}
+		resolved, warnings := h.service.ResolveMtlsAuthForResponse(*cfg)
+		return buildRestAPIResourceResponseWithWarnings(resolved, stored, warnings)
+	default:
+		return buildResourceResponseFromStored(sourceConfig, stored)
+	}
 }
 
 // DeleteRestAPI implements ServerInterface.DeleteRestAPI

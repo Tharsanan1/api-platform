@@ -71,12 +71,12 @@ const (
 	// Configuration Validation Constants
 	MaxReasonableTimeoutMs       = uint32(3600000) // 1 hour in milliseconds
 	MaxReasonablePolicyTimeoutMs = uint32(60000)   // 60 seconds in milliseconds
-	
-	// MaxReasonableBufferLimitBytes caps the downstream per-connection buffer limit in bytes, 
+
+	// MaxReasonableBufferLimitBytes caps the downstream per-connection buffer limit in bytes,
 	// preventing unreasonably large values that could lead to resource exhaustion or performance degradation.
 	MaxReasonableBufferLimitBytes = uint32(104857600) // 100 MiB
 
-	// MaxReasonableConnectionTimeoutMs caps connection-level timeouts (request, request-headers,etc.), 
+	// MaxReasonableConnectionTimeoutMs caps connection-level timeouts (request, request-headers,etc.),
 	// allowing higher values than MaxReasonableTimeoutMs to support long-lived idle connections.
 	MaxReasonableConnectionTimeoutMs = uint32(86400000) // 24 hours in milliseconds
 
@@ -101,6 +101,21 @@ const (
 	ExtProcHeaderModeSend            = "SEND"
 	ExtProcHeaderModeSkip            = "SKIP"
 	ExtProcRequestAttributeRouteName = "xds.route_name"
+
+	// Connection-level attributes surfaced to the policy engine so mtls-auth
+	// can authenticate a caller from the certificate presented on the
+	// connection, without the policy engine needing its own TLS/Envoy
+	// bindings. See go-control-plane-xds-security.md and the mtls-listener
+	// feature file for how the derived HTTPS listener populates these.
+	ExtProcRequestAttributeConnectionMTLS                   = "connection.mtls"
+	ExtProcRequestAttributeConnectionPeerCertificate        = "connection.peer_certificate"
+	ExtProcRequestAttributeConnectionPeerCertificateDigest  = "connection.sha256_peer_certificate_digest"
+	ExtProcRequestAttributeConnectionSubjectPeerCertificate = "connection.subject_peer_certificate"
+	ExtProcRequestAttributeConnectionURISANPeerCertificate  = "connection.uri_san_peer_certificate"
+	ExtProcRequestAttributeConnectionDNSSANPeerCertificate  = "connection.dns_san_peer_certificate"
+	ExtProcRequestAttributeConnectionTLSVersion             = "connection.tls_version"
+	ExtProcRequestAttributeConnectionRequestedServerName    = "connection.requested_server_name"
+	ExtProcRequestAttributeConnectionPeerCertificateValid   = "connection.peer_certificate_valid"
 
 	// Policy Engine
 	PolicyEngineClusterName       = "api-platform/policy-engine"

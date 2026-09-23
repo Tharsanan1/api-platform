@@ -21,6 +21,7 @@ package xds
 import (
 	"fmt"
 	"log/slog"
+	"os"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
@@ -32,6 +33,20 @@ import (
 const (
 	// SecretNameUpstreamCA is the name of the SDS secret for upstream CA certificates
 	SecretNameUpstreamCA = "upstream_ca_bundle"
+
+	// SecretNameDownstreamClientCA is the name of the SDS secret carrying the
+	// client certificate authority pool (usage: client rows) that the
+	// derived HTTPS listener validates a presented client certificate
+	// against, once at least one deployed API attaches mtls-auth.
+	SecretNameDownstreamClientCA = "downstream_client_ca"
+
+	// SecretNameDownstreamListenerCert is the name of the SDS secret
+	// carrying the HTTPS listener's own certificate/key
+	// (router.downstream_tls.cert_path/key_path). Delivering it via SDS
+	// instead of inlining it into the LDS resource keeps the listener's
+	// private key out of the xDS config dump (see
+	// go-control-plane-xds-security.md directive 3).
+	SecretNameDownstreamListenerCert = "downstream_listener_cert"
 )
 
 // SDSSecretManager manages SDS secrets for TLS certificates
@@ -40,6 +55,14 @@ type SDSSecretManager struct {
 	certStore *certstore.CertStore
 	logger    *slog.Logger
 	nodeID    string
+
+	// listenerCertPath/listenerKeyPath and httpsEnabled configure the
+	// downstream_listener_cert secret. Set via SetDownstreamListenerCert —
+	// kept out of the constructor so existing callers/tests that only need
+	// the upstream_ca_bundle secret (via GetSecret) are unaffected.
+	listenerCertPath string
+	listenerKeyPath  string
+	httpsEnabled     bool
 }
 
 // NewSDSSecretManager creates a new SDS secret manager
@@ -51,6 +74,18 @@ func NewSDSSecretManager(certStore *certstore.CertStore, cache cache.SnapshotCac
 		logger:    logger,
 		nodeID:    nodeID,
 	}
+}
+
+// SetDownstreamListenerCert configures the source files for the
+// downstream_listener_cert secret. Must be called (from the same router
+// config that already gates the HTTPS listener itself) before GetSecrets is
+// relied on for a snapshot that includes an HTTPS listener; httpsEnabled
+// false makes GetSecrets skip this secret entirely rather than attempt to
+// read files that may not exist when HTTPS is disabled.
+func (sm *SDSSecretManager) SetDownstreamListenerCert(certPath, keyPath string, httpsEnabled bool) {
+	sm.listenerCertPath = certPath
+	sm.listenerKeyPath = keyPath
+	sm.httpsEnabled = httpsEnabled
 }
 
 // GetCache returns the SDS snapshot cache
@@ -108,6 +143,110 @@ func (sm *SDSSecretManager) GetSecret() (types.Resource, error) {
 	}
 
 	return secret, nil
+}
+
+// GetSecrets builds every SDS secret this manager can currently serve:
+// upstream_ca_bundle (unchanged from GetSecret), downstream_client_ca (the
+// client-CA pool, for mTLS validation) and downstream_listener_cert (the
+// HTTPS listener's own certificate/key). The snapshot manager includes only
+// the subset actually referenced by this snapshot's clusters/listeners (see
+// SnapshotReferencesSDSSecret).
+//
+// Only a genuinely EMPTY result is soft — an empty upstream_ca_bundle or an
+// empty client-CA pool is simply omitted, not an error (deploy-time
+// validation already refuses to attach mtls-auth against an empty pool, so a
+// snapshot that references downstream_client_ca is never expected to find
+// one empty). A lookup FAILURE is always fatal — for the client-CA pool
+// exactly as for downstream_listener_cert's cert/key files — because
+// whenever a deployed API attaches mtls-auth, the listener already
+// references that secret name; silently omitting it on error would leave
+// the listener waiting on a secret that will never arrive, with nothing
+// surfacing the failure. This matches how the old inline-bytes path failed
+// snapshot generation outright when it read the listener cert/key files
+// directly (see go-network-service-hardening.md).
+func (sm *SDSSecretManager) GetSecrets() ([]types.Resource, error) {
+	var secrets []types.Resource
+
+	if upstreamSecret, err := sm.GetSecret(); err != nil {
+		sm.logger.Debug("upstream_ca_bundle secret not currently available", slog.Any("error", err))
+	} else {
+		secrets = append(secrets, upstreamSecret)
+	}
+
+	if sm.certStore != nil {
+		clientCABundle, err := sm.certStore.GetClientCABundle()
+		if err != nil {
+			// Fatal, not warn-and-continue: whenever a deployed API attaches
+			// mtls-auth, the listener references this secret name, so a
+			// failed lookup (as opposed to a genuinely empty pool, which
+			// returns no error — see GetClientCABundle) must not be
+			// swallowed. Silently omitting the secret here would leave the
+			// listener waiting on a secret that will never arrive, with
+			// nothing surfacing the failure.
+			sm.logger.Error("Failed to load client-CA pool for downstream_client_ca secret", slog.Any("error", err))
+			return nil, fmt.Errorf("failed to load client-CA pool: %w", err)
+		}
+		if len(clientCABundle) > 0 {
+			secrets = append(secrets, &tlsv3.Secret{
+				Name: SecretNameDownstreamClientCA,
+				Type: &tlsv3.Secret_ValidationContext{
+					ValidationContext: &tlsv3.CertificateValidationContext{
+						TrustedCa: &core.DataSource{
+							Specifier: &core.DataSource_InlineBytes{
+								InlineBytes: clientCABundle,
+							},
+						},
+						// Envoy still performs full X.509 chain verification
+						// against this pool and reports the outcome on the
+						// connection (connection.peer_certificate_valid) —
+						// ACCEPT_UNTRUSTED only stops Envoy from CLOSING the
+						// connection when that verification fails. Without
+						// it, an untrusted/expired/self-signed certificate
+						// would abort the TLS handshake before mtls-auth ever
+						// runs, turning every such caller into a bare
+						// connection reset instead of a 401 with telemetry —
+						// this is what lets a plain API on the same listener
+						// stay reachable and lets mtls-auth's own policy
+						// evaluation, not the TLS stack, decide the HTTP
+						// outcome. mtls-auth MUST still treat a false
+						// peer_certificate_valid as a deny; ACCEPT_UNTRUSTED
+						// never means "verification doesn't matter".
+						TrustChainVerification: tlsv3.CertificateValidationContext_ACCEPT_UNTRUSTED,
+					},
+				},
+			})
+		}
+	}
+
+	if sm.httpsEnabled {
+		certBytes, err := os.ReadFile(sm.listenerCertPath)
+		if err != nil {
+			sm.logger.Error("Failed to read HTTPS listener certificate for downstream_listener_cert secret",
+				slog.String("path", sm.listenerCertPath), slog.Any("error", err))
+			return nil, fmt.Errorf("failed to read HTTPS listener certificate: %w", err)
+		}
+		keyBytes, err := os.ReadFile(sm.listenerKeyPath)
+		if err != nil {
+			sm.logger.Error("Failed to read HTTPS listener private key for downstream_listener_cert secret",
+				slog.String("path", sm.listenerKeyPath), slog.Any("error", err))
+			return nil, fmt.Errorf("failed to read HTTPS listener private key: %w", err)
+		}
+		secrets = append(secrets, &tlsv3.Secret{
+			Name: SecretNameDownstreamListenerCert,
+			Type: &tlsv3.Secret_TlsCertificate{
+				TlsCertificate: &tlsv3.TlsCertificate{
+					CertificateChain: &core.DataSource{
+						Specifier: &core.DataSource_InlineBytes{InlineBytes: certBytes},
+					},
+					PrivateKey: &core.DataSource{
+						Specifier: &core.DataSource_InlineBytes{InlineBytes: keyBytes},
+					},
+				},
+			},
+		})
+	}
+
+	return secrets, nil
 }
 
 // GetNodeID returns the node ID for SDS clients

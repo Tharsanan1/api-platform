@@ -323,6 +323,33 @@ func (cs *CertStore) GetCombinedCertificates() []byte {
 	return result
 }
 
+// GetClientCABundle returns the concatenated PEM bundle of every usage:
+// client certificate in the pool (the client certificate authorities used to
+// validate an mTLS connection), in the order the store returns them. It
+// never includes usage: upstream rows — the two trust purposes must never
+// share a bundle (see loadDatabaseCertificates).
+//
+// Returns (nil, nil) when the pool is empty. An empty pool is not itself an
+// error here: deploy-time validation (pkg/config's MtlsAuthValidator) is
+// what prevents an API from attaching mtls-auth while the pool is empty, so
+// by the time this is called for a snapshot that actually needs the
+// downstream_client_ca secret, the pool is expected to be non-empty.
+func (cs *CertStore) GetClientCABundle() ([]byte, error) {
+	certs, err := cs.db.ListCertificatesByUsage(models.CertificateUsageClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list client-CA pool: %w", err)
+	}
+
+	var buf bytes.Buffer
+	for _, cert := range certs {
+		buf.Write(cert.Certificate)
+		if !bytes.HasSuffix(cert.Certificate, []byte("\n")) {
+			buf.WriteString("\n")
+		}
+	}
+	return buf.Bytes(), nil
+}
+
 // GetCertsDir returns the custom certificates directory path
 func (cs *CertStore) GetCertsDir() string {
 	return cs.certsDir

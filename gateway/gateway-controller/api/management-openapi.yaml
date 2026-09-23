@@ -2810,6 +2810,30 @@ components:
           format: date-time
           description: Timestamp when the resource was last deployed (omitted when undeployed)
           example: 2026-04-24T07:21:13Z
+        warnings:
+          type: array
+          readOnly: true
+          description: >-
+            Non-fatal deploy-time findings (e.g. a policy's parameters resolved
+            to something other than what was written, such as an omitted
+            accept list inheriting the whole client-CA pool). Present only
+            when non-empty.
+          items:
+            $ref: "#/components/schemas/Warning"
+
+    Warning:
+      type: object
+      description: A non-fatal, deploy-time finding attached to a resource's status.
+      properties:
+        code:
+          type: string
+          example: MTLS_ACCEPT_INHERITS_POOL
+        field:
+          type: string
+          example: spec.policies[0].params.accept
+        message:
+          type: string
+          example: accept is omitted and the pool holds 2 authorities; this API accepts certificates from all of them
 
     # Request body for create/update: user/resource fields only (no server-managed status).
     RestAPIRequest:

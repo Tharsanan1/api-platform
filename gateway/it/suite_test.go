@@ -125,6 +125,7 @@ func getFeaturePaths() []string {
 		"features/llm-provider.feature",
 		"features/certificates.feature",
 		"features/mtls-client-ca-pool.feature",
+		"features/mtls-listener.feature",
 		"features/config-dump.feature",
 		"features/api-management.feature",
 		"features/api-error-responses.feature",

@@ -190,7 +190,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     When I send a GET request to "http://localhost:9901/config_dump?resource=dynamic_listeners"
     Then the response status code should be 200
     And the response body should contain "downstream_client_ca"
-    And the response body should not contain "\"require_client_certificate\": true"
+    And the response body should match pattern "require_client_certificate\W+false"
     When I send a GET request to "http://localhost:9901/config_dump?resource=dynamic_active_secrets"
     Then the response status code should be 200
     And the response body should contain "downstream_client_ca"
@@ -201,8 +201,8 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     When I send a GET request to "http://localhost:9901/config_dump?resource=dynamic_listeners"
     Then the response status code should be 200
     And the response body should contain "tls_certificate_sds_secret_configs"
-    And the response body should not contain "\"private_key\""
-    And the response body should not contain "\"tls_certificates\""
+    And the response body should not contain "private_key"
+    And the response body should not contain "tls_certificates"
 
   # ==================== DEPLOYMENTS THAT COULD NEVER AUTHENTICATE ANYONE ARE REFUSED ====================
 
@@ -234,7 +234,8 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
 
   Scenario Outline: An accept list that cannot select anyone is refused with the offending path
     Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
-    And the certificate fixture "ca-b" is pooled as "listener-edge-lb" with usage "client" and role "relay"
+    And I upload the certificate fixture "ca-b" as "listener-edge-lb" with usage "client" and role "relay"
+    And the response status should be 201
     And the certificate fixture "backend-ca" is pooled as "listener-backend-trust"
     When I deploy this API configuration:
       """

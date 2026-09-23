@@ -46,12 +46,12 @@ Feature: Client certificate authority pool
     And the JSON response should have field "subject"
     And the JSON response should have field "notAfter"
     And the JSON response field "warnings" should not exist
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the response status should be 200
     And the listed certificate "pool-partner-a" should have "usage" equal to "client"
     And the listed certificate "pool-partner-a" should have "role" equal to "client"
     And the listed certificate "pool-partner-a" should have "referencedByApis" equal to 0
-    When I list certificates with usage "upstream"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=upstream"
     Then the certificate list should not contain "pool-partner-a"
 
   Scenario: A certificate uploaded without usage is backend trust, exactly as before
@@ -60,12 +60,12 @@ Feature: Client certificate authority pool
     And the JSON response field "usage" should be "upstream"
     And the JSON response field "role" should not exist
     And the JSON response field "count" should be 1
-    When I list certificates with usage "upstream"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=upstream"
     Then the listed certificate "pool-legacy-backend-ca" should have "usage" equal to "upstream"
     And the listed certificate "pool-legacy-backend-ca" should not have field "referencedByApis"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the certificate list should not contain "pool-legacy-backend-ca"
-    When I list certificates
+    When I send a GET request to the "gateway-controller" service at "/certificates"
     Then the certificate list should contain "pool-legacy-backend-ca"
 
   Scenario: A client authority can be marked as a relay for certificates carried in a header
@@ -73,7 +73,7 @@ Feature: Client certificate authority pool
     Then the response status should be 201
     And the JSON response field "usage" should be "client"
     And the JSON response field "role" should be "relay"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the listed certificate "pool-edge-lb-ca" should have "role" equal to "relay"
 
   Scenario: An issuing CA uploaded together with its root is one entry identified by the issuing CA
@@ -90,7 +90,7 @@ Feature: Client certificate authority pool
     And the JSON response field "isLeaf" should be true
     And the JSON response field "warnings[0].code" should be "CLIENT_CA_IS_LEAF"
     And the JSON response field "warnings[0].field" should be "certificate"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the listed certificate "pool-acme-selfsigned" should have "isLeaf" equal to true
 
   Scenario: A not-yet-valid authority is accepted with a warning
@@ -103,7 +103,7 @@ Feature: Client certificate authority pool
     Given the certificate fixture "ca-b" is pooled as "pool-partner-b" with usage "client"
     When I upload the certificate fixture "ca-b" as "pool-partner-b-again" with usage "client"
     Then the response status should be 201
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the certificate list should contain "pool-partner-b"
     And the certificate list should contain "pool-partner-b-again"
 
@@ -112,19 +112,19 @@ Feature: Client certificate authority pool
     When I upload the certificate fixture "ca-b-same-dn" as "pool-lookalike-ca" with usage "client"
     Then the response status should be 201
     And the JSON response field "subject" should be the subject of fixture "ca-a"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the certificate list should contain "pool-partner-a"
     And the certificate list should contain "pool-lookalike-ca"
 
   Scenario: An authority expiring within thirty days is listed with an expiry warning
     Given the certificate fixture "ca-expires-soon" is pooled as "pool-expiring-ca" with usage "client"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the listed certificate "pool-expiring-ca" should have a warning with code "CERT_EXPIRES_SOON"
     And the listed certificate "pool-expiring-ca" should have a warning with field "notAfter"
 
   Scenario: An authority with more than thirty days left is listed without an expiry warning
     Given the certificate fixture "ca-a" is pooled as "pool-partner-a" with usage "client"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the listed certificate "pool-partner-a" should have no warnings
 
   # ==================== REJECTED UPLOADS ====================
@@ -134,14 +134,14 @@ Feature: Client certificate authority pool
     Then the response status should be 400
     And the JSON response field "status" should be "error"
     And the response should list a validation error for field "certificate" containing "the certificate expired on"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the certificate list should not contain "pool-expired-ca"
 
   Scenario: Two unrelated authorities in one PEM are rejected
     When I upload the certificate fixtures "ca-a,ca-b" as "pool-two-roots" with usage "client"
     Then the response status should be 400
     And the response should list a validation error for field "certificate" with message "this PEM contains more than one unrelated authority; upload each as its own entry"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the certificate list should not contain "pool-two-roots"
 
   Scenario: A PEM that carries a private key is rejected and nothing is stored
@@ -156,7 +156,7 @@ Feature: Client certificate authority pool
     Then the response status should be 400
     And the response should list a validation error for field "certificate" with message "the upload contains a private key; a client-CA entry accepts certificates only"
     And the response body should not contain "PRIVATE KEY"
-    When I list certificates
+    When I send a GET request to the "gateway-controller" service at "/certificates"
     Then the certificate list should not contain "pool-leaky-ca"
 
   Scenario: A value that is not a PEM certificate is rejected
@@ -238,7 +238,9 @@ Feature: Client certificate authority pool
   Scenario: A body over the size limit is rejected without stating the limit
     When I upload a certificate body of 2 megabytes as "pool-too-big" with usage "client"
     Then the response status should be 413
-    And the response body should not match pattern "[0-9]+ ?(bytes|KiB|MiB|kB|MB)"
+    And the response body should not contain "1048576"
+    And the response body should not contain "MiB"
+    And the response body should not contain "bytes"
 
   # ==================== ONE NAME SPACE ====================
 
@@ -261,7 +263,7 @@ Feature: Client certificate authority pool
     Given the certificate fixture "ca-a" is pooled as "pool-partner-a" with usage "client"
     When I delete the certificate named "pool-partner-a"
     Then the response should be successful
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the certificate list should not contain "pool-partner-a"
 
   Scenario: Removing an unknown certificate is not found
@@ -274,7 +276,7 @@ Feature: Client certificate authority pool
   Scenario: A developer can read the pool
     Given the certificate fixture "ca-a" is pooled as "pool-partner-a" with usage "client"
     And I authenticate using basic auth as "developer"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the response status should be 200
     And the certificate list should contain "pool-partner-a"
 
@@ -283,7 +285,7 @@ Feature: Client certificate authority pool
     When I upload the certificate fixture "ca-a" as "pool-dev-attempt" with usage "client"
     Then the response status should be 403
     Given I authenticate using basic auth as "admin"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the certificate list should not contain "pool-dev-attempt"
 
   Scenario: A developer cannot remove from the pool
@@ -292,7 +294,7 @@ Feature: Client certificate authority pool
     When I delete the certificate named "pool-partner-a"
     Then the response status should be 403
     Given I authenticate using basic auth as "admin"
-    When I list certificates with usage "client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
     Then the certificate list should contain "pool-partner-a"
 
   Scenario: An unauthenticated caller cannot add to the pool

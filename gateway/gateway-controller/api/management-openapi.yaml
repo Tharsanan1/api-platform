@@ -855,12 +855,22 @@ paths:
     get:
       summary: List all custom certificates
       description: |
-        Retrieve all custom TLS certificates currently loaded in the certificate store.
-        These certificates are used for verifying HTTPS upstream connections.
+        Retrieve custom TLS certificates currently loaded in the certificate store.
+        With usage: upstream (or no usage filter), these are used for verifying
+        HTTPS upstream connections. With usage: client, these are the pooled
+        client certificate authorities used to authenticate mutual-TLS callers.
       operationId: listCertificates
       x-basicauth-roles: [admin, developer]
       tags:
         - Certificate Management
+      parameters:
+        - name: usage
+          in: query
+          required: false
+          description: Filter the list to a single usage. Omit to list all certificates regardless of usage.
+          schema:
+            type: string
+            enum: [ upstream, client ]
       responses:
         "200":
           description: List of certificates
@@ -868,6 +878,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CertificateListResponse"
+        "400":
+          description: Invalid usage filter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Internal server error
           content:
@@ -877,7 +893,12 @@ paths:
 
     post:
       summary: Upload a new certificate
-      description: Upload a new TLS certificate (PEM format) to the Gateway. The certificate is loaded dynamically without restarting the Gateway.
+      description: |
+        Upload a new TLS certificate (PEM format) to the Gateway. The certificate is
+        loaded dynamically without restarting the Gateway. With usage: upstream (the
+        default), it is used for verifying HTTPS upstream connections. With usage:
+        client, it becomes a pooled client certificate authority used to authenticate
+        mutual-TLS callers; the two purposes never share a trust bundle.
       operationId: uploadCertificate
       x-basicauth-roles: [admin]
       tags:
@@ -904,6 +925,18 @@ paths:
                 $ref: "#/components/schemas/CertificateResponse"
         "400":
           description: Invalid certificate format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A certificate with this name already exists (names are one namespace across usages)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Request body exceeds the maximum allowed size
           content:
             application/json:
               schema:
@@ -5068,7 +5101,7 @@ components:
       properties:
         name:
           type: string
-          description: Unique name for the certificate. Must be unique across all certificates.
+          description: Unique name for the certificate. Must be unique across all certificates, regardless of usage.
           pattern: "^[a-zA-Z0-9._-]+$"
           minLength: 1
           maxLength: 100
@@ -5081,6 +5114,25 @@ components:
             MIIDXTCCAkWgAwIBAgIJAKL0UG+mRKtjMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
             ...
             -----END CERTIFICATE-----
+        usage:
+          type: string
+          description: |
+            Whether this certificate is used to verify upstream/backend HTTPS
+            connections (the default), or pooled as a client certificate
+            authority used to authenticate mutual-TLS callers.
+          enum: [ upstream, client ]
+          default: upstream
+          example: upstream
+        role:
+          type: string
+          description: |
+            Only meaningful when usage is client. "client" (the default)
+            means the authority validates a client certificate presented
+            directly on the mTLS connection; "relay" means it validates a
+            client certificate relayed via a header (e.g. from a
+            terminating load balancer) instead.
+          enum: [ client, relay ]
+          example: client
 
     CertificateResponse:
       type: object
@@ -5095,21 +5147,44 @@ components:
           example: my-custom-ca
         subject:
           type: string
-          description: Certificate subject DN (for first cert if bundle)
+          description: Certificate subject DN (identity certificate, for a client-CA bundle)
           example: CN=My CA,O=My Organization,C=US
         issuer:
           type: string
-          description: Certificate issuer DN (for first cert if bundle)
+          description: Certificate issuer DN (identity certificate, for a client-CA bundle)
           example: CN=My CA,O=My Organization,C=US
         notAfter:
           type: string
-          description: Certificate expiration date (for first cert if bundle)
+          description: Certificate expiration date (identity certificate, for a client-CA bundle)
           format: date-time
           example: "2026-11-26 06:07:26"
         count:
           type: integer
           description: Number of certificates in the file
           example: 1
+        usage:
+          type: string
+          description: Whether this is upstream/backend trust or a pooled client certificate authority.
+          enum: [ upstream, client ]
+          example: upstream
+        role:
+          type: string
+          description: Only present for usage client. Whether the authority validates a directly-presented or header-relayed client certificate.
+          enum: [ client, relay ]
+          example: client
+        isLeaf:
+          type: boolean
+          description: True when the identity certificate is not itself a certificate authority (pooled as a one-member authority).
+          example: false
+        warnings:
+          type: array
+          description: Non-fatal findings about the upload (e.g. leaf certificate, not yet valid). Omitted when there are none.
+          items:
+            $ref: "#/components/schemas/CertificateWarning"
+        referencedByApis:
+          type: integer
+          description: Number of APIs referencing this client certificate authority. Only present for usage client.
+          example: 0
         message:
           type: string
           description: Success or informational message
@@ -5118,6 +5193,19 @@ components:
           type: string
           enum: [ success, error ]
           example: success
+
+    CertificateWarning:
+      type: object
+      properties:
+        code:
+          type: string
+          example: CLIENT_CA_IS_LEAF
+        field:
+          type: string
+          example: certificate
+        message:
+          type: string
+          example: the certificate is not a certificate authority; it is pooled as a one-member authority that trusts exactly this certificate
 
     CertificateListResponse:
       type: object

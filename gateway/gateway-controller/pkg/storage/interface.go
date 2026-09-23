@@ -354,6 +354,13 @@ type Storage interface {
 	// Returns an empty slice if no certificates exist.
 	ListCertificates() ([]*models.StoredCertificate, error)
 
+	// ListCertificatesByUsage retrieves certificates whose usage column
+	// matches the given value ("upstream" or "client"), ordered by creation
+	// time.
+	//
+	// Returns an empty slice if no certificates of that usage exist.
+	ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error)
+
 	// DeleteCertificate removes a certificate by ID.
 	//
 	// Returns an error if the certificate does not exist.

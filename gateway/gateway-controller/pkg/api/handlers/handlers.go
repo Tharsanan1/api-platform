@@ -79,6 +79,13 @@ type APIServer struct {
 	gatewayID                   string
 	subscriptionSnapshotUpdater utils.SubscriptionSnapshotUpdater
 	subscriptionResourceService *utils.SubscriptionResourceService
+
+	// certExpiryWarnThrottle rate-limits the CERT_EXPIRES_SOON WARN log line
+	// emitted by ListCertificates (see certificates.go) so that polling the
+	// list endpoint doesn't flood logs. Zero-value usable: no initialization
+	// required in NewAPIServer or in tests constructing an APIServer literal
+	// directly.
+	certExpiryWarnThrottle certExpiryWarnThrottle
 }
 
 // NewAPIServer creates a new API server with dependencies

@@ -16,7 +16,7 @@
 # under the License.
 # --------------------------------------------------------------------
 
-.PHONY: all test test-postgres test-sqlserver test-vhosts-single test-vhosts-multi test-dp-to-cp-nosync test-all test-verbose clean deps check-docker coverage-report build-coverage ensure-test-tags
+.PHONY: all test test-postgres test-sqlserver test-vhosts-single test-vhosts-multi test-dp-to-cp-nosync test-all test-verbose clean deps check-docker coverage-report build-coverage ensure-test-tags pki
 
 VERSION ?= $(shell cat ../VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.0.1-SNAPSHOT")
 DOCKER_REGISTRY ?= ghcr.io/wso2/api-platform
@@ -44,9 +44,14 @@ ensure-test-tags:
 		fi; \
 	done
 
+# Regenerate the mTLS client-CA-pool test PKI fixtures (resources/mtls-pki/*.crt,
+# *.key, manifest.json). Re-runnable: always overwrites the previous fixture set.
+pki:
+	go run ./resources/mtls-pki/generate.go
+
 # Run integration tests (always with coverage)
 # Requires: make build-coverage-image (run once before tests)
-test: ensure-test-tags
+test: ensure-test-tags pki
 	COMPOSE_FILE=$(COMPOSE_FILE) go test -v -timeout 50m ./...
 
 # Build all coverage-instrumented gateway components
@@ -85,7 +90,7 @@ test-dp-to-cp-nosync:
 	IT_FEATURE_PATHS=features/health.feature,features/dp-to-cp-sync-disabled.feature $(MAKE) test
 
 # Run tests with verbose output
-test-verbose: ensure-test-tags
+test-verbose: ensure-test-tags pki
 	COMPOSE_FILE=$(COMPOSE_FILE) go test -v -count=1 -timeout 50m ./...
 
 # Clean up test artifacts

@@ -1,5 +1,5 @@
 -- SQL Server Schema for Gateway-Controller API Configurations
--- Version: 4
+-- Version: 5
 --
 -- Portable counterpart of gateway-controller-db.postgres.sql. Type mapping:
 --   TEXT (keyed)      -> NVARCHAR(64)/NVARCHAR(255)  (NVARCHAR(MAX) cannot be indexed;
@@ -112,11 +112,22 @@ CREATE TABLE dbo.certificates (
     not_before DATETIME2(7) NOT NULL,
     not_after DATETIME2(7) NOT NULL,
     cert_count INT NOT NULL DEFAULT 1,
+    -- usage separates backend/upstream trust from a pooled client
+    -- certificate authority (mTLS); the two purposes never share a trust
+    -- bundle. role only applies to usage: client.
+    usage NVARCHAR(20) NOT NULL DEFAULT 'upstream',
+    role NVARCHAR(20) NOT NULL DEFAULT 'client',
     created_at DATETIME2(7) NOT NULL DEFAULT SYSUTCDATETIME(),
     updated_at DATETIME2(7) NOT NULL DEFAULT SYSUTCDATETIME(),
     PRIMARY KEY (gateway_id, uuid),
     UNIQUE(gateway_id, name)
 );
+-- Upgrade path for already-provisioned databases (the guarded CREATE TABLE
+-- above is a no-op against them): add the columns if this table pre-dates them.
+IF COL_LENGTH('dbo.certificates', 'usage') IS NULL
+ALTER TABLE dbo.certificates ADD usage NVARCHAR(20) NOT NULL DEFAULT 'upstream';
+IF COL_LENGTH('dbo.certificates', 'role') IS NULL
+ALTER TABLE dbo.certificates ADD role NVARCHAR(20) NOT NULL DEFAULT 'client';
 
 -- LLM Provider Templates table
 IF OBJECT_ID(N'dbo.llm_provider_templates', N'U') IS NULL

@@ -760,6 +760,23 @@ func (m *MockStorage) GetCertificateByName(name string) (*models.StoredCertifica
 	return nil, errors.New("certificate not found")
 }
 
+func (m *MockStorage) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	var filtered []*models.StoredCertificate
+	for _, cert := range m.certs {
+		certUsage := cert.Usage
+		if certUsage == "" {
+			certUsage = models.CertificateUsageUpstream
+		}
+		if certUsage == usage {
+			filtered = append(filtered, cert)
+		}
+	}
+	return filtered, nil
+}
+
 func (m *MockStorage) ListCertificates() ([]*models.StoredCertificate, error) {
 	if m.getErr != nil {
 		return nil, m.getErr

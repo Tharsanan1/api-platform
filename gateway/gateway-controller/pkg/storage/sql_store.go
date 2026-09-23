@@ -1917,11 +1917,20 @@ func (s *sqlStore) GetLLMProviderTemplateByHandle(handle string) (*models.Stored
 
 // SaveCertificate persists a certificate to the database
 func (s *sqlStore) SaveCertificate(cert *models.StoredCertificate) error {
+	usage := cert.Usage
+	if usage == "" {
+		usage = models.CertificateUsageUpstream
+	}
+	role := cert.Role
+	if role == "" {
+		role = models.CertificateRoleClient
+	}
+
 	query := `
 		INSERT INTO certificates (
 			uuid, gateway_id, name, certificate, subject, issuer,
-			not_before, not_after, cert_count, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			not_before, not_after, cert_count, usage, role, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := s.exec(query,
@@ -1934,6 +1943,8 @@ func (s *sqlStore) SaveCertificate(cert *models.StoredCertificate) error {
 		cert.NotBefore,
 		cert.NotAfter,
 		cert.CertCount,
+		usage,
+		role,
 		cert.CreatedAt,
 		cert.UpdatedAt,
 	)
@@ -1953,7 +1964,7 @@ func (s *sqlStore) SaveCertificate(cert *models.StoredCertificate) error {
 func (s *sqlStore) GetCertificate(id string) (*models.StoredCertificate, error) {
 	query := `
 		SELECT uuid, name, certificate, subject, issuer,
-		       not_before, not_after, cert_count, created_at, updated_at
+		       not_before, not_after, cert_count, usage, role, created_at, updated_at
 		FROM certificates
 		WHERE uuid = ? AND gateway_id = ?
 	`
@@ -1968,6 +1979,8 @@ func (s *sqlStore) GetCertificate(id string) (*models.StoredCertificate, error) 
 		&cert.NotBefore,
 		&cert.NotAfter,
 		&cert.CertCount,
+		&cert.Usage,
+		&cert.Role,
 		&cert.CreatedAt,
 		&cert.UpdatedAt,
 	)
@@ -1986,7 +1999,7 @@ func (s *sqlStore) GetCertificate(id string) (*models.StoredCertificate, error) 
 func (s *sqlStore) GetCertificateByName(name string) (*models.StoredCertificate, error) {
 	query := `
 		SELECT uuid, name, certificate, subject, issuer,
-		       not_before, not_after, cert_count, created_at, updated_at
+		       not_before, not_after, cert_count, usage, role, created_at, updated_at
 		FROM certificates
 		WHERE name = ? AND gateway_id = ?
 	`
@@ -2001,6 +2014,8 @@ func (s *sqlStore) GetCertificateByName(name string) (*models.StoredCertificate,
 		&cert.NotBefore,
 		&cert.NotAfter,
 		&cert.CertCount,
+		&cert.Usage,
+		&cert.Role,
 		&cert.CreatedAt,
 		&cert.UpdatedAt,
 	)
@@ -2019,7 +2034,7 @@ func (s *sqlStore) GetCertificateByName(name string) (*models.StoredCertificate,
 func (s *sqlStore) ListCertificates() ([]*models.StoredCertificate, error) {
 	query := `
 		SELECT uuid, name, certificate, subject, issuer,
-		       not_before, not_after, cert_count, created_at, updated_at
+		       not_before, not_after, cert_count, usage, role, created_at, updated_at
 		FROM certificates
 		WHERE gateway_id = ?
 		ORDER BY created_at DESC
@@ -2031,6 +2046,41 @@ func (s *sqlStore) ListCertificates() ([]*models.StoredCertificate, error) {
 	}
 	defer rows.Close()
 
+	certs, err := scanCertificateRows(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	return certs, nil
+}
+
+// ListCertificatesByUsage retrieves certificates matching the given usage value.
+func (s *sqlStore) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
+	query := `
+		SELECT uuid, name, certificate, subject, issuer,
+		       not_before, not_after, cert_count, usage, role, created_at, updated_at
+		FROM certificates
+		WHERE gateway_id = ? AND usage = ?
+		ORDER BY created_at DESC
+	`
+
+	rows, err := s.query(query, s.gatewayId, usage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list certificates by usage: %w", err)
+	}
+	defer rows.Close()
+
+	certs, err := scanCertificateRows(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	return certs, nil
+}
+
+// scanCertificateRows scans rows produced by the ListCertificates/ListCertificatesByUsage
+// queries above (both select the same column set and order).
+func scanCertificateRows(rows *sql.Rows) ([]*models.StoredCertificate, error) {
 	var certs []*models.StoredCertificate
 	for rows.Next() {
 		var cert models.StoredCertificate
@@ -2043,6 +2093,8 @@ func (s *sqlStore) ListCertificates() ([]*models.StoredCertificate, error) {
 			&cert.NotBefore,
 			&cert.NotAfter,
 			&cert.CertCount,
+			&cert.Usage,
+			&cert.Role,
 			&cert.CreatedAt,
 			&cert.UpdatedAt,
 		); err != nil {

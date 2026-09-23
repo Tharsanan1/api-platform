@@ -73,7 +73,13 @@ func newSQLiteStorage(dbPath string, logger *slog.Logger) (*SQLiteStorage, error
 	return storage, nil
 }
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
+
+// previousSchemaVersion is the last version this binary knows how to migrate
+// forward from via an in-place ALTER TABLE step. Any other stored version
+// (older than previousSchemaVersion, or newer than currentSchemaVersion) is
+// refused rather than silently skipped.
+const previousSchemaVersion = 4
 
 // initSchema creates the database schema if it doesn't exist
 func (s *SQLiteStorage) initSchema() error {
@@ -83,17 +89,54 @@ func (s *SQLiteStorage) initSchema() error {
 		return fmt.Errorf("failed to query schema version: %w", err)
 	}
 
-	if version == 0 {
+	switch {
+	case version == 0:
 		s.logger.Info("Initializing database schema", slog.Int("version", currentSchemaVersion))
 		if _, err := s.db.Exec(schemaSQL); err != nil {
 			return fmt.Errorf("failed to create schema: %w", err)
 		}
 		s.logger.Info("Database schema initialized successfully")
-	} else if version != currentSchemaVersion {
+	case version == previousSchemaVersion:
+		s.logger.Info("Migrating database schema",
+			slog.Int("from_version", version), slog.Int("to_version", currentSchemaVersion))
+		if err := s.migrateSchemaV4ToV5(); err != nil {
+			return fmt.Errorf("failed to migrate schema from version %d to %d: %w", version, currentSchemaVersion, err)
+		}
+		s.logger.Info("Database schema migrated successfully")
+	case version != currentSchemaVersion:
 		return fmt.Errorf("unsupported schema version %d, expected %d; delete the database to recreate", version, currentSchemaVersion)
 	}
 
 	s.logger.Info("Database schema up to date", slog.Int("version", currentSchemaVersion))
+	return nil
+}
+
+// migrateSchemaV4ToV5 adds the certificates.usage and certificates.role
+// columns (nullable-free, defaulted) to an already-provisioned database at
+// schema version 4, then advances user_version to 5. This is additive only:
+// no existing column is retyped, widened, or renamed.
+func (s *SQLiteStorage) migrateSchemaV4ToV5() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin migration transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	if _, err := tx.Exec(`ALTER TABLE certificates ADD COLUMN usage TEXT NOT NULL DEFAULT 'upstream'`); err != nil {
+		return fmt.Errorf("failed to add certificates.usage column: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE certificates ADD COLUMN role TEXT NOT NULL DEFAULT 'client'`); err != nil {
+		return fmt.Errorf("failed to add certificates.role column: %w", err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
+		return fmt.Errorf("failed to set schema version: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit migration: %w", err)
+	}
 	return nil
 }
 

@@ -20,6 +20,34 @@ package models
 
 import "time"
 
+// Certificate usage values. Usage determines which trust purpose a stored
+// certificate serves: verifying upstream/backend HTTPS connections, or
+// pooling client certificate authorities for mutual TLS. The two purposes
+// never share a trust bundle (see pkg/certstore).
+const (
+	// CertificateUsageUpstream marks a certificate as backend/upstream trust
+	// (the original, pre-mTLS purpose of the /certificates endpoint).
+	CertificateUsageUpstream = "upstream"
+
+	// CertificateUsageClient marks a certificate as a pooled client
+	// certificate authority, used to authenticate API callers over mTLS.
+	CertificateUsageClient = "client"
+)
+
+// Certificate role values. Role only applies to usage: client certificates
+// and describes how the gateway is expected to use the authority.
+const (
+	// CertificateRoleClient is the default role for a client-CA entry: the
+	// authority is used to validate a client certificate presented directly
+	// on the mTLS connection.
+	CertificateRoleClient = "client"
+
+	// CertificateRoleRelay marks a client-CA entry as trusted for validating
+	// a client certificate relayed via a header (e.g. from a terminating
+	// load balancer/proxy) rather than presented on the connection itself.
+	CertificateRoleRelay = "relay"
+)
+
 // StoredCertificate represents a certificate stored in the database
 type StoredCertificate struct {
 	UUID        string    `json:"uuid"`        // Unique UUID
@@ -30,6 +58,8 @@ type StoredCertificate struct {
 	NotBefore   time.Time `json:"notBefore"`   // Certificate validity start
 	NotAfter    time.Time `json:"notAfter"`    // Certificate validity end
 	CertCount   int       `json:"certCount"`   // Number of certs in bundle
+	Usage       string    `json:"usage"`       // "upstream" (default) or "client"
+	Role        string    `json:"role"`        // "client" (default) or "relay"; meaningful only for usage: client
 	CreatedAt   time.Time `json:"createdAt"`   // When uploaded
 	UpdatedAt   time.Time `json:"updatedAt"`   // Last modified
 }

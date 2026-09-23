@@ -1,5 +1,5 @@
 -- SQLite Schema for Gateway-Controller API Configurations
--- Version: 4
+-- Version: 5
 
 -- Base table for all artifact types (REST APIs, WebSub APIs, LLM Providers, LLM Proxies, MCP Proxies)
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -93,13 +93,21 @@ CREATE TABLE IF NOT EXISTS certificates (
     not_after TIMESTAMP NOT NULL,
     cert_count INTEGER NOT NULL DEFAULT 1,
 
+    -- Usage separates backend/upstream trust (the original purpose of this
+    -- table) from a pooled client certificate authority used for mutual TLS.
+    -- The two purposes never share a trust bundle. Role only applies to
+    -- usage: client. Added in schema version 5; already-provisioned
+    -- databases get these via the ALTER TABLE path in sqlite.go's initSchema.
+    usage TEXT NOT NULL DEFAULT 'upstream',
+    role TEXT NOT NULL DEFAULT 'client',
+
     -- Timestamps
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     PRIMARY KEY (gateway_id, uuid),
 
-    -- Certificate names must be unique per gateway
+    -- Certificate names are one namespace across usages, unique per gateway
     UNIQUE(gateway_id, name)
 );
 
@@ -281,4 +289,4 @@ CREATE TABLE IF NOT EXISTS secrets (
 -- Note: webhook_secrets (per-API HMAC secrets for the websub-hmac-auth policy)
 -- is also owned by event-gateway/gateway-controller/pkg/dbschema — see note above.
 
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;

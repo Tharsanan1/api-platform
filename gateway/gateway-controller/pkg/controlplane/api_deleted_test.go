@@ -437,6 +437,10 @@ func (m *mockStorageForDeletion) ListCertificates() ([]*models.StoredCertificate
 	return nil, nil
 }
 
+func (m *mockStorageForDeletion) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
+	return nil, nil
+}
+
 func (m *mockStorageForDeletion) DeleteCertificate(id string) error {
 	return nil
 }

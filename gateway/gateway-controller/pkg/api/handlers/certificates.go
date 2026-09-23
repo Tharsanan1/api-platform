@@ -23,33 +23,91 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"sync"
 	"time"
 
+	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/utils"
 	"github.com/wso2/api-platform/httpkit/httputil"
 )
+
+// maxCertificateUploadBytes bounds the /certificates request body. A client-CA
+// chain is small (a handful of KB at most), so 1 MiB comfortably covers any
+// legitimate upload while stopping an oversized body from being read into
+// memory in full (see go-network-service-hardening.md).
+const maxCertificateUploadBytes = 1 << 20 // 1 MiB
+
+// certificateUploadInvalidMessage is the single top-level message returned
+// for any 400 from certificate upload validation, regardless of how many
+// individual field problems were found.
+const certificateUploadInvalidMessage = "certificate upload is invalid"
+
+var certificateNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// certExpiryWarnLogInterval bounds how often the CERT_EXPIRES_SOON warning
+// is logged (at WARN) for any single certificate, independent of how often
+// GET /certificates is called. The warning itself is still returned in the
+// response body on every call — only the log line is throttled.
+const certExpiryWarnLogInterval = 24 * time.Hour
+
+// certExpiryWarnThrottle is a small in-memory, mutex-guarded rate limiter
+// for the CERT_EXPIRES_SOON WARN log line, keyed by certificate UUID. It is
+// intentionally not configurable (no config key) — the interval is fixed.
+// Zero value is ready to use: no explicit initialization required.
+type certExpiryWarnThrottle struct {
+	mu   sync.Mutex
+	last map[string]time.Time // certificate UUID -> last time this warning was logged
+}
+
+// shouldLog reports whether a CERT_EXPIRES_SOON WARN should be logged now
+// for the given certificate UUID, and records the attempt either way so the
+// next call within the interval is suppressed.
+func (t *certExpiryWarnThrottle) shouldLog(certUUID string, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if last, ok := t.last[certUUID]; ok && now.Sub(last) < certExpiryWarnLogInterval {
+		return false
+	}
+	if t.last == nil {
+		t.last = make(map[string]time.Time)
+	}
+	t.last[certUUID] = now
+	return true
+}
 
 // UploadCertificateRequest represents the request body for certificate upload
 type UploadCertificateRequest struct {
 	Certificate string `json:"certificate" binding:"required"` // PEM-encoded certificate
 	Name        string `json:"name" binding:"required"`        // Unique certificate name
+	Usage       string `json:"usage"`                          // "upstream" (default) or "client"
+	Role        string `json:"role"`                           // "client" (default) or "relay"; usage: client only
 }
 
 // CertificateResponse represents a certificate information response
 type CertificateResponse struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Subject  string `json:"subject,omitempty"`
-	Issuer   string `json:"issuer,omitempty"`
-	NotAfter string `json:"notAfter,omitempty"`
-	Count    int    `json:"count"` // Number of certs in file
-	Message  string `json:"message,omitempty"`
-	Status   string `json:"status"` // success, error
+	ID               string             `json:"id"`
+	Name             string             `json:"name"`
+	Subject          string             `json:"subject,omitempty"`
+	Issuer           string             `json:"issuer,omitempty"`
+	NotAfter         string             `json:"notAfter,omitempty"`
+	Count            int                `json:"count"` // Number of certs in file
+	Usage            string             `json:"usage"`
+	Role             string             `json:"role,omitempty"`
+	IsLeaf           bool               `json:"isLeaf"`
+	Warnings         []clientca.Warning `json:"warnings,omitempty"`
+	ReferencedByApis *int               `json:"referencedByApis,omitempty"`
+	Message          string             `json:"message,omitempty"`
+	Status           string             `json:"status"` // success, error
 }
 
 // ListCertificatesResponse represents the response for listing certificates
@@ -60,14 +118,52 @@ type ListCertificatesResponse struct {
 	Status       string                `json:"status"`
 }
 
+// certUploadValidation accumulates every request-level problem found while
+// validating an upload, so all of them can be reported together in one 400.
+type certUploadValidation struct {
+	fieldErrors []api.ValidationError
+
+	// legacyUpstreamCertErr holds a certificate-content failure for
+	// usage: upstream uploads, validated via the pre-existing
+	// s.validateCertificate path. When it is the ONLY problem found, the
+	// response keeps today's exact flat shape/message (no errors[]
+	// envelope) for backward compatibility with callers already depending
+	// on it; when combined with other field errors it is folded into the
+	// same errors[] list instead.
+	legacyUpstreamCertErr error
+}
+
+func (v *certUploadValidation) addFieldError(field, message string) {
+	v.fieldErrors = append(v.fieldErrors, api.ValidationError{
+		Field:   stringPtr(field),
+		Message: stringPtr(message),
+	})
+}
+
+func (v *certUploadValidation) hasProblems() bool {
+	return len(v.fieldErrors) > 0 || v.legacyUpstreamCertErr != nil
+}
+
 // UploadCertificate handles certificate upload via REST API
 // POST /certificates
 func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	correlationID := middleware.GetCorrelationID(r)
 	log := s.logger.With(slog.String("correlation_id", correlationID))
 
+	// Bound the request body before reading it, per go-network-service-hardening.md.
+	r.Body = http.MaxBytesReader(w, r.Body, maxCertificateUploadBytes)
+
 	var req UploadCertificateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			// Generic message: never state the configured limit (file-access.md).
+			httputil.WriteJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+				"status":  "error",
+				"message": "the request body is too large",
+			})
+			return
+		}
 		log.Warn("Invalid certificate upload request", slog.Any("error", err))
 		httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
 			"status":  "error",
@@ -75,35 +171,85 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if req.Name == "" || req.Certificate == "" {
+
+	validation, effectiveUsage, effectiveRole, bundle := s.validateCertificateUpload(&req)
+
+	if validation.legacyUpstreamCertErr != nil && len(validation.fieldErrors) == 0 {
+		// Exactly today's response for an invalid upstream certificate: no
+		// errors[] envelope, same flat shape and message text.
+		log.Warn("Invalid certificate provided", slog.Any("error", validation.legacyUpstreamCertErr))
 		httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
 			"status":  "error",
-			"message": "name and certificate are required fields",
+			"message": "Invalid certificate: " + validation.legacyUpstreamCertErr.Error(),
+		})
+		return
+	}
+	if validation.legacyUpstreamCertErr != nil {
+		validation.addFieldError("certificate", "Invalid certificate: "+validation.legacyUpstreamCertErr.Error())
+	}
+	if validation.hasProblems() {
+		fieldErrors := validation.fieldErrors
+		httputil.WriteJSON(w, http.StatusBadRequest, api.ErrorResponse{
+			Status:  "error",
+			Message: certificateUploadInvalidMessage,
+			Errors:  &fieldErrors,
 		})
 		return
 	}
 
-	// Validate certificate format
+	// Extract certificate metadata and count for the response/storage record.
+	var (
+		subject, issuer string
+		notBefore       time.Time
+		notAfter        time.Time
+		count           int
+		isLeaf          bool
+		warnings        []clientca.Warning
+	)
+
 	certData := []byte(req.Certificate)
-	count, err := s.validateCertificate(certData)
-	if err != nil {
-		log.Warn("Invalid certificate provided", slog.Any("error", err))
-		httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
-			"status":  "error",
-			"message": "Invalid certificate: " + err.Error(),
-		})
-		return
+
+	if effectiveUsage == models.CertificateUsageClient {
+		subject = bundle.Identity.Subject.String()
+		issuer = bundle.Identity.Issuer.String()
+		notBefore = bundle.Identity.NotBefore
+		notAfter = bundle.Identity.NotAfter
+		count = len(bundle.Certificates)
+		isLeaf = bundle.IsLeaf
+		warnings = bundle.Warnings
+	} else {
+		var err error
+		subject, issuer, notBefore, notAfter, err = s.extractCertificateMetadata(certData)
+		if err != nil {
+			// Should not happen: validateCertificate already succeeded above
+			// against the same bytes. Preserve the legacy flat error shape.
+			log.Warn("Failed to extract certificate metadata", slog.Any("error", err))
+			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
+				"status":  "error",
+				"message": "Failed to parse certificate metadata: " + err.Error(),
+			})
+			return
+		}
+		count, err = s.validateCertificate(certData)
+		if err != nil {
+			// Already validated above; defensive only.
+			log.Warn("Invalid certificate provided", slog.Any("error", err))
+			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
+				"status":  "error",
+				"message": "Invalid certificate: " + err.Error(),
+			})
+			return
+		}
+		if firstCert, err := firstX509Certificate(certData); err == nil {
+			isLeaf = !firstCert.IsCA
+		} else {
+			log.Warn("Failed to determine certificate authority status", slog.Any("error", err))
+		}
 	}
 
-	// Extract certificate metadata
-	subject, issuer, notBefore, notAfter, err := s.extractCertificateMetadata(certData)
-	if err != nil {
-		log.Warn("Failed to extract certificate metadata", slog.Any("error", err))
-		httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
-			"status":  "error",
-			"message": "Failed to parse certificate metadata: " + err.Error(),
-		})
-		return
+	for _, warning := range warnings {
+		fields := []any{slog.String("code", warning.Code), slog.String("name", req.Name)}
+		log.Warn("Client certificate authority warning", fields...)
 	}
 
 	// Generate unique ID (UUID v7)
@@ -127,12 +273,25 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		NotBefore:   notBefore,
 		NotAfter:    notAfter,
 		CertCount:   count,
+		Usage:       effectiveUsage,
+		Role:        effectiveRole,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
 
 	// Save to database
 	if err := s.db.SaveCertificate(cert); err != nil {
+		if storage.IsConflictError(err) {
+			message := fmt.Sprintf("a certificate named %s already exists", req.Name)
+			if effectiveUsage == models.CertificateUsageClient {
+				message = fmt.Sprintf("a client-CA authority named %s already exists", req.Name)
+			}
+			httputil.WriteJSON(w, http.StatusConflict, map[string]any{
+				"status":  "error",
+				"message": message,
+			})
+			return
+		}
 		log.Error("Failed to save certificate to database",
 			slog.String("name", req.Name),
 			slog.Any("error", err))
@@ -185,26 +344,134 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		slog.String("id", certID),
 		slog.String("name", req.Name))
 
-	httputil.WriteJSON(w, http.StatusCreated, CertificateResponse{
+	resp := CertificateResponse{
 		ID:       certID,
 		Name:     req.Name,
 		Subject:  subject,
 		Issuer:   issuer,
 		NotAfter: notAfter.Format("2006-01-02 15:04:05"),
 		Count:    count,
+		Usage:    effectiveUsage,
+		IsLeaf:   isLeaf,
+		Warnings: warnings,
 		Message:  "Certificate uploaded and SDS updated successfully",
 		Status:   "success",
-	})
+	}
+	if effectiveUsage == models.CertificateUsageClient {
+		resp.Role = effectiveRole
+	}
+
+	httputil.WriteJSON(w, http.StatusCreated, resp)
 }
 
-// ListCertificates lists all custom certificates
+// validateCertificateUpload validates every request-level field on a
+// certificate upload and, when usage is (or defaults to) upstream/client,
+// validates the certificate content itself. All problems that can be
+// determined independently of one another are collected together so the
+// caller can report them in a single 400.
+//
+// It returns the accumulated validation result, the effective usage/role
+// (defaulted when the request omitted them), and — for usage: client — the
+// inspected Bundle (nil when validation failed or usage is upstream).
+func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*certUploadValidation, string, string, *clientca.Bundle) {
+	v := &certUploadValidation{}
+
+	nameProvided := req.Name != ""
+	certProvided := req.Certificate != ""
+
+	if !nameProvided {
+		v.addFieldError("name", "both name and certificate are required")
+	}
+	if !certProvided {
+		v.addFieldError("certificate", "both name and certificate are required")
+	}
+
+	if nameProvided && !certificateNamePattern.MatchString(req.Name) {
+		v.addFieldError("name", "name may contain only letters, digits, ., _ and -")
+	}
+
+	usageProvided := req.Usage != ""
+	usageValid := true
+	effectiveUsage := models.CertificateUsageUpstream
+	if usageProvided {
+		if req.Usage != models.CertificateUsageUpstream && req.Usage != models.CertificateUsageClient {
+			usageValid = false
+			v.addFieldError("usage", "usage must be upstream or client")
+		} else {
+			effectiveUsage = req.Usage
+		}
+	}
+
+	roleProvided := req.Role != ""
+	effectiveRole := ""
+	if effectiveUsage == models.CertificateUsageClient {
+		effectiveRole = models.CertificateRoleClient
+	}
+	if roleProvided {
+		if req.Role != models.CertificateRoleClient && req.Role != models.CertificateRoleRelay {
+			v.addFieldError("role", "role must be client or relay")
+		} else if usageValid && effectiveUsage == models.CertificateUsageUpstream {
+			v.addFieldError("role", "role applies only to usage: client certificates")
+		} else if usageValid {
+			effectiveRole = req.Role
+		}
+	}
+
+	var bundle *clientca.Bundle
+	if certProvided && usageValid {
+		if effectiveUsage == models.CertificateUsageClient {
+			b, err := clientca.Inspect([]byte(req.Certificate), time.Now())
+			if err != nil {
+				var fe *clientca.FieldError
+				if errors.As(err, &fe) {
+					v.addFieldError(fe.Field, fe.Message)
+				} else {
+					v.addFieldError("certificate", "the value is not a PEM-encoded certificate")
+				}
+			} else {
+				bundle = b
+			}
+		} else {
+			if _, err := s.validateCertificate([]byte(req.Certificate)); err != nil {
+				v.legacyUpstreamCertErr = err
+			}
+		}
+	}
+
+	return v, effectiveUsage, effectiveRole, bundle
+}
+
+// ListCertificates lists all custom certificates, optionally filtered by usage
 // GET /certificates
-func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, params api.ListCertificatesParams) {
 	correlationID := middleware.GetCorrelationID(r)
 	log := s.logger.With(slog.String("correlation_id", correlationID))
 
+	usageFilter := ""
+	if params.Usage != nil {
+		usageFilter = string(*params.Usage)
+	}
+	if usageFilter != "" && usageFilter != models.CertificateUsageUpstream && usageFilter != models.CertificateUsageClient {
+		fieldErrors := []api.ValidationError{{
+			Field:   stringPtr("usage"),
+			Message: stringPtr("usage must be upstream or client"),
+		}}
+		httputil.WriteJSON(w, http.StatusBadRequest, api.ErrorResponse{
+			Status:  "error",
+			Message: "invalid usage filter",
+			Errors:  &fieldErrors,
+		})
+		return
+	}
+
 	// Get certificates from database
-	certs, err := s.db.ListCertificates()
+	var certs []*models.StoredCertificate
+	var err error
+	if usageFilter != "" {
+		certs, err = s.db.ListCertificatesByUsage(usageFilter)
+	} else {
+		certs, err = s.db.ListCertificates()
+	}
 	if err != nil {
 		log.Error("Failed to list certificates from database", slog.Any("error", err))
 		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
@@ -216,19 +483,66 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request) {
 
 	var certificates []CertificateResponse
 	totalBytes := 0
+	now := time.Now()
 
 	for _, cert := range certs {
 		totalBytes += len(cert.Certificate)
 
-		certificates = append(certificates, CertificateResponse{
+		usage := cert.Usage
+		if usage == "" {
+			usage = models.CertificateUsageUpstream
+		}
+
+		item := CertificateResponse{
 			ID:       cert.UUID,
 			Name:     cert.Name,
 			Subject:  cert.Subject,
 			Issuer:   cert.Issuer,
 			NotAfter: cert.NotAfter.Format("2006-01-02 15:04:05"),
 			Count:    cert.CertCount,
+			Usage:    usage,
 			Status:   "success",
-		})
+		}
+
+		if usage == models.CertificateUsageClient {
+			role := cert.Role
+			if role == "" {
+				role = models.CertificateRoleClient
+			}
+			item.Role = role
+
+			referencedByApis := 0
+			item.ReferencedByApis = &referencedByApis
+
+			if identity, err := clientca.IdentityCertificate(cert.Certificate); err == nil {
+				item.IsLeaf = !identity.IsCA
+			} else {
+				log.Warn("Failed to parse stored client certificate authority",
+					slog.String("name", cert.Name), slog.Any("error", err))
+			}
+
+			if warning := clientca.ExpiryWarning(cert.NotAfter, now); warning != nil {
+				item.Warnings = []clientca.Warning{*warning}
+				// The warning always goes back in the response body; the log
+				// line is throttled to once per certificate per day so that
+				// polling this endpoint doesn't flood logs.
+				if s.certExpiryWarnThrottle.shouldLog(cert.UUID, now) {
+					log.Warn("Client certificate authority expiry warning",
+						slog.String("code", warning.Code),
+						slog.String("name", cert.Name),
+						slog.Time("notAfter", cert.NotAfter))
+				}
+			}
+		} else {
+			if firstCert, err := firstX509Certificate(cert.Certificate); err == nil {
+				item.IsLeaf = !firstCert.IsCA
+			} else {
+				log.Warn("Failed to parse stored certificate",
+					slog.String("name", cert.Name), slog.Any("error", err))
+			}
+		}
+
+		certificates = append(certificates, item)
 	}
 
 	httputil.WriteJSON(w, http.StatusOK, ListCertificatesResponse{
@@ -418,4 +732,23 @@ func (s *APIServer) validateCertificate(data []byte) (int, error) {
 	}
 
 	return count, nil
+}
+
+// firstX509Certificate parses and returns the first CERTIFICATE PEM block in
+// data, matching the same "first cert in bundle" convention used for
+// upstream certificate metadata (extractCertificateMetadata).
+func firstX509Certificate(data []byte) (*x509.Certificate, error) {
+	rest := data
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		return x509.ParseCertificate(block.Bytes)
+	}
+	return nil, fmt.Errorf("no certificate found")
 }

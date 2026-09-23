@@ -164,7 +164,10 @@ func (m *MockStorage) GetCertificate(id string) (*models.StoredCertificate, erro
 func (m *MockStorage) GetCertificateByName(name string) (*models.StoredCertificate, error) {
 	return nil, nil
 }
-func (m *MockStorage) ListCertificates() ([]*models.StoredCertificate, error)     { return nil, nil }
+func (m *MockStorage) ListCertificates() ([]*models.StoredCertificate, error) { return nil, nil }
+func (m *MockStorage) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
+	return nil, nil
+}
 func (m *MockStorage) DeleteCertificate(id string) error                          { return nil }
 func (m *MockStorage) SaveSecret(secret *models.Secret) error                     { return nil }
 func (m *MockStorage) GetSecrets() ([]models.SecretMeta, error)                   { return nil, nil }

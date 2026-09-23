@@ -36,6 +36,19 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 )
 
+// filterUpstreamCertificates returns only the certificates whose Usage is
+// upstream trust. An empty Usage is treated as upstream for backward
+// compatibility with rows written before the usage column existed.
+func filterUpstreamCertificates(certs []*models.StoredCertificate) []*models.StoredCertificate {
+	filtered := make([]*models.StoredCertificate, 0, len(certs))
+	for _, cert := range certs {
+		if cert.Usage == "" || cert.Usage == models.CertificateUsageUpstream {
+			filtered = append(filtered, cert)
+		}
+	}
+	return filtered
+}
+
 // generateCertificateID creates a unique ID for a certificate (UUID v7)
 func generateCertificateID() (string, error) {
 	u, err := uuid.NewV7()
@@ -129,12 +142,19 @@ func (cs *CertStore) LoadCertificates() ([]byte, error) {
 	return certBuffer.Bytes(), nil
 }
 
-// loadDatabaseCertificates loads all certificates from the database
+// loadDatabaseCertificates loads all upstream-trust certificates from the
+// database. Certificates uploaded with usage: client (the client
+// certificate authority pool used for mutual TLS) are never included here —
+// the two trust purposes must never share a bundle. An empty/legacy Usage
+// value is treated as upstream, matching rows written before this column
+// existed.
 func (cs *CertStore) loadDatabaseCertificates() ([]byte, int, error) {
 	certs, err := cs.db.ListCertificates()
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list certificates: %w", err)
 	}
+
+	certs = filterUpstreamCertificates(certs)
 
 	if len(certs) == 0 {
 		cs.logger.Debug("No certificates found in database")
@@ -388,6 +408,7 @@ func (cs *CertStore) bootstrapCertificatesFromFilesystem() error {
 			NotBefore:   x509Cert.NotBefore,
 			NotAfter:    x509Cert.NotAfter,
 			CertCount:   count,
+			Usage:       models.CertificateUsageUpstream,
 			CreatedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
 		}

@@ -19,6 +19,7 @@
 package storage
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -78,7 +79,7 @@ func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 	var version int
 	err = storage.db.QueryRow("PRAGMA user_version").Scan(&version)
 	assert.NilError(t, err)
-	assert.Equal(t, version, 4) // Current schema version
+	assert.Equal(t, version, currentSchemaVersion)
 
 	// Verify tables exist
 	tables := []string{
@@ -119,15 +120,20 @@ func TestSQLiteStorage_RejectsUnsupportedSchemaVersion(t *testing.T) {
 	assert.NilError(t, err)
 	storage := store.(*sqlStore)
 
-	// Set schema version to an unsupported value
-	_, err = storage.db.Exec("PRAGMA user_version = 5")
+	// Set schema version to an unsupported value (one past current — the
+	// migration path only understands stepping forward from
+	// previousSchemaVersion, never a version newer than its own).
+	unsupportedVersion := currentSchemaVersion + 1
+	_, err = storage.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", unsupportedVersion))
 	assert.NilError(t, err)
 	storage.db.Close()
 
 	// Reopen — should fail with unsupported version error
 	_, err = NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.Assert(t, err != nil)
-	assert.ErrorContains(t, err, "failed to initialize schema: unsupported schema version 5, expected 4; delete the database to recreate")
+	assert.ErrorContains(t, err, fmt.Sprintf(
+		"failed to initialize schema: unsupported schema version %d, expected %d; delete the database to recreate",
+		unsupportedVersion, currentSchemaVersion))
 }
 
 func TestSQLiteStorage_DeleteConfig_NotFound(t *testing.T) {
@@ -703,6 +709,134 @@ func TestSQLiteStorage_GetCertificate_Success(t *testing.T) {
 	assert.Equal(t, retrieved.UUID, cert.UUID)
 	assert.Equal(t, retrieved.Name, cert.Name)
 	assert.Equal(t, retrieved.Subject, cert.Subject)
+}
+
+func TestSQLiteStorage_SaveCertificate_RoundTripsUsageAndRole(t *testing.T) {
+	store := setupTestStorage(t)
+	defer store.db.Close()
+
+	cert := createTestStoredCertificate()
+	cert.Usage = models.CertificateUsageClient
+	cert.Role = models.CertificateRoleRelay
+
+	assert.NilError(t, store.SaveCertificate(cert))
+
+	retrieved, err := store.GetCertificate(cert.UUID)
+	assert.NilError(t, err)
+	assert.Equal(t, retrieved.Usage, models.CertificateUsageClient)
+	assert.Equal(t, retrieved.Role, models.CertificateRoleRelay)
+}
+
+func TestSQLiteStorage_SaveCertificate_DefaultsEmptyUsageAndRole(t *testing.T) {
+	store := setupTestStorage(t)
+	defer store.db.Close()
+
+	cert := createTestStoredCertificate()
+	cert.Usage = ""
+	cert.Role = ""
+
+	assert.NilError(t, store.SaveCertificate(cert))
+
+	retrieved, err := store.GetCertificate(cert.UUID)
+	assert.NilError(t, err)
+	assert.Equal(t, retrieved.Usage, models.CertificateUsageUpstream)
+	assert.Equal(t, retrieved.Role, models.CertificateRoleClient)
+}
+
+func TestSQLiteStorage_ListCertificatesByUsage(t *testing.T) {
+	store := setupTestStorage(t)
+	defer store.db.Close()
+
+	upstreamCert := createTestStoredCertificate()
+	upstreamCert.Name = "usage-filter-upstream-cert"
+	upstreamCert.Usage = models.CertificateUsageUpstream
+	assert.NilError(t, store.SaveCertificate(upstreamCert))
+
+	clientCert := createTestStoredCertificate()
+	clientCert.Name = "usage-filter-client-cert"
+	clientCert.Usage = models.CertificateUsageClient
+	assert.NilError(t, store.SaveCertificate(clientCert))
+
+	clientResults, err := store.ListCertificatesByUsage(models.CertificateUsageClient)
+	assert.NilError(t, err)
+	assert.Equal(t, len(clientResults), 1)
+	assert.Equal(t, clientResults[0].UUID, clientCert.UUID)
+
+	upstreamResults, err := store.ListCertificatesByUsage(models.CertificateUsageUpstream)
+	assert.NilError(t, err)
+	assert.Equal(t, len(upstreamResults), 1)
+	assert.Equal(t, upstreamResults[0].UUID, upstreamCert.UUID)
+}
+
+// TestSQLite_UpgradeAddsCertificateUsageColumns verifies that a database
+// provisioned before the certificates.usage/role columns existed (schema
+// version 4, pinned as a literal here deliberately — this test targets the
+// state BEFORE this feature, not whatever currentSchemaVersion is now) is
+// migrated in place: NewStorage succeeds, the pre-existing row reads back
+// with the documented defaults, and a new row can be saved with an explicit
+// usage/role.
+func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
+	const preMigrationSchemaVersion = 4
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "upgrade-test.db")
+	gatewayID := "platform-gateway-id"
+
+	rawDB, err := sql.Open("sqlite3", dbPath)
+	assert.NilError(t, err)
+
+	_, err = rawDB.Exec(`
+		CREATE TABLE certificates (
+			uuid TEXT NOT NULL,
+			gateway_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			certificate BLOB NOT NULL,
+			subject TEXT NOT NULL,
+			issuer TEXT NOT NULL,
+			not_before TIMESTAMP NOT NULL,
+			not_after TIMESTAMP NOT NULL,
+			cert_count INTEGER NOT NULL DEFAULT 1,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (gateway_id, uuid),
+			UNIQUE(gateway_id, name)
+		)
+	`)
+	assert.NilError(t, err)
+
+	notBefore := time.Now().Add(-24 * time.Hour)
+	notAfter := time.Now().Add(365 * 24 * time.Hour)
+	_, err = rawDB.Exec(`
+		INSERT INTO certificates (uuid, gateway_id, name, certificate, subject, issuer, not_before, not_after, cert_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		"pre-migration-cert", gatewayID, "pre-migration-cert",
+		[]byte("-----BEGIN CERTIFICATE-----\nMIIC...\n-----END CERTIFICATE-----"),
+		"CN=pre-migration.example.com", "CN=Test CA", notBefore, notAfter, 1,
+	)
+	assert.NilError(t, err)
+
+	_, err = rawDB.Exec(fmt.Sprintf("PRAGMA user_version = %d", preMigrationSchemaVersion))
+	assert.NilError(t, err)
+	assert.NilError(t, rawDB.Close())
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	upgraded, err := NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath, GatewayID: gatewayID}, logger)
+	assert.NilError(t, err)
+	defer upgraded.(*sqlStore).db.Close()
+
+	existing, err := upgraded.GetCertificate("pre-migration-cert")
+	assert.NilError(t, err)
+	assert.Equal(t, existing.Usage, models.CertificateUsageUpstream)
+	assert.Equal(t, existing.Role, models.CertificateRoleClient)
+
+	newCert := createTestStoredCertificate()
+	newCert.Usage = models.CertificateUsageClient
+	assert.NilError(t, upgraded.SaveCertificate(newCert))
+
+	saved, err := upgraded.GetCertificate(newCert.UUID)
+	assert.NilError(t, err)
+	assert.Equal(t, saved.Usage, models.CertificateUsageClient)
 }
 
 func TestSQLiteStorage_GetAPIKeyByID_NotFound(t *testing.T) {

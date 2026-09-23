@@ -107,7 +107,8 @@ func DefaultConfig() *Config {
 		RedisURL:                   fmt.Sprintf("localhost:%s", RedisPort),
 		HTTPTimeout:                10 * time.Second,
 		Users: map[string]AuthUser{
-			"admin": {Username: "admin", Password: "admin"},
+			"admin":     {Username: "admin", Password: "admin"},
+			"developer": {Username: "developer", Password: "developer"},
 		},
 	}
 }

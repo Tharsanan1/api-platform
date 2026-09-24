@@ -18,14 +18,9 @@
  * under the License.
  */
 
-// Command generate produces the PEM certificate/key fixtures consumed by the
-// client-certificate-authority-pool integration tests. It writes into the
-// directory it lives in (resources/mtls-pki) and is re-runnable: every run
-// overwrites the previous fixture set.
-//
-// Run from gateway/it with:
-//
-//	go run ./resources/mtls-pki/generate.go
+// Command generate writes the PEM certificate and key fixtures for the mTLS
+// integration tests, overwriting the previous set. Run it from gateway/it
+// with `go run ./resources/mtls-pki/generate.go`.
 package main
 
 import (
@@ -224,15 +219,10 @@ func writeAll(dir string, i *issued) {
 	writeChainIfAny(dir, i)
 }
 
-// writeEncryptedKey produces "<name>.encrypted.key": fixture i's private key
-// re-encoded as a passphrase-protected PKCS#8 key
-// (-----BEGIN ENCRYPTED PRIVATE KEY-----), consumed by upload-validation tests
-// that must reject a passphrase-protected key before ever needing to decrypt
-// it. Prefers shelling out to `openssl pkcs8` (crypto/x509 has no PKCS#8
-// encryptor); if openssl isn't on PATH or the invocation fails, falls back to
-// wrapping the existing plaintext key's DER bytes in a PEM block carrying the
-// "ENCRYPTED PRIVATE KEY" type header — not a genuine
-// EncryptedPrivateKeyInfo, but sufficient for a header-based rejection check.
+// writeEncryptedKey writes "<name>.encrypted.key", a passphrase-protected
+// PKCS#8 key, using `openssl pkcs8` because crypto/x509 has no PKCS#8
+// encryptor. Without openssl it wraps the plaintext DER in an "ENCRYPTED
+// PRIVATE KEY" PEM block, which is enough for a header-based rejection check.
 func writeEncryptedKey(dir string, i *issued, passphrase string) {
 	keyPath := filepath.Join(dir, i.name+".key")
 	outPath := filepath.Join(dir, i.name+".encrypted.key")
@@ -257,13 +247,9 @@ func writeEncryptedKey(dir string, i *issued, passphrase string) {
 func main() {
 	dir, err := os.Getwd()
 	check(err)
-	// Fixtures are always written next to this file, regardless of cwd, so
-	// `go run ./resources/mtls-pki/generate.go` from gateway/it and running
-	// the binary directly from within resources/mtls-pki both work.
+	// Write to resources/mtls-pki when run from gateway/it, else to the cwd.
 	dir = filepath.Join(dir, "resources", "mtls-pki")
 	if _, statErr := os.Stat(dir); statErr != nil {
-		// Fall back to the directory this source file lives in when the cwd
-		// guess above doesn't exist (e.g. invoked with a different cwd).
 		dir = "."
 	}
 
@@ -281,7 +267,7 @@ func main() {
 	expiresSoonNotBefore := time.Now().Add(-1 * time.Hour)
 	expiresSoonNotAfter := time.Now().Add(20 * 24 * time.Hour)
 
-	// ---- Authorities ----
+	// Authorities
 	caA := track(issue("ca-a", issueOpts{
 		subject: pkix.Name{CommonName: "Partner A Root CA", Organization: []string{"Partner A"}},
 		isCA:    true,
@@ -336,7 +322,7 @@ func main() {
 		isCA:    true,
 	}))
 
-	// ---- Client leaves ----
+	// Client leaves
 	clientValid := track(issue("client-valid", issueOpts{
 		subject: pkix.Name{CommonName: "client-valid"},
 		parent:  caA,
@@ -444,16 +430,15 @@ func main() {
 		parent:  clientSelfsigned, // a CA:FALSE issuer
 	}))
 	track(issue("client-renewed", issueOpts{
-		// Same subject AND same SANs as client-valid, but a fresh key (no
-		// reuseKey) so its thumbprint differs — this is what "renewed"
-		// means: the same identity, re-issued under a new keypair.
+		// Same subject and SANs as client-valid with a fresh key, so only the
+		// thumbprint differs.
 		subject: clientValid.cert.Subject,
 		parent:  caA,
 		uriSANs: []string{"urn:partner-a:payments"},
 		dnsSANs: []string{"client-valid.partner-a.test"},
 	}))
 
-	// ---- Outbound mirror set ----
+	// Outbound mirror set
 	track(issue("backend-server", issueOpts{
 		subject: pkix.Name{CommonName: "backend-server"},
 		parent:  backendCA,
@@ -508,11 +493,8 @@ func main() {
 		ekus:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}))
 
-	// ---- Header-relay fixtures ----
-	// A front proxy's own identity (edge-lb, issued by edge-lb-ca) and a
-	// second authority (corp-ca) used to show that a relay entry narrowed by
-	// SAN vouches only for the proxy carrying that SAN, not for any other
-	// service the same authority happens to have issued.
+	// Header-relay fixtures: a front proxy identity and a second authority,
+	// showing that a SAN-narrowed relay entry vouches only for that proxy.
 	edgeLBCA := track(issue("edge-lb-ca", issueOpts{
 		subject: pkix.Name{CommonName: "Edge LB CA"},
 		isCA:    true,

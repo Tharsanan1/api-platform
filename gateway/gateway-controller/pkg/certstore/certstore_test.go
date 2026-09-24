@@ -465,11 +465,8 @@ func TestCertStore_LoadCustomCertificates_CertChainInFile(t *testing.T) {
 	assert.NotEmpty(t, data)
 }
 
-// fakeCertificateStorage is a minimal storage.Storage stand-in for exercising
-// LoadCertificates without a real database. Embedding the interface lets it
-// satisfy storage.Storage while only overriding the certificate-listing
-// methods this test cares about; any other method would nil-pointer-panic if
-// called, which is fine since LoadCertificates never reaches them.
+// fakeCertificateStorage implements only the certificate listings
+// LoadCertificates reaches; any other method panics.
 type fakeCertificateStorage struct {
 	storage.Storage
 	certs []*models.StoredCertificate
@@ -493,10 +490,7 @@ func (f *fakeCertificateStorage) ListCertificatesByUsage(usage string) ([]*model
 	return filtered, nil
 }
 
-// TestCertStore_ExcludesClientUsageFromCombinedBundle verifies that a client-CA
-// entry (usage: client) never ends up in the upstream trust bundle Envoy uses
-// for backend TLS verification — the two trust purposes must never share a
-// bundle.
+// A usage: client row never enters the upstream trust bundle.
 func TestCertStore_ExcludesClientUsageFromCombinedBundle(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 

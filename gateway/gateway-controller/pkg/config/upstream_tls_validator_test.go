@@ -27,11 +27,6 @@ import (
 )
 
 // ============ Fixtures ============
-//
-// fakeMtlsCertStore (mtls_auth_validator_test.go) already implements the one
-// method UpstreamTLSCertificateStore needs (GetCertificateByName) — reused
-// here rather than defining a second fake. upstreamCA/clientCA (also from
-// that file) cover usage: upstream/client; only usage: identity is new here.
 
 func gatewayIdentityCert(name string) *models.StoredCertificate {
 	return &models.StoredCertificate{
@@ -48,8 +43,7 @@ func expiredGatewayIdentityCert(name string) *models.StoredCertificate {
 }
 
 // tlsUpstreamDef builds an upstreamDefinitions entry named "partner" with the
-// given tls params (nil omits the tls block entirely, matching a definition
-// with no mTLS configured at all) and one target per url.
+// given tls params, or none when nil, and one target per url.
 func tlsUpstreamDef(tls map[string]interface{}, urls ...string) api.UpstreamDefinition {
 	def := api.UpstreamDefinition{Name: "partner"}
 	if tls != nil {
@@ -65,10 +59,7 @@ func tlsUpstreamDef(tls map[string]interface{}, urls ...string) api.UpstreamDefi
 }
 
 // restAPIWithUpstreamDefs attaches defs to a minimal valid RestAPI, pointing
-// upstream.main at the first one by ref. ValidateRestAPI/ResolveWarnings
-// never themselves resolve that ref — only Spec.UpstreamDefinitions and
-// Spec.Upstream.Main/Sandbox.Tls matter to them — but keeping the ref
-// pointed at a real definition keeps these configs realistic.
+// upstream.main at the first one by ref.
 func restAPIWithUpstreamDefs(defs ...api.UpstreamDefinition) *api.RestAPI {
 	cfg := createValidRestAPIConfig()
 	cfg.Spec.UpstreamDefinitions = &defs
@@ -79,18 +70,14 @@ func restAPIWithUpstreamDefs(defs ...api.UpstreamDefinition) *api.RestAPI {
 }
 
 // restAPIWithInlineUpstreamTLS attaches a tls block directly to
-// spec.upstream.main (never valid) instead of to an upstreamDefinitions
-// entry.
+// spec.upstream.main, which is never valid.
 func restAPIWithInlineUpstreamTLS(tls map[string]interface{}) *api.RestAPI {
 	cfg := createValidRestAPIConfig()
 	cfg.Spec.Upstream.Main.Tls = &tls
 	return cfg
 }
 
-// ============ ValidateRestAPI: the outbound feature's refusal outline ============
-//
-// Table mirrors "A tls block that could never work is refused with the
-// offending path" in the outbound feature one-for-one.
+// ============ ValidateRestAPI: refusals ============
 
 func TestUpstreamTLSValidator_ValidateRestAPI_RefusalOutline(t *testing.T) {
 	store := newFakeMtlsCertStore(
@@ -216,8 +203,7 @@ func TestUpstreamTLSValidator_ValidateRestAPI_MixedHttpHttpsTargets_NamesTheHttp
 	errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(def))
 
 	want := "tls is configured but this target is http://; every target of a definition with tls must be https://"
-	// The http:// target is upstreams[1] — the error must name that index,
-	// not upstreams[0] (which is https:// and fine).
+	// The error must name upstreams[1], the http:// target.
 	if hasError(errs, "spec.upstreamDefinitions[0].upstreams[0].url", want) {
 		t.Fatalf("did not expect an error on the https:// target (index 0), got %+v", errs)
 	}

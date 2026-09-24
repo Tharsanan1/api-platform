@@ -31,27 +31,17 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 )
 
-// ClientAuthorityPublisher publishes the gateway's client certificate
-// authority pool to the policy engine as shared lazy resources, one
-// LazyResourceTypeClientCertificateAuthority resource per usage: client row:
-//
-//	ID:       the row's name
-//	Resource: {"certificates": ["<PEM>", ...], "role": "client" | "relay",
-//	           "match": {"uriSANs": [...], "dnsSANs": [...]}}
-//
-// "certificates" holds one PEM string per certificate in the row. "match" is
-// present only for a relay row stored with narrowing, and carries only the
-// lists that row has. The mtls-auth policy reads these resources on the
-// engine side; a policy chain carries only an API's own accept names and
-// narrowing, so a pool change reaches every API through this one push.
+// ClientAuthorityPublisher publishes the client certificate authority pool to
+// the policy engine as one lazy resource per usage: client row, keyed by the
+// row's name. Each resource holds "certificates" (one PEM per certificate),
+// "role", and "match" only for a relay row stored with narrowing. A pool
+// change reaches every API through this one push.
 type ClientAuthorityPublisher struct {
 	certificates config.MtlsAuthCertificateStore
 	resources    *lazyresourcexds.LazyResourceStateManager
 
-	// mu serialises Publish so that two certificate writes finishing close
-	// together cannot interleave their reads and writes: the last Publish to
-	// run always reads the latest committed pool and leaves exactly that
-	// published.
+	// mu serialises Publish so the last one to run always leaves the latest
+	// committed pool published.
 	mu sync.Mutex
 }
 
@@ -61,11 +51,9 @@ func NewClientAuthorityPublisher(certificates config.MtlsAuthCertificateStore, r
 	return &ClientAuthorityPublisher{certificates: certificates, resources: resources}
 }
 
-// Publish makes the published client authority resources match the usage:
-// client rows currently in the database: every row is stored (a row whose
-// resource is already published unchanged is left alone), then every
-// published resource with no row left is removed. Storing before removing
-// means no intermediate snapshot lacks a row that still exists.
+// Publish makes the published resources match the usage: client rows in the
+// database. It stores before it removes, so no intermediate snapshot lacks a
+// row that still exists.
 func (p *ClientAuthorityPublisher) Publish(correlationID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -100,7 +88,7 @@ func (p *ClientAuthorityPublisher) Publish(correlationID string) error {
 }
 
 // clientAuthorityResource builds the published resource for one usage:
-// client row, in the shape documented on ClientAuthorityPublisher.
+// client row.
 func clientAuthorityResource(row *models.StoredCertificate) *storage.LazyResource {
 	role := row.Role
 	if role == "" {
@@ -129,10 +117,8 @@ func clientAuthorityResource(row *models.StoredCertificate) *storage.LazyResourc
 	}
 }
 
-// splitCertificatePEMs decodes every CERTIFICATE PEM block in data, in
-// order, re-encoding each one individually so the result holds exactly one
-// certificate per string (dropping any other block type and any stray bytes
-// between or around blocks). Certificate material only; never logged.
+// splitCertificatePEMs re-encodes each CERTIFICATE PEM block in data as its
+// own string, in order, dropping other blocks and stray bytes.
 func splitCertificatePEMs(data []byte) []string {
 	out := []string{}
 	rest := data

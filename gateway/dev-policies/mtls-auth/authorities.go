@@ -27,12 +27,10 @@ import (
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
-// clientAuthorityResourceType is the lazy resource type under which the
-// gateway controller publishes each entry of the client certificate
-// authority pool: ID the entry name, and a resource of
-// {"certificates": ["<PEM>", ...], "role": "client" | "relay",
-// "match": {"uriSANs": [...], "dnsSANs": [...]}}, "match" present only for a
-// relay entry stored with narrowing.
+// clientAuthorityResourceType is the lazy resource type the controller
+// publishes each client-CA pool entry under, keyed by entry name, with a body
+// of {"certificates": [PEM...], "role": "client" | "relay", "match":
+// {"uriSANs", "dnsSANs"}}. Only a narrowed relay entry carries "match".
 const clientAuthorityResourceType = "ClientCertificateAuthority"
 
 // The two roles a pool entry can have. A client entry can be named by an
@@ -50,9 +48,7 @@ type relayEntry struct {
 	name  string
 	roots *x509.CertPool
 
-	// uriSANs/dnsSANs narrow this relay to connections whose SANs overlap
-	// these values; nil means no such narrowing. Same semantics as
-	// acceptEntry's fields.
+	// nil uriSANs/dnsSANs mean no SAN narrowing, as for acceptEntry.
 	uriSANs []string
 	dnsSANs []string
 }
@@ -61,17 +57,14 @@ type relayEntry struct {
 // store. It is immutable once built: every request reading it sees the same
 // complete set until a newer one replaces it.
 type authoritySet struct {
-	// version is the store version this set was read from.
 	version uint64
 
-	// clients maps each client entry's name to its trust anchors.
 	clients map[string]*x509.CertPool
 
 	// inherited is the accept list of an instance whose author omitted
 	// accept: every client entry, in name order, with no narrowing.
 	inherited []acceptEntry
 
-	// relays lists the relay entries in name order.
 	relays []relayEntry
 
 	// pool holds every certificate of every entry (relays included). It is
@@ -192,16 +185,10 @@ func parseAuthorityResource(resource *policy.LazyResource) (parsedAuthority, err
 	return entry, nil
 }
 
-// authorityCache holds the authoritySet built from the newest store version
-// seen so far, rebuilding it once per version.
-//
-// Readers take the read lock only to load the current pointer. When the
-// store's version has moved on, exactly one goroutine rebuilds — the rebuild
-// is serialised by rebuildMu, and the version is checked again once that
-// lock is held, so goroutines that queued behind a rebuild do not repeat
-// it. While a rebuild runs, other readers keep using the previous complete
-// set; only a reader that has no set at all waits for the first one. A set
-// is published only after it is completely built.
+// authorityCache holds the set built from the newest store version seen and
+// rebuilds it once per version. One goroutine rebuilds at a time and
+// rechecks the version under rebuildMu. Other readers keep using the previous
+// complete set meanwhile, and only a reader with no set at all waits.
 type authorityCache struct {
 	store *policy.LazyResourceStore
 	build func(resources map[string]*policy.LazyResource, version uint64) *authoritySet
@@ -212,8 +199,6 @@ type authorityCache struct {
 	rebuildMu sync.Mutex
 }
 
-// newAuthorityCache creates a cache over store that builds each set with
-// build.
 func newAuthorityCache(store *policy.LazyResourceStore, build func(map[string]*policy.LazyResource, uint64) *authoritySet) *authorityCache {
 	return &authorityCache{store: store, build: build}
 }

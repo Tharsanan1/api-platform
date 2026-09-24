@@ -41,8 +41,7 @@ const (
 	LazyResourceTypeProviderTemplateMapping = "ProviderTemplateMapping"
 
 	// LazyResourceTypeClientCertificateAuthority is one usage: client
-	// certificate row, published for the mtls-auth policy (see
-	// ClientAuthorityPublisher).
+	// certificate row, published for the mtls-auth policy.
 	LazyResourceTypeClientCertificateAuthority = "ClientCertificateAuthority"
 )
 

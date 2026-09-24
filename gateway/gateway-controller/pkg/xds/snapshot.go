@@ -75,11 +75,8 @@ type SnapshotManager struct {
 	afterGetAll      func() // nil in production; test hook for deterministic race testing
 }
 
-// NewSnapshotManager creates a new snapshot manager. It returns a non-nil
-// error when the translator's certificate store fails to load (see
-// NewTranslator) — per go-network-service-hardening.md/
-// authentication_authorization.md GO-AUTH-011, callers must refuse to start
-// rather than run with a degraded cert store.
+// NewSnapshotManager creates a new snapshot manager. It returns an error
+// when the certificate store fails to load; the caller must refuse to start.
 func NewSnapshotManager(store *storage.ConfigStore, logger *slog.Logger, routerConfig *config.RouterConfig, db storage.Storage, cfg *config.Config) (*SnapshotManager, error) {
 	// Create a snapshot cache with a simple node ID hasher
 	snapshotCache := cache.NewSnapshotCache(false, cache.IDHash{}, &slogAdapter{logger: logger})
@@ -147,15 +144,8 @@ func (sm *SnapshotManager) UpdateSnapshot(ctx context.Context, correlationID str
 		return fmt.Errorf("failed to translate configurations: %w", err)
 	}
 
-	// Build every SDS secret this manager can currently serve, then include
-	// only the subset actually referenced by a cluster or listener accepted
-	// into THIS snapshot (see SnapshotReferencesSDSSecret) — Envoy never
-	// issues a watch for the Secret type URL otherwise, so pushing an
-	// unreferenced secret just produces an "Ignoring unwatched type URL ...
-	// Secret" warning. A failure here (downstream_listener_cert's cert/key
-	// unreadable, once HTTPS is enabled) is fatal to this snapshot, matching
-	// how the old inline-bytes path failed translation outright when it
-	// read the same files directly.
+	// Include only the secrets a cluster or listener in this snapshot
+	// references; Envoy ignores the rest. A failure here fails the snapshot.
 	if sm.sdsSecretManager != nil {
 		secrets, err := sm.sdsSecretManager.GetSecrets(sm.translator.GetUpstreamTLSSecretRefs())
 		if err != nil {

@@ -592,12 +592,8 @@ func TestInitializeExecutionContext_WithPolicyChain(t *testing.T) {
 // extractDownstreamTLS
 // =============================================================================
 
-// TestExtractDownstreamTLS_AttributesNil guards the documented "always
-// returns non-nil" contract: a nil attributes map (an ext_proc request that
-// never carried connection.* at all) must still produce a non-nil
-// *policy.DownstreamTLS with MTLS explicitly false, never a nil TLS — that
-// distinction is reserved for a caller that chooses not to invoke this
-// function, per the SDK's DownstreamTLS doc comment.
+// TestExtractDownstreamTLS_AttributesNil guards that a nil attributes map
+// still yields a non-nil DownstreamTLS with MTLS false.
 func TestExtractDownstreamTLS_AttributesNil(t *testing.T) {
 	tls := extractDownstreamTLS(nil)
 
@@ -606,10 +602,8 @@ func TestExtractDownstreamTLS_AttributesNil(t *testing.T) {
 	assert.Nil(t, tls.PeerCertValid)
 }
 
-// TestExtractDownstreamTLS_ExtProcFilterAbsent covers an attributes map that
-// exists but carries no envoy.filters.http.ext_proc entry at all (e.g. only
-// xds.route_name was ever populated under a different key) — same non-nil,
-// MTLS-false outcome as the nil-map case.
+// TestExtractDownstreamTLS_ExtProcFilterAbsent covers a map with no ext_proc
+// entry: the same non-nil, MTLS-false outcome.
 func TestExtractDownstreamTLS_ExtProcFilterAbsent(t *testing.T) {
 	attrs := map[string]*structpb.Struct{
 		"some.other.filter": {Fields: map[string]*structpb.Value{"x": structpb.NewStringValue("y")}},
@@ -623,9 +617,7 @@ func TestExtractDownstreamTLS_ExtProcFilterAbsent(t *testing.T) {
 }
 
 // TestExtractDownstreamTLS_ConnectionMTLSAbsent covers connection.* present
-// but connection.mtls itself absent (e.g. a plain HTTP listener, or a build
-// that doesn't yet populate every field) — MTLS stays false and
-// PeerCertValid stays nil, exactly like the fully-absent cases above.
+// without connection.mtls: MTLS stays false and PeerCertValid stays nil.
 func TestExtractDownstreamTLS_ConnectionMTLSAbsent(t *testing.T) {
 	attrs := map[string]*structpb.Struct{
 		constants.ExtProcFilter: {
@@ -642,10 +634,8 @@ func TestExtractDownstreamTLS_ConnectionMTLSAbsent(t *testing.T) {
 	assert.Nil(t, tls.PeerCertValid)
 }
 
-// TestExtractDownstreamTLS_AllFieldsPresent guards the field-by-field mapping
-// for a fully-populated mTLS connection, including that PeerCertValid becomes
-// a non-nil *bool (true here) rather than being left nil once Envoy actually
-// reports a verdict.
+// TestExtractDownstreamTLS_AllFieldsPresent guards the field mapping for a
+// fully populated mTLS connection, with PeerCertValid a non-nil true.
 func TestExtractDownstreamTLS_AllFieldsPresent(t *testing.T) {
 	attrs := map[string]*structpb.Struct{
 		constants.ExtProcFilter: {
@@ -678,11 +668,8 @@ func TestExtractDownstreamTLS_AllFieldsPresent(t *testing.T) {
 	assert.True(t, *tls.PeerCertValid)
 }
 
-// TestExtractDownstreamTLS_PeerCertValid_FalsePointer guards that a present
-// but false connection.peer_certificate_valid becomes a non-nil *bool
-// pointing at false — distinct from the field being absent entirely (nil
-// pointer), which policy.DownstreamTLS's fail-closed contract treats
-// differently (see evaluate()'s Step 3 in the mtls-auth policy).
+// TestExtractDownstreamTLS_PeerCertValid_FalsePointer guards that a false
+// verdict becomes a non-nil pointer to false, distinct from an absent one.
 func TestExtractDownstreamTLS_PeerCertValid_FalsePointer(t *testing.T) {
 	attrs := map[string]*structpb.Struct{
 		constants.ExtProcFilter: {

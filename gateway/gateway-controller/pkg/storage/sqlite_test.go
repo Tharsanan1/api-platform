@@ -120,9 +120,7 @@ func TestSQLiteStorage_RejectsUnsupportedSchemaVersion(t *testing.T) {
 	assert.NilError(t, err)
 	storage := store.(*sqlStore)
 
-	// Set schema version to an unsupported value (one past current — the
-	// migration path only understands stepping forward from
-	// previousSchemaVersion, never a version newer than its own).
+	// A version newer than the binary's own is unsupported.
 	unsupportedVersion := currentSchemaVersion + 1
 	_, err = storage.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", unsupportedVersion))
 	assert.NilError(t, err)
@@ -743,9 +741,7 @@ func TestSQLiteStorage_SaveCertificate_DefaultsEmptyUsageAndRole(t *testing.T) {
 	assert.Equal(t, retrieved.Role, models.CertificateRoleClient)
 }
 
-// TestSQLiteStorage_SaveCertificate_RoundTripsMatchJSON_RelayRow guards
-// match_json's round trip for a role: relay row carrying a narrowing Match:
-// both DNSSANs and URISANs must come back exactly as saved.
+// A relay row's Match round-trips through match_json exactly.
 func TestSQLiteStorage_SaveCertificate_RoundTripsMatchJSON_RelayRow(t *testing.T) {
 	store := setupTestStorage(t)
 	defer store.db.Close()
@@ -768,8 +764,7 @@ func TestSQLiteStorage_SaveCertificate_RoundTripsMatchJSON_RelayRow(t *testing.T
 	assert.DeepEqual(t, retrieved.Match.DNSSANs, cert.Match.DNSSANs)
 	assert.DeepEqual(t, retrieved.Match.URISANs, cert.Match.URISANs)
 
-	// The same row read back via ListCertificates/ListCertificatesByUsage
-	// (a separate scan path) must carry the identical Match.
+	// The list scan path is separate and must carry the same Match.
 	byUsage, err := store.ListCertificatesByUsage(models.CertificateUsageClient)
 	assert.NilError(t, err)
 	found := false
@@ -787,10 +782,7 @@ func TestSQLiteStorage_SaveCertificate_RoundTripsMatchJSON_RelayRow(t *testing.T
 	}
 }
 
-// TestSQLiteStorage_SaveCertificate_MatchJSON_NilForNonRelayRows guards the
-// other half of the contract: a client-role row (and, by the same code path,
-// any upstream-usage row) with no Match set persists match_json as NULL and
-// reads back as a nil Match — never an empty JSON object/array.
+// A row with no Match persists match_json as NULL and reads back nil.
 func TestSQLiteStorage_SaveCertificate_MatchJSON_NilForNonRelayRows(t *testing.T) {
 	store := setupTestStorage(t)
 	defer store.db.Close()
@@ -834,13 +826,9 @@ func TestSQLiteStorage_ListCertificatesByUsage(t *testing.T) {
 	assert.Equal(t, upstreamResults[0].UUID, upstreamCert.UUID)
 }
 
-// TestSQLite_UpgradeAddsCertificateUsageColumns verifies that a database
-// provisioned before the certificates.usage/role columns existed (schema
-// version 4, pinned as a literal here deliberately — this test targets the
-// state BEFORE this feature, not whatever currentSchemaVersion is now) is
-// migrated in place: NewStorage succeeds, the pre-existing row reads back
-// with the documented defaults, and a new row can be saved with an explicit
-// usage/role.
+// A schema version 4 database is migrated in place: its row reads back with
+// the column defaults and a new row saves with explicit usage and role.
+// Version 4 is a literal on purpose.
 func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
 	const preMigrationSchemaVersion = 4
 
@@ -895,9 +883,7 @@ func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Equal(t, existing.Usage, models.CertificateUsageUpstream)
 	assert.Equal(t, existing.Role, models.CertificateRoleClient)
-	// match_json is nullable with no default (unlike usage/role): the
-	// pre-existing row must read back with a nil Match, never an error or an
-	// empty-but-non-nil one.
+	// match_json has no default, so the migrated row has a nil Match.
 	if existing.Match != nil {
 		t.Fatalf("expected a nil Match for the pre-migration row, got %+v", existing.Match)
 	}
@@ -910,10 +896,7 @@ func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Equal(t, saved.Usage, models.CertificateUsageClient)
 
-	// The migration must also have added match_json itself: assert the
-	// column exists (a raw PRAGMA table_info probe, independent of the
-	// StoredCertificate round trip above) and that a relay row carrying a
-	// Match saves and reads back correctly on this freshly upgraded database.
+	// Probe the match_json column directly, then round-trip a relay row.
 	sqlDB := upgraded.(*sqlStore).db
 	rows, err := sqlDB.Query(`PRAGMA table_info(certificates)`)
 	assert.NilError(t, err)

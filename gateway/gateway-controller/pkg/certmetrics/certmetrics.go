@@ -16,10 +16,8 @@
  * under the License.
  */
 
-// Package certmetrics keeps the certificate-related Prometheus series
-// (CertificatesTotal, CertificateExpirySeconds) in lockstep with the
-// certificates actually persisted in storage, and periodically re-emits an
-// expiry warning to the log for any certificate approaching its NotAfter.
+// Package certmetrics keeps the certificate Prometheus series in step with
+// stored certificates and periodically logs expiry warnings.
 package certmetrics
 
 import (
@@ -32,8 +30,6 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 )
 
-// sweepInterval is the fixed cadence at which Sweep recomputes certificate
-// metrics and re-emits expiry warnings, independent of certificate writes.
 const sweepInterval = 24 * time.Hour
 
 // Store is the subset of storage.Storage that Refresh and Sweep need.
@@ -41,12 +37,9 @@ type Store interface {
 	ListCertificates() ([]*models.StoredCertificate, error)
 }
 
-// Refresh recomputes CertificatesTotal (a count per usage) and
-// CertificateExpirySeconds (one series per certificate row) from every
-// certificate currently in store, and returns that same list so a caller
-// that also needs it (Sweep) doesn't have to read storage twice. Every
-// series is replaced on each call, so a row that has since been deleted
-// stops being reported rather than lingering at its last known value.
+// Refresh recomputes the certificate series from every stored certificate
+// and returns them. Every series is replaced, so a deleted row stops being
+// reported.
 func Refresh(store Store) ([]*models.StoredCertificate, error) {
 	certs, err := store.ListCertificates()
 	if err != nil {

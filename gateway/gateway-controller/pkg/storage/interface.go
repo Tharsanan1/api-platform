@@ -354,11 +354,8 @@ type Storage interface {
 	// Returns an empty slice if no certificates exist.
 	ListCertificates() ([]*models.StoredCertificate, error)
 
-	// ListCertificatesByUsage retrieves certificates whose usage column
-	// matches the given value ("upstream" or "client"), ordered by creation
-	// time.
-	//
-	// Returns an empty slice if no certificates of that usage exist.
+	// ListCertificatesByUsage retrieves certificates of the given usage,
+	// ordered by creation time. It returns an empty slice if there are none.
 	ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error)
 
 	// DeleteCertificate removes a certificate by ID.
@@ -366,12 +363,9 @@ type Storage interface {
 	// Returns an error if the certificate does not exist.
 	DeleteCertificate(id string) error
 
-	// UpdateCertificate replaces an existing certificate's material
-	// (certificate bytes, private key ciphertext/algorithm, derived
-	// metadata). Used only for usage: identity rotation (PUT
-	// /certificates/{id}); the name and usage are immutable.
-	//
-	// Returns an error if the certificate does not exist.
+	// UpdateCertificate replaces an existing certificate's material; name
+	// and usage are immutable. It returns an error if the certificate does
+	// not exist.
 	UpdateCertificate(cert *models.StoredCertificate) error
 
 	// SaveSecret persists a new encrypted secret.

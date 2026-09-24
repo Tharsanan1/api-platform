@@ -257,11 +257,8 @@ func TestTranslatorToProtoAuthContextCarriesNumbersAsDouble(t *testing.T) {
 
 // ─── ToProtoDownstream / toProtoDownstreamTLS ────────────────────────────────
 
-// TestTranslatorToProtoDownstreamMapsTLSFields guards the field-by-field
-// mapping from policy.DownstreamTLS to the wire proto.DownstreamTLS,
-// including the tri-state PeerCertValid: unset (nil, the gateway never
-// populated Envoy's verdict), an explicit false, and an explicit true must
-// all be distinguishable on the wire.
+// TestTranslatorToProtoDownstreamMapsTLSFields guards the field mapping to
+// the wire form, keeping PeerCertValid's unset, false and true distinct.
 func TestTranslatorToProtoDownstreamMapsTLSFields(t *testing.T) {
 	translator := NewTranslator()
 
@@ -327,11 +324,9 @@ func TestTranslatorToProtoDownstreamMapsTLSFields(t *testing.T) {
 	})
 }
 
-// TestTranslatorToProtoDownstreamTLSNilWhenGatewayDidNotPopulateIt guards the
-// "gateway never populated TLS at all" case (see policy.DownstreamTLS's doc
-// comment): the wire Tls field stays nil rather than a zero-value struct, so
-// a Python-side policy can tell "no assertion" apart from "explicitly no
-// certificate" (Mtls: false).
+// TestTranslatorToProtoDownstreamTLSNilWhenGatewayDidNotPopulateIt guards that
+// a nil snapshot leaves the wire Tls field nil, so a Python policy can tell
+// no assertion apart from Mtls: false.
 func TestTranslatorToProtoDownstreamTLSNilWhenGatewayDidNotPopulateIt(t *testing.T) {
 	translator := NewTranslator()
 	ds := &policy.DownstreamContext{

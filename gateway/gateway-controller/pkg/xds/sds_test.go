@@ -37,19 +37,12 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/testutil/pki"
 )
 
-// fakeSDSStorage is a minimal storage.Storage stand-in for GetSecrets tests:
-// it only overrides the certificate-listing/lookup methods GetSecrets' call
-// chain actually reaches (ListCertificates via LoadCertificates for the
-// upstream bundle, ListCertificatesByUsage via GetClientCABundle for the
-// client-CA pool, GetCertificateByName via GetGatewayIdentityMaterial/
-// GetUpstreamTrustBundle for the mTLS-outbound secrets) — any other method
-// would nil-pointer-panic if called, which is fine since none of these paths
-// reach them. Mirrors pkg/certstore's own fakeCertificateStorage.
+// fakeSDSStorage implements only the certificate lookups GetSecrets reaches;
+// any other method panics.
 type fakeSDSStorage struct {
 	storage.Storage
 	certs []*models.StoredCertificate
-	// listErr, when set, makes ListCertificates fail — used to exercise a
-	// certstore.LoadCertificates failure at Translator construction time.
+	// listErr, when set, makes ListCertificates fail.
 	listErr error
 }
 
@@ -83,9 +76,8 @@ func (f *fakeSDSStorage) GetCertificateByName(name string) (*models.StoredCertif
 	return nil, fmt.Errorf("certificate %q not found", name)
 }
 
-// testXDSEncryptionManager builds a real (temp-key-backed) AES-GCM provider
-// chain for the gateway-identity SDS-secret tests below — GetGatewayIdentityMaterial
-// decrypts via a genuine encryption.ProviderManager, not a fake.
+// testXDSEncryptionManager builds an AES-GCM provider backed by a temporary
+// key.
 func testXDSEncryptionManager(t *testing.T) *encryption.ProviderManager {
 	t.Helper()
 	dir := t.TempDir()
@@ -103,8 +95,7 @@ func testXDSEncryptionManager(t *testing.T) *encryption.ProviderManager {
 	return mgr
 }
 
-// encryptForStorage mirrors handlers.APIServer.encryptPrivateKey: encrypt +
-// marshal, producing the same ciphertext-string shape stored in
+// encryptForStorage encrypts and marshals plaintext as stored in
 // StoredCertificate.PrivateKeyCiphertext.
 func encryptForStorage(t *testing.T, mgr *encryption.ProviderManager, plaintext []byte) string {
 	t.Helper()
@@ -113,8 +104,7 @@ func encryptForStorage(t *testing.T, mgr *encryption.ProviderManager, plaintext 
 	return encryption.MarshalPayload(payload)
 }
 
-// secretsByName indexes a GetSecrets result by name for convenient lookup in
-// assertions below.
+// secretsByName indexes a GetSecrets result by name.
 func secretsByName(t *testing.T, secrets []types.Resource) map[string]*tlsv3.Secret {
 	t.Helper()
 	out := make(map[string]*tlsv3.Secret, len(secrets))
@@ -164,10 +154,7 @@ func TestSDSSecretManager_GetSecrets_UpstreamAndClientRows_HTTPSEnabled(t *testi
 	assert.Contains(t, byName, SecretNameDownstreamClientCA)
 	assert.Contains(t, byName, SecretNameDownstreamListenerCert)
 
-	// downstream_client_ca: a ValidationContext whose TrustedCa carries only
-	// the client PEM (never the upstream one), with ACCEPT_UNTRUSTED so a
-	// failed chain-verification degrades to mtls-auth's own evaluation
-	// instead of aborting the TLS handshake.
+	// downstream_client_ca carries only the client PEM, with ACCEPT_UNTRUSTED.
 	clientSecret := byName[SecretNameDownstreamClientCA]
 	validationCtx, ok := clientSecret.GetType().(*tlsv3.Secret_ValidationContext)
 	require.True(t, ok, "downstream_client_ca must be a Secret_ValidationContext, got %T", clientSecret.GetType())
@@ -234,10 +221,7 @@ func TestSDSSecretManager_GetSecrets_HTTPSDisabled_NoListenerSecretNoError(t *te
 	assert.NotContains(t, byName, SecretNameDownstreamListenerCert)
 }
 
-// TestCertStore_GetClientCABundle_OnlyClientRows guards that the client-CA
-// pool bundle never includes an upstream-usage row, mirroring
-// TestCertStore_ExcludesClientUsageFromCombinedBundle's guarantee in the
-// other direction.
+// The client-CA bundle never includes an upstream row.
 func TestCertStore_GetClientCABundle_OnlyClientRows(t *testing.T) {
 	logger := createTestLogger()
 	upstreamCert := pki.NewRootCA(t, "Bundle Split Upstream CA")
@@ -261,11 +245,8 @@ func TestCertStore_GetClientCABundle_OnlyClientRows(t *testing.T) {
 // Gateway-identity and per-upstream-trust SDS secrets (mTLS outbound)
 // ============================================================================
 
-// TestSDSSecretManager_GetSecrets_GatewayIdentity_DecryptedKeyOnlyInSecret
-// guards the two things that matter about the gateway_identity:<name> secret:
-// it carries the DECRYPTED private key (never the ciphertext string stored
-// in the database), and that decrypted key appears in no other secret this
-// call produces.
+// The identity secret carries the decrypted key, which appears in no other
+// secret.
 func TestSDSSecretManager_GetSecrets_GatewayIdentity_DecryptedKeyOnlyInSecret(t *testing.T) {
 	logger := createTestLogger()
 	identity := pki.NewSelfSignedLeaf(t, "gateway-a")
@@ -295,8 +276,6 @@ func TestSDSSecretManager_GetSecrets_GatewayIdentity_DecryptedKeyOnlyInSecret(t 
 	assert.Equal(t, identity.KeyPEM(), tlsCert.TlsCertificate.GetPrivateKey().GetInlineBytes(),
 		"the secret must carry the DECRYPTED key, not the ciphertext")
 
-	// The decrypted key must not leak into any other secret in this result
-	// (e.g. the upstream_ca_bundle, which is built from a different query).
 	for name, secret := range byName {
 		if name == GatewayIdentitySecretName("out-identity-a") {
 			continue
@@ -307,10 +286,7 @@ func TestSDSSecretManager_GetSecrets_GatewayIdentity_DecryptedKeyOnlyInSecret(t 
 	}
 }
 
-// TestSDSSecretManager_GetSecrets_PerUpstreamTrust_ExactTrustedCAs guards that
-// the upstream_ca:<handle>:<definition> ValidationContext secret carries
-// exactly the named trustedCAs certificates — not the whole upstream pool,
-// and not a subset missing one of them.
+// The per-upstream trust secret carries exactly the named trustedCAs.
 func TestSDSSecretManager_GetSecrets_PerUpstreamTrust_ExactTrustedCAs(t *testing.T) {
 	logger := createTestLogger()
 	trusted1 := pki.NewRootCA(t, "Per-Upstream Trusted CA 1")
@@ -345,10 +321,7 @@ func TestSDSSecretManager_GetSecrets_PerUpstreamTrust_ExactTrustedCAs(t *testing
 	assert.NotContains(t, bundle, string(excluded.PEM()), "must carry exactly the named trustedCAs, not the whole upstream pool")
 }
 
-// TestSDSSecretManager_GetSecrets_PerUpstreamTrust_DedupedAcrossRefs guards
-// that two refs naming the same api handle + definition (e.g. the same
-// definition reached both directly and via upstream.main.ref) produce a
-// single secret, not a duplicate resource of the same name.
+// Two refs to the same definition produce a single secret.
 func TestSDSSecretManager_GetSecrets_PerUpstreamTrust_DedupedAcrossRefs(t *testing.T) {
 	logger := createTestLogger()
 	trusted := pki.NewRootCA(t, "Dedup Trusted CA")

@@ -1915,9 +1915,8 @@ func (s *sqlStore) GetLLMProviderTemplateByHandle(handle string) (*models.Stored
 	return &template, nil
 }
 
-// certificateMatchToJSON marshals a CertificateMatch (only meaningful for
-// role: relay entries) into the nullable match_json column value. A nil
-// match persists as SQL NULL ("unnarrowed"), never the literal string "null".
+// certificateMatchToJSON marshals a CertificateMatch into the match_json
+// column. A nil match persists as SQL NULL, never the string "null".
 func certificateMatchToJSON(match *models.CertificateMatch) (sql.NullString, error) {
 	if match == nil {
 		return sql.NullString{}, nil
@@ -1929,8 +1928,8 @@ func certificateMatchToJSON(match *models.CertificateMatch) (sql.NullString, err
 	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
-// certificateMatchFromJSON reverses certificateMatchToJSON. A NULL/empty
-// column value decodes to a nil match (unnarrowed).
+// certificateMatchFromJSON reverses certificateMatchToJSON. A NULL or empty
+// value decodes to a nil match.
 func certificateMatchFromJSON(ns sql.NullString) (*models.CertificateMatch, error) {
 	if !ns.Valid || ns.String == "" {
 		return nil, nil
@@ -1942,9 +1941,8 @@ func certificateMatchFromJSON(ns sql.NullString) (*models.CertificateMatch, erro
 	return &match, nil
 }
 
-// certificateCommonColumns is the column list shared by every certificate
-// SELECT below (Get/GetByName/List/ListByUsage) — kept as one constant so
-// the scan order can never drift between them and scanCertificateRows.
+// certificateCommonColumns is the column list of every certificate SELECT,
+// so the scan order cannot drift from the scanners.
 const certificateCommonColumns = `uuid, name, certificate, subject, issuer,
 	       not_before, not_after, cert_count, usage, role, match_json,
 	       private_key_ciphertext, key_algorithm, created_at, updated_at`
@@ -2082,9 +2080,7 @@ func (s *sqlStore) ListCertificatesByUsage(usage string) ([]*models.StoredCertif
 	return certs, nil
 }
 
-// nullableString converts an empty Go string to SQL NULL (rather than
-// persisting an empty string) — meaningful for private_key_ciphertext/
-// key_algorithm, which are only ever set for usage: identity rows.
+// nullableString converts an empty string to SQL NULL.
 func nullableString(s string) sql.NullString {
 	if s == "" {
 		return sql.NullString{}
@@ -2097,8 +2093,7 @@ type certificateRowScanner interface {
 	Scan(dest ...interface{}) error
 }
 
-// scanOneCertificate scans a single row produced by the certificateCommonColumns
-// SELECT (Get/GetByName), used by both *sql.Row (QueryRow) and *sql.Rows.
+// scanOneCertificate scans one row selected with certificateCommonColumns.
 func scanOneCertificate(row certificateRowScanner) (*models.StoredCertificate, error) {
 	var cert models.StoredCertificate
 	var matchJSON, privateKeyCiphertext, keyAlgorithm sql.NullString
@@ -2131,8 +2126,7 @@ func scanOneCertificate(row certificateRowScanner) (*models.StoredCertificate, e
 	return &cert, nil
 }
 
-// scanCertificateRows scans rows produced by the ListCertificates/ListCertificatesByUsage
-// queries above (both select the same column set and order, certificateCommonColumns).
+// scanCertificateRows scans rows selected with certificateCommonColumns.
 func scanCertificateRows(rows *sql.Rows) ([]*models.StoredCertificate, error) {
 	var certs []*models.StoredCertificate
 	for rows.Next() {
@@ -2174,9 +2168,8 @@ func (s *sqlStore) DeleteCertificate(id string) error {
 	return nil
 }
 
-// UpdateCertificate replaces an existing certificate's material — used only
-// for usage: identity rotation (PUT /certificates/{id}); name and usage are
-// immutable and not part of this update.
+// UpdateCertificate replaces an existing certificate's material. Name and
+// usage are immutable.
 func (s *sqlStore) UpdateCertificate(cert *models.StoredCertificate) error {
 	query := `
 		UPDATE certificates

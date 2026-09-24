@@ -28,8 +28,7 @@ import (
 )
 
 // codeEnum reads schemaName's "code" property enum from the embedded OpenAPI
-// spec and returns it as a set. It fails the test outright if the property
-// carries no enum at all (i.e. it's still only documented via `example`).
+// spec and returns it as a set. It fails the test if there is no enum.
 func codeEnum(t *testing.T, schemaName string) map[string]bool {
 	t.Helper()
 
@@ -61,9 +60,7 @@ func codeEnum(t *testing.T, schemaName string) map[string]bool {
 	return enum
 }
 
-// TestOpenAPI_CertificateWarningCodeEnum_CoversEveryEmittedCode locks in
-// that every code the controller can put in a certificate's warnings[]
-// (upload/listing responses) is declared in CertificateWarning.code's enum.
+// Every certificate warning code is declared in CertificateWarning.code.
 func TestOpenAPI_CertificateWarningCodeEnum_CoversEveryEmittedCode(t *testing.T) {
 	enum := codeEnum(t, "CertificateWarning")
 
@@ -80,10 +77,7 @@ func TestOpenAPI_CertificateWarningCodeEnum_CoversEveryEmittedCode(t *testing.T)
 	}
 }
 
-// TestOpenAPI_WarningCodeEnum_CoversEveryEmittedCode locks in that every code
-// the controller can put in a deployed RestAPI's status.warnings[] (the
-// mtls-auth and upstream-TLS deploy-time validators) is declared in
-// Warning.code's enum.
+// Every deploy warning code is declared in Warning.code.
 func TestOpenAPI_WarningCodeEnum_CoversEveryEmittedCode(t *testing.T) {
 	enum := codeEnum(t, "Warning")
 

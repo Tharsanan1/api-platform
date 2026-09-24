@@ -440,9 +440,7 @@ func (t *RestAPITransformer) buildPolicyChain(
 		}
 	}
 
-	// Every mtls-auth instance in this chain gets its engine-facing accept
-	// entries and the router's client-certificate header settings here, at
-	// chain-build time — see mtls_internal.go.
+	// Inject the engine-facing mtls-auth parameters into this chain.
 	var headerConfig config.ClientCertificateHeader
 	if t.routerConfig != nil {
 		headerConfig = t.routerConfig.DownstreamTLS.ClientCertificateHeader
@@ -507,12 +505,8 @@ func (t *RestAPITransformer) addUpstreamCluster(
 		basePath = "/"
 	}
 
-	// The connect timeout and tls block can only come from a referenced
-	// upstreamDefinition (a direct-URL upstream has neither field, and tls
-	// is refused there at deploy time — see
-	// config.UpstreamTLSValidator.ValidateRestAPI). Resolve both here so the
-	// RDC->Envoy translation applies them to this cluster instead of
-	// falling back to the global default / no client identity.
+	// Only a referenced upstreamDefinition can carry a connect timeout or a
+	// tls block; a direct-URL upstream has neither.
 	var connectTimeout *time.Duration
 	var refDef *api.UpstreamDefinition
 	if up != nil && up.Ref != nil && strings.TrimSpace(*up.Ref) != "" {
@@ -531,12 +525,8 @@ func (t *RestAPITransformer) addUpstreamCluster(
 		tls = refDef.Tls
 	}
 
-	// Name mirrors the referenced definition's own name (empty for a direct
-	// URL, which cannot carry tls) so the translator can build this
-	// cluster's per-upstream validation-context SDS secret name
-	// ("upstream_ca:<api-handle>:<definition-name>") identically whether
-	// the cluster came from the definitions loop or this main/sandbox
-	// ref-duplicate.
+	// The definition name keys the per-upstream trust secret, so it must
+	// match the one the definitions loop uses.
 	defName := ""
 	if refDef != nil {
 		defName = refDef.Name
@@ -650,10 +640,8 @@ func ResolvePort(u *url.URL) int {
 }
 
 // upstreamTLSFromParams builds the runtime TLS model for one upstream
-// cluster. tls is the raw, already-validated tls block (nil when the
-// definition/upstream carried none); enabled is whether the target uses
-// https:// at all. Callers must only invoke this once the owning
-// configuration has passed config.UpstreamTLSValidator.ValidateRestAPI.
+// cluster. tls is the validated tls block, or nil; enabled is whether the
+// target uses https.
 func upstreamTLSFromParams(tls *map[string]interface{}, enabled bool) *models.UpstreamTLS {
 	if tls == nil {
 		return &models.UpstreamTLS{Enabled: enabled}

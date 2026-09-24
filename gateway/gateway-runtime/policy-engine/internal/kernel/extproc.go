@@ -770,15 +770,9 @@ func (s *ExternalProcessorServer) newBoundExecutionContext(
 	ec.defaultUpstream = routeMetadata.DefaultUpstream
 	ec.buildRequestContexts(req.GetRequestHeaders(), routeMetadata)
 
-	// Populate the connection-level TLS/mTLS snapshot from the same ext_proc
-	// request attributes extractRouteKey reads below. This happens here,
-	// rather than inside buildRequestContexts, because req.Attributes lives on
-	// the top-level ProcessingRequest, not on the HttpHeaders message
-	// buildRequestContexts is handed — and because requestHeaderCtx,
-	// requestBodyCtx, and requestStreamContext all share the one *DownstreamContext
-	// buildRequestContexts allocated, setting TLS once here makes it visible to
-	// every phase (and, via buildResponseContexts reusing the same pointer, the
-	// response phase too).
+	// req.Attributes lives on the ProcessingRequest, not the HttpHeaders message
+	// buildRequestContexts receives. Every phase shares this DownstreamContext,
+	// so setting TLS once covers the response phase too.
 	if ec.requestHeaderCtx != nil && ec.requestHeaderCtx.Downstream != nil {
 		ec.requestHeaderCtx.Downstream.TLS = extractDownstreamTLS(req.Attributes)
 	}
@@ -803,23 +797,9 @@ func (s *ExternalProcessorServer) extractRouteKey(req *extprocv3.ProcessingReque
 	return "default"
 }
 
-// extractDownstreamTLS reads the connection-level TLS/mTLS ext_proc request
-// attributes (connection.* — see constants.ExtProcAttrConnection*) into a
-// policy.DownstreamTLS snapshot.
-//
-// Always returns non-nil: MTLS is explicitly false when connection.mtls is
-// absent or false, so a policy can tell "no certificate was presented" apart
-// from "TLS is nil because this gateway build never populates it" (the latter
-// is only possible when the caller chooses not to call this function at all,
-// or when the derived listener's mtls-listener feature hasn't rolled out yet
-// — see the DownstreamTLS doc comment in the SDK for the fail-closed
-// contract). PeerCertValid is the one field that stays nil unless
-// connection.peer_certificate_valid was actually present in the attributes,
-// regardless of MTLS — Envoy populates the verdict independently of whether a
-// certificate was presented at all.
-//
-// Never logs PeerCertificatePEM or SHA256Thumbprint (GO-AUTH-003) — callers
-// must not either.
+// extractDownstreamTLS reads the connection.* ext_proc attributes into a
+// non-nil policy.DownstreamTLS. PeerCertValid stays nil unless Envoy sent a
+// verdict. Never log PeerCertificatePEM or SHA256Thumbprint.
 func extractDownstreamTLS(attrs map[string]*structpb.Struct) *policy.DownstreamTLS {
 	tls := &policy.DownstreamTLS{}
 	if attrs == nil {

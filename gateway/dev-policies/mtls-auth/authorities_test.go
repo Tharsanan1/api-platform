@@ -27,8 +27,6 @@ import (
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
-// ─── authorityCache: one build per version, readers never see a partial set ──
-
 // countingBuild wraps buildAuthoritySet, counting calls.
 func countingBuild(calls *atomic.Int32) func(map[string]*policy.LazyResource, uint64) *authoritySet {
 	return func(resources map[string]*policy.LazyResource, version uint64) *authoritySet {
@@ -173,8 +171,6 @@ func TestAuthorityCache_FirstReadersWaitForTheFirstSet(t *testing.T) {
 	}
 }
 
-// ─── The parsed set ───────────────────────────────────────────────────────────
-
 func TestBuildAuthoritySet_SkipsAnUnreadableEntryAndKeepsTheRest(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	relayCA := newRootCA(t, "Edge LB CA")
@@ -261,15 +257,13 @@ func slicesEqual(a, b []string) bool {
 	return true
 }
 
-// ─── Accept resolution against the pool, per request ─────────────────────────
-
 func TestMtlsAuthPolicy_AcceptNameAbsentFromThePoolDenies(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	rootB := newRootCA(t, "Partner B Root CA")
 	clientA := newLeaf(t, rootA, "client-a", certOpts{})
 
-	// The chain names partner-a, but the pool holds only partner-b — a chain
-	// that reached the engine ahead of its pool entry.
+	// The chain names partner-a but the pool holds only partner-b, as when a
+	// chain reaches the engine ahead of its pool entry.
 	publishAuthorities(t, authoritySpec{name: "partner-b", role: roleClient, certs: []*testEntity{rootB}})
 	p := mustPolicy(t, buildParams([]entrySpec{{ca: "partner-a"}}))
 
@@ -399,9 +393,8 @@ func TestMtlsAuthPolicy_ConcurrentRequestsAcrossSnapshots(t *testing.T) {
 	}
 	publishAuthorities(t, pool...)
 	p := mustPolicy(t, buildParams([]entrySpec{{ca: "partner-a"}}))
-	// Load this pool before the requests start. A reader that arrives while a
-	// rebuild runs is served the previous set; without this, that would be
-	// whatever an earlier test left behind rather than this same pool.
+	// Load this pool before the requests start, so a reader served the previous
+	// set during a rebuild gets this pool, not an earlier test's.
 	clientAuthorities.get()
 
 	var wg sync.WaitGroup

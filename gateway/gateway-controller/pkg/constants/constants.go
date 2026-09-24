@@ -102,11 +102,8 @@ const (
 	ExtProcHeaderModeSkip            = "SKIP"
 	ExtProcRequestAttributeRouteName = "xds.route_name"
 
-	// Connection-level attributes surfaced to the policy engine so mtls-auth
-	// can authenticate a caller from the certificate presented on the
-	// connection, without the policy engine needing its own TLS/Envoy
-	// bindings. See go-control-plane-xds-security.md and the mtls-listener
-	// feature file for how the derived HTTPS listener populates these.
+	// Connection attributes sent to the policy engine so mtls-auth can
+	// authenticate the certificate presented on the connection.
 	ExtProcRequestAttributeConnectionMTLS                   = "connection.mtls"
 	ExtProcRequestAttributeConnectionPeerCertificate        = "connection.peer_certificate"
 	ExtProcRequestAttributeConnectionPeerCertificateDigest  = "connection.sha256_peer_certificate_digest"

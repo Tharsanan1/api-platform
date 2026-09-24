@@ -62,11 +62,8 @@ func mustGetPolicy(t *testing.T) *MtlsAuthPolicy {
 }
 
 // TestMtlsAuthPolicy_DefaultParams_ProducesUniformUnauthorizedResponse guards
-// the default failure response contract: with no params configured, every
-// request is rejected with a 401, an application/json body of exactly
-// {"error":"Unauthorized","message":"Authentication failed"}, and no
-// WWW-Authenticate header (mutual TLS has no challenge header equivalent to
-// offer).
+// the default failure response: a 401 with an exact JSON body and no
+// WWW-Authenticate header.
 func TestMtlsAuthPolicy_DefaultParams_ProducesUniformUnauthorizedResponse(t *testing.T) {
 	p := mustGetPolicy(t)
 	reqCtx := newTestRequestHeaderContext()
@@ -103,9 +100,8 @@ func TestMtlsAuthPolicy_DefaultParams_ProducesUniformUnauthorizedResponse(t *tes
 	}
 }
 
-// TestMtlsAuthPolicy_ErrorMessageFormat_Plain honours errorMessageFormat:
-// "plain" — the body is the raw error message text and the content-type
-// switches to text/plain instead of the default JSON envelope.
+// TestMtlsAuthPolicy_ErrorMessageFormat_Plain checks that "plain" returns the
+// raw message as text/plain.
 func TestMtlsAuthPolicy_ErrorMessageFormat_Plain(t *testing.T) {
 	p := mustGetPolicy(t)
 	reqCtx := newTestRequestHeaderContext()
@@ -130,9 +126,8 @@ func TestMtlsAuthPolicy_ErrorMessageFormat_Plain(t *testing.T) {
 	}
 }
 
-// TestMtlsAuthPolicy_ErrorMessageFormat_Minimal honours errorMessageFormat:
-// "minimal" — the body is the fixed literal "Unauthorized" regardless of any
-// configured errorMessage, with the default JSON content-type retained.
+// TestMtlsAuthPolicy_ErrorMessageFormat_Minimal checks that "minimal" returns
+// the literal "Unauthorized" whatever errorMessage says.
 func TestMtlsAuthPolicy_ErrorMessageFormat_Minimal(t *testing.T) {
 	p := mustGetPolicy(t)
 	reqCtx := newTestRequestHeaderContext()
@@ -154,8 +149,6 @@ func TestMtlsAuthPolicy_ErrorMessageFormat_Minimal(t *testing.T) {
 	}
 }
 
-// TestMtlsAuthPolicy_OnFailureStatusCode_Honoured guards that a configured
-// onFailureStatusCode overrides the default 401.
 func TestMtlsAuthPolicy_OnFailureStatusCode_Honoured(t *testing.T) {
 	p := mustGetPolicy(t)
 	reqCtx := newTestRequestHeaderContext()
@@ -171,16 +164,12 @@ func TestMtlsAuthPolicy_OnFailureStatusCode_Honoured(t *testing.T) {
 	if resp.StatusCode != 403 {
 		t.Errorf("StatusCode = %d, want 403", resp.StatusCode)
 	}
-	// The failure body contract is otherwise unaffected by the status code override.
 	wantBody := `{"error":"Unauthorized","message":"Authentication failed"}`
 	if string(resp.Body) != wantBody {
 		t.Errorf("body = %q, want %q", string(resp.Body), wantBody)
 	}
 }
 
-// TestMtlsAuthPolicy_Mode guards the declared processing mode: only the
-// request-header phase is needed, since the certificate this policy
-// authenticates against is a connection-level fact available at header time.
 func TestMtlsAuthPolicy_Mode(t *testing.T) {
 	p := mustGetPolicy(t)
 	mode := p.Mode()
@@ -199,13 +188,6 @@ func TestMtlsAuthPolicy_Mode(t *testing.T) {
 	}
 }
 
-// ─── In-test certificate authority helpers ───────────────────────────────────
-//
-// This module doesn't depend on gateway-controller, so it can't reuse that
-// module's pkg/testutil/pki helper — this is a small, self-contained
-// equivalent built directly on crypto/x509, sized for exactly what this
-// file's tests below need.
-
 // testEntity is a generated certificate plus the private key that created it.
 type testEntity struct {
 	cert *x509.Certificate
@@ -217,18 +199,14 @@ func (e *testEntity) pemCert() string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: e.der}))
 }
 
-// thumbprint returns the lowercase-hex SHA-256 digest of the certificate's DER
-// encoding — the same "canonical thumbprint" evaluate() computes from a
-// parsed leaf, and the format both __wso2_internal_mtls_accept's thumbprints
-// entries and DownstreamTLS.SHA256Thumbprint are normalized to.
+// thumbprint returns the lowercase-hex SHA-256 of the certificate's DER, the
+// canonical form evaluate computes and thumbprint narrowing is normalized to.
 func (e *testEntity) thumbprint() string {
 	sum := sha256.Sum256(e.der)
 	return hex.EncodeToString(sum[:])
 }
 
-// certOpts configures a single certificate issuance. Despite the name it
-// applies equally to roots, intermediates, and leaves — isCA/parent select
-// which.
+// certOpts configures one issuance, for a root, intermediate or leaf alike.
 type certOpts struct {
 	parent    *testEntity // nil => self-signed
 	isCA      bool
@@ -281,10 +259,8 @@ func issueCert(t *testing.T, cn string, opts certOpts) *testEntity {
 	case len(opts.ekus) > 0:
 		tmpl.ExtKeyUsage = opts.ekus
 	case !opts.isCA:
-		// Every client leaf in this file defaults to clientAuth-only EKU,
-		// mirroring resources/mtls-pki/generate.go's fixtures — this is what
-		// makes TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny
-		// below a meaningful regression guard rather than a one-off.
+		// Client leaves default to clientAuth-only EKU, as real client
+		// certificates do, so every test exercises ExtKeyUsageAny verification.
 		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
 	}
 
@@ -334,12 +310,8 @@ func newLeaf(t *testing.T, parent *testEntity, cn string, opts certOpts) *testEn
 	return issueCert(t, cn, opts)
 }
 
-// xfccChainField builds the Chain= field of an X-Forwarded-Client-Cert header
-// value exactly as parseXFCCChainCertificates expects to decode it: RFC 3986
-// percent-encoding (url.PathEscape, matching the production code's
-// url.PathUnescape) of the concatenated PEM blocks — never
-// url.QueryEscape/Unescape, which would corrupt a literal '+' in the PEM
-// base64 alphabet.
+// xfccChainField builds an XFCC Chain= field with url.PathEscape, the inverse
+// of the parser's url.PathUnescape.
 func xfccChainField(certs ...*testEntity) string {
 	var pemBlob strings.Builder
 	for _, c := range certs {
@@ -347,8 +319,6 @@ func xfccChainField(certs ...*testEntity) string {
 	}
 	return "Chain=" + url.PathEscape(pemBlob.String())
 }
-
-// ─── Pool publication and accept-param construction ─────────────────────────
 
 // authoritySpec is one pool entry as the controller publishes it, expressed
 // with real certificates.
@@ -360,9 +330,8 @@ type authoritySpec struct {
 	dnsSANs []string
 }
 
-// authorityResource renders spec as the ClientCertificateAuthority lazy
-// resource the policy engine receives from the controller (JSON-decoded, so
-// every list is []interface{}).
+// authorityResource renders spec as the JSON-decoded lazy resource the
+// policy engine receives.
 func authorityResource(spec authoritySpec) *policy.LazyResource {
 	body := map[string]interface{}{
 		"certificates": entitiesToPEMInterfaces(spec.certs),
@@ -382,8 +351,7 @@ func authorityResource(spec authoritySpec) *policy.LazyResource {
 }
 
 // publishResources replaces the whole process-wide lazy resource store with
-// resources, as a policy-engine snapshot does, and empties it again when the
-// test ends so no test sees another's pool.
+// resources and empties it again when the test ends.
 func publishResources(t *testing.T, resources ...*policy.LazyResource) {
 	t.Helper()
 	store := policy.GetLazyResourceStoreInstance()
@@ -403,9 +371,8 @@ func publishAuthorities(t *testing.T, specs ...authoritySpec) {
 	publishResources(t, resources...)
 }
 
-// entrySpec is one accept-list entry, expressed with real certificates/SAN
-// values: ca names the pool entry, and roots are that entry's certificates
-// (see poolAuthorities).
+// entrySpec is one accept-list entry: ca names the pool entry and roots are
+// its certificates.
 type entrySpec struct {
 	ca          string
 	roots       []*testEntity
@@ -414,8 +381,7 @@ type entrySpec struct {
 	thumbprints []string
 }
 
-// relaySpec is one relay pool entry, expressed with real certificates/SAN
-// values.
+// relaySpec is one relay pool entry.
 type relaySpec struct {
 	name    string
 	roots   []*testEntity
@@ -440,9 +406,8 @@ func entitiesToPEMInterfaces(entities []*testEntity) []interface{} {
 }
 
 // poolAuthorities is the pool a test describes: a client entry per distinct
-// accept entry name holding that entry's roots, a relay entry per relay, and
-// a client entry (named "pool-<n>") for every pool certificate no accept
-// entry or relay holds.
+// accept entry name, a relay entry per relay, and a "pool-<n>" client entry
+// for every pool certificate no entry holds.
 func poolAuthorities(t *testing.T, pool []*testEntity, entries []entrySpec, relays []relaySpec) []authoritySpec {
 	t.Helper()
 	var specs []authoritySpec
@@ -475,8 +440,8 @@ func poolAuthorities(t *testing.T, pool []*testEntity, entries []entrySpec, rela
 	return specs
 }
 
-// buildParams builds the chain params the controller injects for an API
-// whose author wrote accept as entries: names and narrowing only.
+// buildParams builds the chain params the controller injects for an explicit
+// accept list.
 func buildParams(entries []entrySpec) map[string]interface{} {
 	acceptList := make([]interface{}, 0, len(entries))
 	for _, e := range entries {
@@ -500,8 +465,7 @@ func buildParams(entries []entrySpec) map[string]interface{} {
 }
 
 // buildParamsWithHeader is buildParams plus the header param; a nil header
-// omits the param entirely, matching parseHeaderParam's "absent means
-// defaults" contract.
+// omits the param.
 func buildParamsWithHeader(entries []entrySpec, header map[string]interface{}) map[string]interface{} {
 	params := buildParams(entries)
 	if header != nil {
@@ -541,18 +505,13 @@ func mustBuildRelayPolicy(t *testing.T, pool []*testEntity, entries []entrySpec,
 	return mustPolicy(t, buildParamsWithHeader(entries, header))
 }
 
-// ─── Header-value encodings a front proxy might emit ─────────────────────────
-
-// urlEncodedPEMHeaderValue is the default encoding: the PEM text, RFC 3986
-// percent-encoded — url.PathEscape, matching decodeHeaderCertificate's
-// url.PathUnescape fallback.
+// urlEncodedPEMHeaderValue is the PEM text, percent-encoded.
 func urlEncodedPEMHeaderValue(e *testEntity) string {
 	return url.PathEscape(e.pemCert())
 }
 
-// pemWithSpacesHeaderValue is the raw PEM text with newlines replaced by
-// spaces — an HTTP header cannot carry a literal newline, and this is what
-// several proxies emit instead of percent-encoding it.
+// pemWithSpacesHeaderValue is the PEM text with newlines replaced by spaces,
+// as proxies emit it since a header cannot carry a newline.
 func pemWithSpacesHeaderValue(e *testEntity) string {
 	return strings.ReplaceAll(e.pemCert(), "\n", " ")
 }
@@ -562,8 +521,6 @@ func pemWithSpacesHeaderValue(e *testEntity) string {
 func bareBase64DERHeaderValue(e *testEntity) string {
 	return base64.StdEncoding.EncodeToString(e.der)
 }
-
-// ─── Request-context / DownstreamTLS construction ────────────────────────────
 
 func boolPtr(b bool) *bool { return &b }
 
@@ -577,11 +534,7 @@ func reqCtxWithTLS(tls *policy.DownstreamTLS) *policy.RequestHeaderContext {
 }
 
 // reqCtxWithTLSAndHeader is reqCtxWithTLS plus a downstream snapshot carrying
-// headerName: headerValue, driving evaluate()'s header-relay decision path via
-// Downstream.Request.Headers — the snapshot headerRawValue reads (see
-// policy.RequestHeaderContext.DownstreamRequest's doc comment on why the
-// snapshot, not the top-level Headers fallback, is what a policy should read
-// for an authentication decision).
+// headerName: headerValue.
 func reqCtxWithTLSAndHeader(tls *policy.DownstreamTLS, headerName, headerValue string) *policy.RequestHeaderContext {
 	return &policy.RequestHeaderContext{
 		SharedContext: &policy.SharedContext{},
@@ -597,8 +550,7 @@ func reqCtxWithTLSAndHeader(tls *policy.DownstreamTLS, headerName, headerValue s
 }
 
 // downstreamTLSFromLeaf builds the DownstreamTLS Envoy would report for a
-// connection that presented leaf, with valid pinning Envoy's own
-// peer_certificate_valid verdict.
+// connection that presented leaf, with valid as Envoy's verdict.
 func downstreamTLSFromLeaf(leaf *testEntity, valid bool) *policy.DownstreamTLS {
 	return &policy.DownstreamTLS{
 		MTLS:               true,
@@ -608,14 +560,9 @@ func downstreamTLSFromLeaf(leaf *testEntity, valid bool) *policy.DownstreamTLS {
 	}
 }
 
-// ─── Assertion helpers ────────────────────────────────────────────────────────
-
-// evaluateAndRespond exercises both surfaces the task requires: the
-// unexported evaluate() result (reason, matched entry) and the actual
-// OnRequestHeaders action (401 ImmediateResponse vs pass-through). evaluate()
-// is a pure read of reqCtx, so calling it directly and then letting
-// OnRequestHeaders call it again internally is safe — neither call mutates
-// reqCtx itself, only OnRequestHeaders's own AuthContext side effect below.
+// evaluateAndRespond returns both the evaluate result and the
+// OnRequestHeaders action. evaluate only reads reqCtx, so calling it twice is
+// safe.
 func evaluateAndRespond(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderContext) (evaluationResult, policy.RequestHeaderAction) {
 	t.Helper()
 	result := p.evaluate(reqCtx, nil)
@@ -623,11 +570,8 @@ func evaluateAndRespond(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestH
 	return result, action
 }
 
-// assertDenied asserts evaluate() denied with wantReason AND that
-// OnRequestHeaders produced the identical 401 body — every deny path must
-// converge on the same response regardless of *why*, per error-handling.md's
-// unified-auth-failure directive, so this same byte-for-byte check runs on
-// every call site below rather than being asserted once in isolation.
+// assertDenied asserts evaluate denied with wantReason and that
+// OnRequestHeaders returned the one uniform 401 body, on every call site.
 func assertDenied(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderContext, wantReason string) {
 	t.Helper()
 	result, action := evaluateAndRespond(t, p, reqCtx)
@@ -651,8 +595,8 @@ func assertDenied(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderC
 	}
 }
 
-// assertAuthenticated asserts evaluate() authenticated at wantEntryIndex AND
-// that OnRequestHeaders produced a pass-through action rather than a 401.
+// assertAuthenticated asserts evaluate authenticated at wantEntryIndex and
+// that OnRequestHeaders passed the request through.
 func assertAuthenticated(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderContext, wantEntryIndex int) evaluationResult {
 	t.Helper()
 	result, action := evaluateAndRespond(t, p, reqCtx)
@@ -668,13 +612,9 @@ func assertAuthenticated(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.Request
 	return result
 }
 
-// ─── Connection-level gating ─────────────────────────────────────────────────
-
-// TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating guards evaluate()'s
-// fail-closed handling of the three ways the gateway can assert "nothing
-// certain about this connection's certificate" — nil TLS, TLS populated but
-// no certificate presented, and Envoy's own verification verdict missing.
-// None of these may ever be treated as "no certificate required".
+// TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating guards that nil TLS, no
+// certificate, and a missing Envoy verdict all deny, never mean "no
+// certificate required".
 func TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	p := mustBuildPolicy(t, []*testEntity{rootA}, []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}})
@@ -693,13 +633,9 @@ func TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating(t *testing.T) {
 	})
 }
 
-// ─── Envoy already rejected: deriveRejectReason ──────────────────────────────
-
-// TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason covers the three
-// deriveRejectReason outcomes reachable when tls.PeerCertValid is a non-nil
-// false: date-based reasons short-circuit before any chain check, and a
-// pool-wide chain check distinguishes "genuinely untrusted" from other
-// causes.
+// TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason covers the reasons
+// derived for a certificate Envoy rejected: date checks first, then the
+// pool-wide chain check.
 func TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	unrelatedRoot := newRootCA(t, "Unrelated Root CA")
@@ -730,12 +666,9 @@ func TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason(t *testing.T) {
 	})
 }
 
-// ─── The happy path: full AuthContext population ─────────────────────────────
-
-// TestMtlsAuthPolicy_Evaluate_AuthenticatesAndPopulatesAuthContext is the one
-// dedicated test for the full authenticated outcome: every AuthContext field
-// OnRequestHeaders derives from evaluate()'s result, plus that an earlier
-// auth layer's AuthContext is preserved via Previous rather than discarded.
+// TestMtlsAuthPolicy_Evaluate_AuthenticatesAndPopulatesAuthContext checks
+// every AuthContext field on allow, and that an earlier layer's AuthContext
+// is kept as Previous.
 func TestMtlsAuthPolicy_Evaluate_AuthenticatesAndPopulatesAuthContext(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	leaf := newLeaf(t, rootA, "client-valid", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
@@ -781,14 +714,9 @@ func TestMtlsAuthPolicy_Evaluate_AuthenticatesAndPopulatesAuthContext(t *testing
 	}
 }
 
-// ─── Path-building via the intermediate and the XFCC Chain element ──────────
-
-// TestMtlsAuthPolicy_Evaluate_IntermediateViaXFCCChain covers the four
-// XFCC-related scenarios: an intermediate missing entirely, the same
-// intermediate supplied via X-Forwarded-Client-Cert's Chain= element, that
-// same header ignored outright when MTLS is false, and a chain element that
-// can never be promoted to a trusted Root no matter how "complete" a path it
-// appears to close.
+// TestMtlsAuthPolicy_Evaluate_IntermediateViaXFCCChain covers a missing
+// intermediate, one supplied in the XFCC Chain element, the header ignored
+// without MTLS, and a chain certificate never promoted to a root.
 func TestMtlsAuthPolicy_Evaluate_IntermediateViaXFCCChain(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	intermediateA := newIntermediateCA(t, rootA, "Partner A Issuing CA 1")
@@ -797,19 +725,15 @@ func TestMtlsAuthPolicy_Evaluate_IntermediateViaXFCCChain(t *testing.T) {
 
 	t.Run("no XFCC: pool holds root only", func(t *testing.T) {
 		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-		// Realistic: the client presented only the leaf during the handshake
-		// (no intermediate), so Envoy's own verification against pool=[rootA]
-		// fails the same way deriveRejectReason's pool-wide check would.
+		// The client presented only the leaf, so Envoy's verification fails too.
 		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, false))
 		assertDenied(t, p, reqCtx, reasonUntrustedChain)
 	})
 
 	t.Run("XFCC Chain carries the intermediate: authenticated", func(t *testing.T) {
 		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-		// Realistic: the client presented leaf+intermediate during the TLS
-		// handshake, so Envoy verified successfully (pool root + client-supplied
-		// intermediate completes the path) and forwarded that same intermediate
-		// in X-Forwarded-Client-Cert's Chain element.
+		// The client presented leaf and intermediate, so Envoy verified and
+		// forwarded the intermediate in the XFCC Chain element.
 		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
 		reqCtx.Headers = policy.NewHeaders(map[string][]string{xfccHeaderName: {xfccChainField(intermediateA)}})
 		assertAuthenticated(t, p, reqCtx, 0)
@@ -828,30 +752,25 @@ func TestMtlsAuthPolicy_Evaluate_IntermediateViaXFCCChain(t *testing.T) {
 		rogueRoot := newRootCA(t, "Rogue Root CA")
 		rogueLeaf := newLeaf(t, rogueRoot, "client-rogue", certOpts{})
 		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-		// PeerCertValid=true here isolates this policy's own chain-building logic
-		// from Envoy's verdict, specifically to demonstrate that a
-		// self-signed CA certificate arriving via the XFCC Chain element is
-		// path-building material only — it never gets treated as a Root, no
-		// matter how "complete" a chain it appears to close.
+		// PeerCertValid=true isolates this policy's own chain building: a
+		// self-signed CA in the XFCC chain is path-building material only, never a
+		// root.
 		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(rogueLeaf, true))
 		reqCtx.Headers = policy.NewHeaders(map[string][]string{xfccHeaderName: {xfccChainField(rogueRoot)}})
 		assertDenied(t, p, reqCtx, reasonAuthorityNotAccepted)
 	})
 }
 
-// ─── SAN narrowing ────────────────────────────────────────────────────────────
-
-// TestMtlsAuthPolicy_Evaluate_SANNarrowing covers uriSANs matching among
-// several leaf URIs, no match at all, and the both-uriSANs-and-dnsSANs case
-// where only one of the two narrowings is satisfied.
+// TestMtlsAuthPolicy_Evaluate_SANNarrowing covers a match among several URIs,
+// no match, and uriSANs with dnsSANs where only one is satisfied.
 func TestMtlsAuthPolicy_Evaluate_SANNarrowing(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 
 	t.Run("matches one of several leaf URIs", func(t *testing.T) {
 		entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}, uriSANs: []string{"urn:partner-a:payments"}}}
 		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-		// The leaf's FIRST URI deliberately does not match, proving the matched
-		// Subject comes from resolving against entry.uriSANs, not leaf.URIs[0].
+		// The first URI deliberately does not match, so the subject must come from
+		// entry.uriSANs, not leaf.URIs[0].
 		leaf := newLeaf(t, rootA, "client-multi-uri", certOpts{
 			uriSANs: []string{"urn:partner-a:other", "urn:partner-a:payments"},
 		})
@@ -887,8 +806,6 @@ func TestMtlsAuthPolicy_Evaluate_SANNarrowing(t *testing.T) {
 	})
 }
 
-// ─── Thumbprint narrowing ─────────────────────────────────────────────────────
-
 func TestMtlsAuthPolicy_Evaluate_ThumbprintNarrowing(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	leaf := newLeaf(t, rootA, "client-valid", certOpts{})
@@ -909,10 +826,8 @@ func TestMtlsAuthPolicy_Evaluate_ThumbprintNarrowing(t *testing.T) {
 	})
 }
 
-// ─── Multiple entries: first match wins, index recorded ─────────────────────
-
 // TestMtlsAuthPolicy_Evaluate_MultipleEntries_SecondMatches guards that
-// matchedEntry reflects the actual index that verified, not always "0".
+// matchedEntry is the index that verified, not always 0.
 func TestMtlsAuthPolicy_Evaluate_MultipleEntries_SecondMatches(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	rootX := newRootCA(t, "Unrelated Root CA")
@@ -934,12 +849,9 @@ func TestMtlsAuthPolicy_Evaluate_MultipleEntries_SecondMatches(t *testing.T) {
 	}
 }
 
-// ─── Pool membership alone never grants access ───────────────────────────────
-
 // TestMtlsAuthPolicy_Evaluate_PoolMembershipAloneNeverGrantsAccess guards that
-// an authority merely being in the gateway's client-CA pool (and therefore
-// trusted at the connection level) is not sufficient — this API's own accept
-// list must separately name it.
+// an authority in the pool is not accepted unless this API's accept list
+// names it.
 func TestMtlsAuthPolicy_Evaluate_PoolMembershipAloneNeverGrantsAccess(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	rootB := newRootCA(t, "Partner B Root CA")
@@ -948,18 +860,14 @@ func TestMtlsAuthPolicy_Evaluate_PoolMembershipAloneNeverGrantsAccess(t *testing
 	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
 	p := mustBuildPolicy(t, []*testEntity{rootB}, entries) // pool holds CA-B; accept list never names it
 
-	// PeerCertValid=true: realistic, since rootB genuinely is in the gateway's
-	// client-CA pool and the connection legitimately verified against it.
+	// rootB is in the pool, so the connection legitimately verified.
 	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
 	assertDenied(t, p, reqCtx, reasonAuthorityNotAccepted)
 }
 
-// ─── Lookalike CA: verified cryptographically, never by comparing names ─────
-
-// TestMtlsAuthPolicy_Evaluate_LookalikeCA_SameDNDifferentKey_Denies is the
-// package doc comment's central security property made concrete: a CA
-// certificate whose distinguished name is byte-identical to a pooled,
-// accepted authority — but signed with a different key — must never verify.
+// TestMtlsAuthPolicy_Evaluate_LookalikeCA_SameDNDifferentKey_Denies guards
+// that a CA with a pooled authority's exact DN but a different key never
+// verifies.
 func TestMtlsAuthPolicy_Evaluate_LookalikeCA_SameDNDifferentKey_Denies(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	lookalikeCA := issueCert(t, "", certOpts{isCA: true, subject: rootA.cert.Subject})
@@ -968,20 +876,14 @@ func TestMtlsAuthPolicy_Evaluate_LookalikeCA_SameDNDifferentKey_Denies(t *testin
 	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
 	p := mustBuildPolicy(t, []*testEntity{rootA}, entries) // pool holds the REAL rootA only, never the lookalike
 
-	// Realistic: Envoy's own verification against pool=[rootA] fails too,
-	// since the lookalike CA's DN matches rootA's byte-for-byte but its key
-	// does not.
+	// Envoy's verification fails too: the DN matches rootA but the key does not.
 	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, false))
 	assertDenied(t, p, reqCtx, reasonUntrustedChain)
 }
 
-// ─── Verify must use ExtKeyUsageAny ──────────────────────────────────────────
-
 // TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny guards
-// against a regression to Go's x509.Verify default KeyUsages (which requires
-// ExtKeyUsageServerAuth) — every client-certificate fixture in this suite,
-// like production client certificates, carries clientAuth-only EKU and would
-// fail to verify at all under that default.
+// against x509.Verify's default KeyUsages, which require serverAuth and would
+// reject every clientAuth-only client certificate.
 func TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	leaf := newLeaf(t, rootA, "client-clientauth-only", certOpts{
@@ -995,14 +897,9 @@ func TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny(t *tes
 	assertAuthenticated(t, p, reqCtx, 0)
 }
 
-// ─── Header-relay decision order ───────────────────────────────────
-
-// TestMtlsAuthPolicy_Evaluate_HeaderRelay covers evaluate()'s full decision
-// order for a client certificate relayed in a header by a front proxy: header
-// mode off, a relay-authenticated connection vouching for the header in every
-// supported encoding, a header ignored because the connection isn't a relay
-// (falling back to evaluating the connection as itself either way), a relay
-// narrowed by SAN declining to vouch, and the trustAny bypass.
+// TestMtlsAuthPolicy_Evaluate_HeaderRelay covers header mode off, a relay
+// vouching for the header in every encoding, a header ignored on a non-relay
+// connection, a SAN-narrowed relay declining to vouch, and trustAny.
 func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	acceptLeaf := newLeaf(t, rootA, "client-valid", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
@@ -1019,9 +916,8 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 	relayLeaf := newLeaf(t, relayCA, "edge-lb", certOpts{dnsSANs: []string{"edge-lb.internal"}})
 
 	corpCA := newRootCA(t, "Corp CA")
-	// corpOtherLeaf verifies fine against corpCA (a relay root below) but
-	// carries "other.corp.test", never the "lb.corp.test" a narrowed relay
-	// entry requires — used to prove a SAN-mismatched relay declines to vouch.
+	// corpOtherLeaf verifies against corpCA but lacks the "lb.corp.test" SAN a
+	// narrowed relay requires.
 	corpOtherLeaf := newLeaf(t, corpCA, "corp-other-service", certOpts{dnsSANs: []string{"other.corp.test"}})
 
 	acceptEntries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
@@ -1110,9 +1006,9 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 		narrowedRelays := []relaySpec{{name: "relay-corp", roots: []*testEntity{corpCA}, dnsSANs: []string{"lb.corp.test"}}}
 		p := mustBuildRelayPolicy(t, pool, acceptEntries, narrowedRelays, nil)
 		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(corpOtherLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
-		// corpOtherLeaf fails the relay's SAN narrowing, so the header (however
-		// well-formed) is ignored, and this connection is evaluated as itself —
-		// against an accept list that never names corpCA.
+		// corpOtherLeaf fails the relay's SAN narrowing, so the header is ignored
+		// and the connection is judged as itself against an accept list without
+		// corpCA.
 		assertDenied(t, p, reqCtx, reasonAuthorityNotAccepted)
 	})
 
@@ -1129,13 +1025,9 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 	})
 }
 
-// ─── Header forwarding to the backend ──────────────────────────────
-
-// TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend covers
-// forwardToBackend's contract: remove the header only when it was NOT
-// believed and forwardToBackend is on (a believed header, or forwardToBackend
-// off entirely, must never see this policy strip it — the router's own
-// default route configuration handles the off case).
+// TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend guards that the header
+// is removed only when forwardToBackend is on and the header was not
+// believed; the router handles the off case.
 func TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	acceptLeaf := newLeaf(t, rootA, "client-valid", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
@@ -1150,8 +1042,8 @@ func TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend(t *testing.T) {
 		return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
 	}
 	notBelievedReqCtx := func() *policy.RequestHeaderContext {
-		// The connection's own certificate is a valid accepted client, not the
-		// relay — so this header, however well-formed, is never believed.
+		// The connection is an accepted client, not a relay, so the header is never
+		// believed.
 		return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(acceptLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
 	}
 

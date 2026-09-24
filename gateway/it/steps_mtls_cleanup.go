@@ -16,12 +16,6 @@
  * under the License.
  */
 
-// Best-effort scenario teardown shared by every mtls feature.
-//
-// API cleanup itself lives in steps_api.go's cleanupDeployedAPIs, driven by
-// generic per-scenario tracking rather than a fixed name list — see
-// RegisterMTLSSteps' After hook (steps_mtls.go) for the full ordering: APIs,
-// then identities, then other certificates.
 package it
 
 import (
@@ -32,24 +26,17 @@ import (
 	"time"
 )
 
-// cleanupDeleteRetryBudget/Interval bound deleteRetryingConflict: the
-// certificate/identity referential-integrity check consults the
-// controller's in-memory config store, which can still show a
-// just-deleted API for a moment after cleanupDeployedAPIs' own delete call
-// has already returned — it converges asynchronously. Retrying a 409 for a
-// few seconds absorbs that window; anything else (including 404, already
-// removed) is treated as done.
+// cleanupDeleteRetryBudget and cleanupDeleteRetryInterval bound the 409
+// retries in deleteRetryingConflict. The controller's reference check can
+// still see a just-deleted API briefly, because its config store converges
+// asynchronously.
 const (
 	cleanupDeleteRetryBudget   = 5 * time.Second
 	cleanupDeleteRetryInterval = 25 * time.Millisecond
 )
 
-// deleteRetryingConflict deletes the /certificates/{id} row (a plain
-// certificate or a gateway identity — same endpoint either way), retrying
-// while the delete returns 409 up to cleanupDeleteRetryBudget, then giving
-// up. Best-effort throughout, like the cleanup functions that call it: this
-// is scenario teardown, not an assertion, so the final outcome is never
-// checked.
+// deleteRetryingConflict deletes a certificate or gateway identity, retrying
+// on 409 until cleanupDeleteRetryBudget runs out. The outcome is not checked.
 func (m *mtlsSteps) deleteRetryingConflict(id string) {
 	deadline := time.Now().Add(cleanupDeleteRetryBudget)
 	for {
@@ -65,15 +52,9 @@ func (m *mtlsSteps) deleteRetryingConflict(id string) {
 	}
 }
 
-// cleanupTrackedCertificates deletes every gateway identity and plain
-// certificate name this scenario attempted to upload, authenticating as
-// admin regardless of which role the scenario last used (or cleared).
-// Best-effort throughout: a name that was never actually pooled/stored
-// (e.g. a rejected upload), or already removed by the scenario itself, is
-// silently skipped, and no prior auth header state is restored afterwards.
-// Identities are deleted before other certificates — a deployed API's tls
-// block may reference an identity, while a plain certificate is independent
-// of identities — by deleting from uploadedIdentityNames first.
+// cleanupTrackedCertificates deletes, as admin, every gateway identity and
+// certificate this scenario attempted to upload. Names that were never
+// stored are skipped, and the previous auth header is not restored.
 func (m *mtlsSteps) cleanupTrackedCertificates() {
 	if len(m.uploadedIdentityNames) == 0 && len(m.uploadedNames) == 0 {
 		return
@@ -107,11 +88,6 @@ func (m *mtlsSteps) cleanupTrackedCertificates() {
 			if !ok {
 				continue
 			}
-			// Best-effort: ignore the outcome, including 404s for a
-			// certificate already removed by the scenario itself; a
-			// transient 409 (the referential-integrity check racing
-			// config-store convergence) is retried by
-			// deleteRetryingConflict rather than given up on immediately.
 			m.deleteRetryingConflict(id)
 		}
 	}

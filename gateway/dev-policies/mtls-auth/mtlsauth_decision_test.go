@@ -46,12 +46,9 @@ func reqCtxWithTLSAndHeaderValues(tls *policy.DownstreamTLS, headerName string, 
 	}
 }
 
-// TestMtlsAuthPolicy_Evaluate_DecisionTree walks every leaf of evaluate's
-// decision order: the connection's own certificate is judged first, a header
-// only when the connection did not pass accept and either trustAny is on or
-// the connection matches a relay, and a certificate Envoy rejected is never
-// rescued by a header. Each row also asserts the span attributes that record
-// which certificate was evaluated.
+// TestMtlsAuthPolicy_Evaluate_DecisionTree walks every branch of evaluate's
+// decision order and asserts the span attributes that record which
+// certificate was evaluated.
 func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	clientA := newLeaf(t, rootA, "client-a", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
@@ -70,9 +67,8 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 	relayCA := newRootCA(t, "Edge LB CA")
 	edgeLB := newLeaf(t, relayCA, "edge-lb", certOpts{dnsSANs: []string{"edge-lb.internal"}})
 
-	// One gateway pool serves every instance below, as it does in a running
-	// policy engine: the load balancer's authority is held twice, once as a
-	// relay and once as a client authority an API may accept.
+	// One pool serves every instance below, as in a running engine. The load
+	// balancer's authority is held twice: as a relay and as a client authority.
 	publishAuthorities(t,
 		authoritySpec{name: "partner-a", role: roleClient, certs: []*testEntity{rootA}},
 		authoritySpec{name: "partner-b", role: roleClient, certs: []*testEntity{rootB}},
@@ -100,7 +96,7 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 		wantRelayedBy string
 		wantSubject   string
 	}{
-		// 1a — the connection passes accept; the header plays no part.
+		// The connection passes accept; the header plays no part.
 		{
 			name:   "accepted connection, no header",
 			policy: relayPolicy, tls: downstreamTLSFromLeaf(clientA, true),
@@ -122,7 +118,7 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 			wantAllow: true, wantSource: sourceHandshake, wantSubject: "edge-lb.internal",
 		},
 
-		// 1b — the connection did not pass accept; the header is judged.
+		// The connection did not pass accept; the header is judged.
 		{
 			name:   "relay connection on an API accepting only partners, header carrying an accepted client: the relayed client",
 			policy: relayPolicy, tls: downstreamTLSFromLeaf(edgeLB, true), header: []string{header(clientA)},
@@ -174,7 +170,7 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 			wantReason: reasonInvalidCert, wantSource: sourceBypass,
 		},
 
-		// 1c — the connection did not pass accept and the header is not judged.
+		// The connection did not pass accept and the header is not judged.
 		{
 			name:   "valid non-relay connection not accepted, header ignored",
 			policy: relayPolicy, tls: downstreamTLSFromLeaf(clientB, true), header: []string{header(clientA)},
@@ -186,7 +182,7 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 			wantReason: reasonAuthorityNotAccepted, wantSource: sourceHandshake,
 		},
 
-		// 2a — no certificate on the connection.
+		// No certificate on the connection.
 		{
 			name:   "trustAny, no certificate, header carrying an accepted client",
 			policy: bypassPolicy, tls: noCertificate(), header: []string{header(clientA)},
@@ -208,7 +204,7 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 			wantReason: reasonNoCertificate, wantSource: sourceHandshake,
 		},
 
-		// 2b — Envoy rejected the connection's certificate; never rescued.
+		// Envoy rejected the connection's certificate; a header never rescues it.
 		{
 			name:   "trustAny, connection certificate from an unpooled authority, header carrying an accepted client",
 			policy: bypassPolicy, tls: downstreamTLSFromLeaf(clientUnpooled, false), header: []string{header(clientA)},
@@ -225,7 +221,7 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 			wantReason: reasonExpired, wantSource: sourceHandshake,
 		},
 
-		// 2c — no verdict at all.
+		// No verdict at all.
 		{
 			name:   "trustAny, no TLS attributes, header carrying an accepted client",
 			policy: bypassPolicy, tls: nil, header: []string{header(clientA)},
@@ -279,10 +275,9 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 	}
 }
 
-// TestMtlsAuthPolicy_OnRequestHeaders_ForwardCertificate covers the
-// developer-facing forwardCertificate parameter: false removes both
-// certificate headers from every allowed request, whichever certificate was
-// authenticated, and a deny carries no header modifications at all.
+// TestMtlsAuthPolicy_OnRequestHeaders_ForwardCertificate checks that false
+// removes both certificate headers from every allowed request, and that a
+// deny carries no header modifications.
 func TestMtlsAuthPolicy_OnRequestHeaders_ForwardCertificate(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	clientA := newLeaf(t, rootA, "client-a", certOpts{})

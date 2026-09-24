@@ -363,29 +363,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Fail closed (GO-AUTH-011): a persisted RestAPI that attaches mtls-auth
-	// while the HTTPS listener is disabled can never authenticate any
-	// caller, so refuse to start rather than run in that state.
+	// A stored mtls-auth API that can never authenticate a caller is a
+	// startup failure.
 	if err := config.ValidateMTLSStartupInvariant(configStore.GetAll(), cfg.Router.HTTPSEnabled,
 		cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny); err != nil {
 		log.Error("Refusing to start", slog.Any("error", err))
 		os.Exit(1)
 	}
 
-	// Initialize xDS snapshot manager with router config. Refuse to start if
-	// the certificate store failed to load (see
-	// go-network-service-hardening.md / GO-AUTH-011): a degraded cert store
-	// would silently drop the upstream trust bundle and the ability to
-	// present any gateway identity, rather than fail loudly.
+	// Initialize xDS snapshot manager with router config. A certificate store
+	// that fails to load is a startup failure.
 	snapshotManager, err := xds.NewSnapshotManager(configStore, log, &cfg.Router, db, cfg)
 	if err != nil {
 		log.Error("Refusing to start: certificate store failed to initialize", slog.Any("error", err))
 		os.Exit(1)
 	}
 
-	// Publish the client certificate authority pool the certificate store
-	// just loaded, so the mtls-auth policy holds it before any API is served.
-	// Every certificate write republishes it from then on (pkg/api/handlers).
+	// Publish the client authority pool so the mtls-auth policy holds it
+	// before any API is served.
 	clientAuthorities := utils.NewClientAuthorityPublisher(db, lazyResourceXDSManager)
 	if err := clientAuthorities.Publish(""); err != nil {
 		log.Error("Refusing to start: client certificate authorities could not be published", slog.Any("error", err))
@@ -396,10 +391,8 @@ func main() {
 	var sdsSecretManager *xds.SDSSecretManager
 	translator := snapshotManager.GetTranslator()
 	if translator != nil && translator.GetCertStore() != nil {
-		// Wire the encryption provider manager so a gateway identity's
-		// private key can be decrypted when building its SDS secret (nil
-		// when no encryption provider is configured — GetGatewayIdentityMaterial
-		// then fails closed rather than serve an undecrypted key).
+		// Without an encryption provider, gateway identity secrets fail to
+		// build rather than serve an undecrypted key.
 		translator.GetCertStore().SetEncryptionManager(encryptionProviderManager)
 
 		// Use the same cache and node ID as the main xDS to ensure Envoy can fetch secrets
@@ -722,14 +715,11 @@ func main() {
 		log.Error("Failed to create API server", slog.Any("error", err))
 		os.Exit(1)
 	}
-	// Wire the encryption provider manager so gateway-identity private keys
-	// can be encrypted at rest (nil when no encryption provider is
-	// configured — upload/update is then refused fail-closed).
+	// Without an encryption provider, gateway identity uploads are refused.
 	apiServer.SetEncryptionManager(encryptionProviderManager)
 
-	// Recompute certificate metrics and re-emit expiry warnings on a fixed
-	// schedule, independent of any particular request. Runs once immediately
-	// (covering startup) and then every 24h until shut down below.
+	// Recompute certificate metrics and expiry warnings at startup and then
+	// every 24h.
 	certSweepCtx, certSweepCancel := context.WithCancel(context.Background())
 	go certmetrics.Sweep(certSweepCtx, db, log)
 
@@ -916,7 +906,6 @@ func main() {
 
 	log.Info("Shutting down Gateway-Controller")
 
-	// Stop the certificate metrics/expiry sweep goroutine.
 	certSweepCancel()
 
 	// Graceful shutdown with timeout

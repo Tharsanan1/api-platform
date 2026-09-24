@@ -1101,10 +1101,8 @@ func TestDefaultConfig_AdminServerDefaults(t *testing.T) {
 	assert.Equal(t, []string{"*"}, cfg.Controller.AdminServer.AllowedIPs)
 }
 
-// TestDefaultConfig_ClientCertificateHeaderDefaults guards the shipped
-// default for router.downstream_tls.client_certificate_header: the header
-// name a front proxy is expected to use, and both narrow opt-ins
-// (trust_any/forward_to_backend) off.
+// The header name defaults to the documented one, with trust_any and
+// forward_to_backend off.
 func TestDefaultConfig_ClientCertificateHeaderDefaults(t *testing.T) {
 	cfg := defaultConfig()
 	h := cfg.Router.DownstreamTLS.ClientCertificateHeader
@@ -1113,9 +1111,7 @@ func TestDefaultConfig_ClientCertificateHeaderDefaults(t *testing.T) {
 	assert.False(t, h.ForwardToBackend)
 }
 
-// TestConfig_ValidateClientCertificateHeaderName guards
-// ValidateClientCertificateHeaderName's RFC 7230 tchar enforcement, wired
-// into Config.Validate() unconditionally (independent of https_enabled).
+// Header names must be RFC 7230 tokens, whatever https_enabled says.
 func TestConfig_ValidateClientCertificateHeaderName(t *testing.T) {
 	tests := []struct {
 		name        string

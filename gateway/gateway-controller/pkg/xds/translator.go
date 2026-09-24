@@ -110,12 +110,9 @@ type Translator struct {
 	transformers      map[string]models.ConfigTransformer // kind → transformer (optional)
 	eventGatewayHooks EventGatewayXDSHooks                // optional, set by an event-gateway-controller binary
 
-	// tlsSecretRefs accumulates the per-cluster mTLS wiring
-	// (identity/trustedCAs) observed while translating the CURRENT
-	// TranslateConfigs call, reset at its start. Read via
-	// GetUpstreamTLSSecretRefs by the snapshot manager, which hands it to
-	// the SDSSecretManager so it builds exactly the secrets this
-	// snapshot's clusters reference.
+	// tlsSecretRefs is the per-cluster mTLS wiring seen by the current
+	// TranslateConfigs call, so SDS builds exactly the secrets its clusters
+	// reference.
 	tlsSecretRefs []UpstreamTLSSecretRef
 }
 
@@ -126,9 +123,7 @@ func (t *Translator) GetUpstreamTLSSecretRefs() []UpstreamTLSSecretRef {
 }
 
 // collectUpstreamTLSSecretRefs records one UpstreamTLSSecretRef per cluster
-// in rdc that carries an explicit, non-empty tls block (identity and/or
-// trustedCAs) — a bare `tls: {}` no-op contributes nothing. Called once per
-// RuntimeDeployConfig successfully translated within TranslateConfigs.
+// in rdc whose tls block sets identity or trustedCAs.
 func (t *Translator) collectUpstreamTLSSecretRefs(rdc *models.RuntimeDeployConfig) {
 	for _, uc := range rdc.UpstreamClusters {
 		if uc.TLS == nil || !uc.TLS.HasTLSBlock {
@@ -154,27 +149,19 @@ type resolvedTimeout struct {
 	Idle    *time.Duration
 }
 
-// NewTranslator creates a new translator. It returns a non-nil error when a
-// configured certificate store fails to load — per
-// go-network-service-hardening.md / authentication_authorization.md
-// GO-AUTH-011, a cert-store load failure must be a startup failure, not a
-// silently-degraded warning: main() must refuse to start when this error is
-// non-nil, since a disabled cert store would silently drop the upstream
-// trust bundle and the ability to present any gateway identity.
+// NewTranslator creates a new translator. It returns an error when the
+// certificate store fails to load; the caller must refuse to start.
 func NewTranslator(logger *slog.Logger, routerConfig *config.RouterConfig, db storage.Storage, config *config.Config) (*Translator, error) {
-	// The certificate store backs every SDS secret (listener certificate,
-	// client-CA bundle, upstream trust, gateway identities), so it always
-	// exists; custom_certs_path only adds file-based upstream trust on top of
-	// the database rows.
+	// The certificate store backs every SDS secret, so it always exists;
+	// custom_certs_path only adds file-based upstream trust.
 	cs := certstore.NewCertStore(
 		logger,
 		db,
 		routerConfig.Upstream.TLS.CustomCertsPath,
 		routerConfig.Upstream.TLS.TrustedCertPath,
 	)
-	// A load failure is a startup failure rather than a warn-and-disable-SDS
-	// fallback: with SDS disabled, every upstream TLS context silently loses
-	// its trust bundle and its ability to present a gateway identity.
+	// Without the store every upstream TLS context would silently lose its
+	// trust bundle and gateway identity, so a load failure is fatal.
 	if _, err := cs.LoadCertificates(); err != nil {
 		logger.Error("Failed to initialize certificate store",
 			slog.String("custom_certs_path", routerConfig.Upstream.TLS.CustomCertsPath),
@@ -301,9 +288,7 @@ func (t *Translator) translateRuntimeConfig(rdc *models.RuntimeDeployConfig) ([]
 		// inside createCluster/createWeightedCluster.
 		connectTimeout := uc.ConnectTimeout
 
-		// Only a definition whose tls block sets trustedCAs gets its own
-		// per-upstream ValidationContext secret; "" here means "use the
-		// gateway-wide bundle" and createUpstreamTLSContext ignores it.
+		// "" means the definition uses the gateway-wide trust bundle.
 		var validationSecretName string
 		if uc.TLS != nil && uc.TLS.HasTLSBlock && len(uc.TLS.TrustedCANames) > 0 {
 			validationSecretName = UpstreamCAValidationContextSecretName(rdc.Metadata.Handle, uc.Name)
@@ -429,13 +414,10 @@ func (t *Translator) createRouteFromRDC(routeKey string, rdcRoute *models.Route,
 		r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, constants.TargetUpstreamHeader)
 	}
 
-	// The router filter applies RequestHeadersToRemove after ext_proc, so the
-	// policy engine still sees both certificate-bearing headers where a chain
-	// evaluates them; only what the backend would receive is decided here. A
-	// route whose chain lacks mtls-auth strips both. A route with mtls-auth
-	// keeps the forwarded-certificate header, and keeps the relayed header
-	// only when the operator opted into forward_to_backend (the policy then
-	// removes it itself unless it believed it).
+	// RequestHeadersToRemove applies after ext_proc, so the policy engine
+	// still sees both certificate headers; this decides only what the backend
+	// receives. With mtls-auth the relayed header is kept only under
+	// forward_to_backend, and the policy removes it unless it believed it.
 	if !chainAttachesMTLSAuth(rdc.PolicyChains[routeKey]) {
 		t.stripClientCertificateHeaders(r)
 	} else if !t.routerConfig.DownstreamTLS.ClientCertificateHeader.ForwardToBackend {
@@ -602,8 +584,7 @@ func (t *Translator) setMatchPathSpecifier(m *route.RouteMatch, fullPath, operat
 }
 
 // createWeightedCluster creates a weighted (multi-endpoint) Envoy cluster. validationSecretName
-// is the SDS secret name for a non-empty tls.TrustedCANames (see createUpstreamTLSContext); pass
-// "" for a definition with no tls block.
+// is the SDS secret for a non-empty tls.TrustedCANames, or "" when there is none.
 func (t *Translator) createWeightedCluster(
 	name string,
 	endpoints []models.Endpoint,
@@ -770,8 +751,6 @@ func (t *Translator) TranslateConfigs(
 	}
 	resources := make(map[resource.Type][]types.Resource)
 
-	// Reset per-call: recomputed fresh from this TranslateConfigs run's
-	// configs, never accumulated across calls.
 	t.tlsSecretRefs = nil
 
 	var listeners []types.Resource
@@ -782,10 +761,8 @@ func (t *Translator) TranslateConfigs(
 	allRoutes := make([]*route.Route, 0)
 	clusterMap := make(map[string]*cluster.Cluster)
 
-	// anyMTLSAuth is true when at least one deployed config's RestAPI
-	// representation attaches mtls-auth (API-level or on any operation) — the
-	// HTTPS listener's request for a client certificate is derived entirely
-	// from this, never a router-config switch (see createDownstreamTLSContext).
+	// The HTTPS listener requests a client certificate only when some
+	// deployed API attaches mtls-auth.
 	anyMTLSAuth := false
 
 	for _, cfg := range configs {
@@ -1385,22 +1362,13 @@ func convertPathWithEscapedSlashesAction(action string) hcm.HttpConnectionManage
 	}
 }
 
-// sterile503Body is the exact, internal-detail-free body served in place of
-// Envoy's own generated reason (e.g. "upstream connect error or disconnect/
-// reset before headers. reset reason: connection failure, transport failure
-// reason: ...") whenever a request fails with the UF (upstream connection
-// failure) response flag — see createSterile503LocalReplyConfig.
+// sterile503Body replaces Envoy's generated reason text, which can reveal the
+// connection failure detail, when a request fails with the UF response flag.
 const sterile503Body = `{"error":"Service Unavailable","message":"The upstream service could not be reached."}`
 
-// createSterile503LocalReplyConfig builds a LocalReplyConfig mapping any
-// response carrying Envoy's UF response flag (upstream connection failure —
-// no gateway identity presented where the backend required one, an
-// untrusted/rejected identity, a wrong-host TLS handshake, or a plain
-// connect failure) AND status 503 to a sterile, fixed JSON body. Per
-// error-handling.md, the caller must never see Envoy's own reason text
-// ("reset reason", "transport failure reason", the backend host/port,
-// etc.) — only this generic message. The status code itself is left as
-// Envoy set it.
+// createSterile503LocalReplyConfig maps a 503 carrying Envoy's UF response
+// flag (upstream connection or TLS handshake failure) to a fixed JSON body,
+// so the caller never sees the backend host or failure reason.
 func createSterile503LocalReplyConfig() *hcm.LocalReplyConfig {
 	return &hcm.LocalReplyConfig{
 		Mappers: []*hcm.ResponseMapper{
@@ -1433,10 +1401,8 @@ func createSterile503LocalReplyConfig() *hcm.LocalReplyConfig {
 				Body: &core.DataSource{
 					Specifier: &core.DataSource_InlineString{InlineString: sterile503Body},
 				},
-				// %LOCAL_REPLY_BODY% resolves to exactly the Body above — no
-				// other command operators (path, upstream host, etc.) are
-				// interpolated, and ContentType makes the response
-				// application/json rather than the text/plain default.
+				// No other command operators are interpolated, so nothing
+				// from the request or upstream reaches the body.
 				BodyFormatOverride: &core.SubstitutionFormatString{
 					Format: &core.SubstitutionFormatString_TextFormat{
 						TextFormat: "%LOCAL_REPLY_BODY%",
@@ -1521,13 +1487,8 @@ func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS b
 		NormalizePath:                wrapperspb.Bool(!t.routerConfig.HTTPListener.DisablePathNormalization),
 		MergeSlashes:                 !t.routerConfig.HTTPListener.DisablePathNormalization,
 		PathWithEscapedSlashesAction: convertPathWithEscapedSlashesAction(t.routerConfig.HTTPListener.PathWithEscapedSlashesAction),
-		// SANITIZE_SET (never APPEND_FORWARD): Envoy must overwrite whatever
-		// x-forwarded-client-cert a caller sent, so a forged header can never
-		// survive onto this connection's own value — mtls-auth's evaluation
-		// (and the per-route stripping in createRouteFromRDC for routes whose
-		// chain doesn't include it) is what decides whether a backend ever
-		// sees it. Shared between the HTTP and HTTPS listeners (both call this
-		// function); the WebSub hub's own listener is unaffected.
+		// SANITIZE_SET, never APPEND_FORWARD: a caller-sent
+		// x-forwarded-client-cert must never survive as this connection's.
 		ForwardClientCertDetails: hcm.HttpConnectionManager_SANITIZE_SET,
 		SetCurrentClientCertDetails: &hcm.HttpConnectionManager_SetCurrentClientCertDetails{
 			Subject: wrapperspb.Bool(true),
@@ -1560,14 +1521,6 @@ func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS b
 		manager.Tracing = tracingConfig
 	}
 
-	// Sterile local reply for an upstream connection failure (Envoy's UF
-	// response flag): never let Envoy's own generated body — which can
-	// include the raw connection failure reason ("reset reason:
-	// connection failure, transport failure reason: ...") — reach the
-	// caller. Applied on both the HTTP and HTTPS listener (createListener
-	// is called for each), independent of which upstream/definition
-	// failed. The status code is left as Envoy set it (503 for UF); only
-	// the body is replaced.
 	manager.LocalReplyConfig = createSterile503LocalReplyConfig()
 
 	pbst, err := anypb.New(manager)
@@ -1616,13 +1569,8 @@ func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS b
 			},
 		}
 
-		// The TLS Inspector listener filter peeks the ClientHello before the
-		// transport socket terminates the handshake — without it, Envoy never
-		// populates connection.requested_server_name (the %REQUESTED_SERVER_NAME%
-		// access-log/SNI attribute), regardless of what SNI the client actually
-		// sent. This listener has a single filter chain (no SNI-based filter
-		// chain matching), so the inspector's only job here is making that
-		// attribute observable, not routing.
+		// Without the TLS Inspector, Envoy never populates
+		// connection.requested_server_name. It is not used for routing here.
 		tlsInspectorAny, err := anypb.New(&tlsinspectorv3.TlsInspector{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to marshal TLS inspector listener filter: %w", err)
@@ -2119,10 +2067,7 @@ func (t *Translator) createRoutePerTopic(apiId, apiName, apiVersion, context, me
 }
 
 // createCluster creates an Envoy cluster. tlsOpts/validationSecretName carry a definition's mTLS
-// wiring — see createUpstreamTLSContext; pass nil/"" for a definition with no tls block (this is
-// what the legacy translateAPIConfig path and the exported CreateCluster, used by
-// EventGatewayXDSHooks implementations outside this module, always do — a WebSub hub cluster
-// never carries a tls block, so the error return is always nil on those paths).
+// wiring; pass nil/"" for a definition with no tls block, in which case the error is always nil.
 func (t *Translator) createCluster(
 	name string,
 	upstreamURL *url.URL,
@@ -2455,24 +2400,11 @@ func (t *Translator) createOTELCollectorCluster() *cluster.Cluster {
 	return c
 }
 
-// createUpstreamTLSContext creates an upstream TLS context for secure
-// connections. tlsOpts carries a cluster's mTLS wiring (client identity to
-// present, per-upstream trust, hostname-verification override) and is nil
-// (or has HasTLSBlock false) for a cluster whose upstream definition carries
-// no tls block, in which case behavior is byte-identical to before the tls
-// block existed. validationSecretName is the SDS secret name to use for a
-// non-empty tlsOpts.TrustedCANames (see xds.UpstreamCAValidationContextSecretName);
-// ignored when TrustedCANames is empty.
-//
-// Returns an error when a definition's tls block requests hostname
-// verification (or any verification at all — DisableSslVerification aside)
-// but no trust source can be resolved for it (no trustedCAs, and no gateway
-// certificate store configured): callers must fail translation for that API
-// rather than emit a cluster with a validation-context-free TLS context,
-// which would silently skip the SAN check despite verifyHostName defaulting
-// to true. A definition with no tls block at all keeps its original
-// fallback chain (gateway store, then a per-upstream cert, then a trusted
-// cert path, then Envoy's own system default trust store) and never errors.
+// createUpstreamTLSContext creates an upstream TLS context. tlsOpts carries a
+// cluster's mTLS wiring and is nil for a definition with no tls block.
+// validationSecretName is the SDS secret for a non-empty
+// tlsOpts.TrustedCANames. It errors when a tls block has no trust source, since
+// a context without one would silently skip chain and hostname validation.
 func (t *Translator) createUpstreamTLSContext(certificate []byte, address string, tlsOpts *models.UpstreamTLS, validationSecretName string) (*tlsv3.UpstreamTlsContext, error) {
 	// Create TLS context with base configuration
 	upstreamTLSContext := &tlsv3.UpstreamTlsContext{
@@ -2498,9 +2430,7 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 
 	hasTLSBlock := tlsOpts != nil && tlsOpts.HasTLSBlock
 
-	// Present the named gateway identity, delivered via SDS so its private
-	// key is never inlined into this Cluster resource (see
-	// go-control-plane-xds-security.md directive 3).
+	// Delivered via SDS so the private key is never inlined in the Cluster.
 	if hasTLSBlock && tlsOpts.IdentityName != "" {
 		upstreamTLSContext.CommonTlsContext.TlsCertificateSdsSecretConfigs = []*tlsv3.SdsSecretConfig{
 			{
@@ -2515,9 +2445,6 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 		}
 	}
 
-	// A tls block's own verifyHostName (default true) overrides the
-	// router-wide default only for a cluster whose definition actually
-	// carries one.
 	effectiveVerifyHostName := t.routerConfig.Upstream.TLS.VerifyHostName
 	if hasTLSBlock {
 		effectiveVerifyHostName = tlsOpts.VerifyHostName
@@ -2526,26 +2453,10 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 	// Configure SSL verification unless disabled
 	if !t.routerConfig.Upstream.TLS.DisableSslVerification {
 		// Priority order for trusted CA certificates:
-		// 1. Per-upstream trust (tls.trustedCAs set) - replaces the gateway
-		//    bundle for this one definition only, via its own SDS secret.
-		// 2. A tls block with no trustedCAs and an empty gateway trust
-		//    bundle has no trust source at all — this is an error (see
-		//    below), never a cluster with no validation context.
-		// 3. SDS secret reference (if cert store is available) - Uses
-		//    dynamic secret discovery. Reached both by a tls-block
-		//    definition falling back to the gateway-wide bundle and by a
-		//    definition with no tls block at all (the original, pre-mTLS
-		//    behavior).
-		// 4. Certificate parameter — a per-endpoint trust override resolved
-		//    from upstreamCerts (processEndpoint: keyed by the endpoint's own
-		//    URL, or constants.DefaultCertificateKey as a fallback) and
-		//    passed in as certificate. Only reachable when there is no tls
-		//    block, since case 2 above already errors a tls-block definition
-		//    with no certStore rather than falling through to this.
-		// 5. Configured trusted cert path (system certs only) — same
-		//    tls-block exclusion as above.
-		// 6. If none provided, Envoy falls back to system default trust
-		//    store — same tls-block exclusion as above.
+		// Trust source, in order: per-upstream trustedCAs; an error for a tls
+		// block with no trust source; the gateway bundle via SDS; the
+		// per-endpoint certificate; the trusted cert path; Envoy's system
+		// store. The last three apply only without a tls block.
 		switch {
 		case hasTLSBlock && len(tlsOpts.TrustedCANames) > 0 && validationSecretName != "":
 			sdsConfig := &core.ConfigSource{
@@ -2568,12 +2479,8 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 				slog.String("secret_name", validationSecretName))
 
 		case hasTLSBlock && (t.certStore == nil || len(t.certStore.GetCombinedCertificates()) == 0):
-			// No per-upstream trustedCAs and an empty gateway trust bundle:
-			// there is no trust source to validate this backend against.
-			// Emitting a cluster with no trusted authority would skip chain
-			// validation, and Envoy refuses a hostname check without one, so
-			// fail this API's translation instead (the caller excludes just
-			// this API from the snapshot; see translateRuntimeConfig).
+			// A cluster with no trusted authority would skip chain validation,
+			// so fail this API's translation instead.
 			return nil, fmt.Errorf(
 				"upstream %q: tls block requires a trust source (trustedCAs, or at least one upstream certificate in the gateway bundle) but none is configured",
 				address)
@@ -2594,8 +2501,6 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 			// ("sds_cluster") that duplicated xds_cluster's host:port and
 			// required this process to embed gateway-runtime-local file
 			// paths -- removed in favor of this ADS-based reference.
-			// Reached by both a tls-block definition falling back to the
-			// gateway-wide bundle and a definition with no tls block at all.
 			sdsConfig := &core.ConfigSource{
 				ResourceApiVersion: core.ApiVersion_V3,
 				ConfigSourceSpecifier: &core.ConfigSource_Ads{
@@ -2619,9 +2524,7 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 				slog.String("secret_name", SecretNameUpstreamCA))
 
 		case len(certificate) > 0:
-			// Use per-upstream certificate if provided. Only reachable for
-			// a definition with no tls block (or DisableSslVerification):
-			// the hasTLSBlock branches above already resolved or errored.
+			// Use per-upstream certificate if provided.
 			upstreamTLSContext.CommonTlsContext.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContext{
 				ValidationContext: &tlsv3.CertificateValidationContext{
 					TrustedCa: &core.DataSource{
@@ -2633,7 +2536,7 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 			}
 
 		case t.routerConfig.Upstream.TLS.TrustedCertPath != "":
-			// Fall back to system cert path. Same tls-block exclusion as above.
+			// Fall back to system cert path.
 			upstreamTLSContext.CommonTlsContext.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContext{
 				ValidationContext: &tlsv3.CertificateValidationContext{
 					TrustedCa: &core.DataSource{
@@ -2645,13 +2548,8 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 			}
 		}
 
-		// Add hostname verification if enabled (the tls block's own
-		// verifyHostName, when present, overrides the router-wide default —
-		// see effectiveVerifyHostName above). Independent of which branch
-		// above set the validation context — every branch that can be
-		// reached when hasTLSBlock is true produces a CombinedValidationContext,
-		// so there is no remaining path where verifyHostName silently does
-		// nothing.
+		// Every branch reachable with a tls block sets a
+		// CombinedValidationContext, so verifyHostName always takes effect.
 		if effectiveVerifyHostName {
 			sanType := tlsv3.SubjectAltNameMatcher_DNS
 			if isIP {
@@ -2685,26 +2583,10 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 	return upstreamTLSContext, nil
 }
 
-// SnapshotReferencesSDSSecret reports whether any cluster OR listener in
-// this snapshot references the SDS secret named secretName — as a cluster's
-// upstream CombinedValidationContext (SecretNameUpstreamCA, or a
-// per-upstream upstream_ca:<handle>:<definition> secret), a cluster's
-// upstream TlsCertificateSdsSecretConfigs entry (a gateway_identity:<name>
-// secret), a listener's downstream ValidationContextSdsSecretConfig
-// (SecretNameDownstreamClientCA), or a listener's
-// TlsCertificateSdsSecretConfigs entry (SecretNameDownstreamListenerCert).
-// Envoy only issues a watch for the
-// Secret type URL once a Cluster or Listener it has actually accepted
-// references that secret name, so the snapshot manager uses this to decide
-// whether including a given Secret resource in a snapshot version is
-// warranted, rather than pushing every known secret unconditionally and
-// having Envoy log "Ignoring unwatched type URL ... Secret" for any name
-// nothing currently references.
-//
-// This generalises the original cluster-only check (formerly
-// ClusterResourcesReferenceUpstreamCASecret) to also cover listeners, since
-// the downstream_client_ca and downstream_listener_cert secrets are
-// referenced by a Listener's DownstreamTlsContext, never a Cluster.
+// SnapshotReferencesSDSSecret reports whether any cluster or listener
+// references the SDS secret named secretName, as a validation context or a
+// TLS certificate. Envoy watches only referenced secrets, so an unreferenced
+// one is left out of the snapshot.
 func SnapshotReferencesSDSSecret(clusters, listeners []types.Resource, secretName string) bool {
 	for _, res := range clusters {
 		c, ok := res.(*cluster.Cluster)
@@ -2765,27 +2647,10 @@ func SnapshotReferencesSDSSecret(clusters, listeners []types.Resource, secretNam
 }
 
 // createDownstreamTLSContext creates a downstream TLS context for HTTPS
-// listeners. The listener's own certificate/key are never inlined — both are
-// delivered via SDS (SecretNameDownstreamListenerCert), so the LDS resource
-// itself never contains private key material (see
-// go-control-plane-xds-security.md directive 3, applied to the downstream
-// listener the same way it already applied to upstream secrets).
-//
-// requireDownstreamClientCA is true precisely when at least one deployed API
-// attaches mtls-auth (computed once per TranslateConfigs call, from every
-// route chain being translated). When true, the listener additionally
-// requests (but does not require) a client certificate, and Envoy validates
-// whatever is presented against the client-CA pool via SDS
-// (SecretNameDownstreamClientCA), reporting the verdict on the connection
-// (connection.peer_certificate_valid and friends) rather than acting on it
-// itself: RequireClientCertificate stays false, so the listener never closes
-// a connection over that verdict — no certificate, an untrusted/expired/
-// self-signed one, all reach the policy chain the same way. mtls-auth is
-// what turns that verdict into an HTTP outcome: it denies on a false
-// verdict, and on a true one additionally applies the API's own accept list
-// (which authority, which SANs/thumbprint) before authenticating the
-// caller. There is no router-config switch for any of this: the listener's
-// behavior is entirely derived from what's deployed.
+// listeners. The certificate and key come via SDS so the Listener never
+// carries private key material. When requireDownstreamClientCA is true the
+// listener requests a client certificate and validates it against the
+// client-CA pool, leaving the verdict for mtls-auth to act on.
 func (t *Translator) createDownstreamTLSContext(requireDownstreamClientCA bool) (*tlsv3.DownstreamTlsContext, error) {
 	// Parse cipher suites
 	var cipherSuites []string
@@ -2837,9 +2702,8 @@ func (t *Translator) createDownstreamTLSContext(requireDownstreamClientCA bool) 
 				SdsConfig: sdsConfigSource,
 			},
 		}
-		// Request, never require: a caller presenting no certificate (or an
-		// untrusted/expired/self-signed one) must still reach mtls-auth's own
-		// evaluation rather than have the connection closed underneath it.
+		// Request, never require: a caller with no or a bad certificate must
+		// still reach mtls-auth rather than have the connection closed.
 		downstreamTLSContext.RequireClientCertificate = wrapperspb.Bool(false)
 	}
 
@@ -2847,10 +2711,8 @@ func (t *Translator) createDownstreamTLSContext(requireDownstreamClientCA bool) 
 }
 
 // configAttachesMTLSAuth reports whether cfg's RestAPI representation
-// attaches mtls-auth at API level or on any operation. Mirrors the
-// cfg.Configuration.(api.RestAPI) pattern used by translateAPIConfig: every
-// non-RestAPI-shaped config (nothing has rehydrated it into api.RestAPI yet)
-// never matches.
+// attaches mtls-auth at API level or on any operation. A config that is not
+// an api.RestAPI never matches.
 func configAttachesMTLSAuth(cfg *models.StoredConfig) bool {
 	restCfg, ok := cfg.Configuration.(api.RestAPI)
 	if !ok {
@@ -2879,12 +2741,8 @@ func policiesAttachMTLSAuth(policies *[]api.Policy) bool {
 	return false
 }
 
-// xfccHeaderName is the forwarded-client-certificate header createListener's
-// SetCurrentClientCertDetails populates on the shared HTTP/HTTPS listener.
-// Stripped per route (see createRouteFromRDC) on every route whose own
-// resolved policy chain doesn't contain mtls-auth, so a backend with no
-// mtls-auth policy to evaluate it never receives it — regardless of what a
-// caller sent, since SANITIZE_SET already overwrites that.
+// xfccHeaderName is the forwarded-client-certificate header Envoy sets on the
+// HTTP and HTTPS listeners.
 const xfccHeaderName = "x-forwarded-client-cert"
 
 // stripClientCertificateHeaders removes both certificate-bearing headers
@@ -2903,9 +2761,8 @@ func (t *Translator) stripRelayedCertificateHeader(r *route.Route) {
 	}
 }
 
-// chainAttachesMTLSAuth reports whether a route's own resolved policy chain
-// (rdc.PolicyChains[routeKey]) contains mtls-auth. A nil chain — no chain was
-// built for this route — is treated the same as one that doesn't attach it.
+// chainAttachesMTLSAuth reports whether a route's policy chain contains
+// mtls-auth. A nil chain does not.
 func chainAttachesMTLSAuth(chain *models.PolicyChain) bool {
 	if chain == nil {
 		return false
@@ -2949,8 +2806,7 @@ func (t *Translator) parseCipherSuites(ciphers string) []string {
 
 // processEndpoint creates locality load endpoints for the given upstream URL and returns both
 // endpoints and transport socket match if TLS is enabled. tlsOpts/validationSecretName carry a
-// cluster's mTLS wiring (client identity to present, per-upstream trust, hostname-verification
-// override) — see createUpstreamTLSContext; pass nil/"" for a definition with no tls block.
+// cluster's mTLS wiring; pass nil/"" for a definition with no tls block.
 func (t *Translator) processEndpoint(
 	upstreamURL *url.URL,
 	upstreamCerts map[string][]byte,

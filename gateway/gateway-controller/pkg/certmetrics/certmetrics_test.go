@@ -172,9 +172,7 @@ func TestSweep_LogsOneWarnPerExpiringCertificate(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 
-	// A context already cancelled means Sweep runs once synchronously (the
-	// unconditional run before entering its ticker loop) and then returns
-	// immediately, without needing a goroutine or a real 24h wait.
+	// With the context already cancelled, Sweep runs once and returns.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	Sweep(ctx, store, log)

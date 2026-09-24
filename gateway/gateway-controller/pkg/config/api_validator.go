@@ -40,8 +40,7 @@ type APIValidator struct {
 	// policyValidator validates policy references and parameters
 	policyValidator *PolicyValidator
 	// upstreamTLSValidator validates the tls block on upstreamDefinitions
-	// entries. May be nil (e.g. some unit tests), in which case tls-block
-	// validation is skipped entirely.
+	// entries. When nil, tls-block validation is skipped.
 	upstreamTLSValidator *UpstreamTLSValidator
 }
 

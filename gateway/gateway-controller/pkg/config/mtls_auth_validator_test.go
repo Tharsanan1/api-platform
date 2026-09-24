@@ -128,8 +128,7 @@ func hasWarning(warnings []clientca.Warning, code, field string) bool {
 	return false
 }
 
-// ============ ValidateRestAPI: table-driven cases mirroring the accept-list
-// rejection scenarios ============
+// ============ ValidateRestAPI: accept-list rejections ============
 
 func TestMtlsAuthValidator_ValidateRestAPI_AcceptListRejections(t *testing.T) {
 	pool := func() *fakeMtlsCertStore {
@@ -676,10 +675,8 @@ func TestValidateMTLSStartupInvariant_NoMTLSConfigs_NoError(t *testing.T) {
 
 // ============ headerTrustAny: the header-relay trust_any relaxation ============
 
-// TestMtlsAuthValidator_ValidateRestAPI_HeaderTrustAny_RelaxesHTTPSRequirement
-// guards that a relayed header can legitimately arrive over plaintext from a
-// trusted front proxy: with trust_any true, HTTPS-listener-disabled no
-// longer produces the "requires the HTTPS listener" refusal.
+// With trust_any true, a disabled HTTPS listener does not refuse mtls-auth,
+// since a relayed header can arrive over plaintext.
 func TestMtlsAuthValidator_ValidateRestAPI_HeaderTrustAny_RelaxesHTTPSRequirement(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
 	v := NewMtlsAuthValidator(store, false, true)
@@ -705,9 +702,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_EmitsBypass
 	}
 }
 
-// TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypassWarning
-// guards the off case: headerTrustAny false never emits
-// HEADER_CERT_BYPASS_ACTIVE.
+// headerTrustAny false never emits HEADER_CERT_BYPASS_ACTIVE.
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypassWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
 	v := NewMtlsAuthValidator(store, true, false)
@@ -720,10 +715,8 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypa
 	}
 }
 
-// TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_NoMTLSAuth_NoBypassWarning
-// guards that the warning is attached per mtls-auth deploy response, never
-// unconditionally: an API with no mtls-auth attachment at all must not carry
-// it even though trust_any is true gateway-wide.
+// An API without mtls-auth never carries HEADER_CERT_BYPASS_ACTIVE, even
+// with trust_any true.
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_NoMTLSAuth_NoBypassWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
 	v := NewMtlsAuthValidator(store, true, true)

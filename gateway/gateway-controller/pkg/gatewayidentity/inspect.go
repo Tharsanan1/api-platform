@@ -16,12 +16,9 @@
  * under the License.
  */
 
-// Package gatewayidentity validates uploads to POST/PUT /gateway-identities:
-// a certificate chain (leaf first) plus its private key that the gateway
-// presents to a backend requiring mutual TLS on outbound connections. It
-// mirrors pkg/clientca's shape (FieldError/Warning, sterile error messages
-// that never echo uploaded bytes) but validates a private-key-bearing
-// identity rather than a bare certificate authority.
+// Package gatewayidentity validates a gateway identity upload: a certificate
+// chain, leaf first, and the private key the gateway presents to a backend
+// requiring mutual TLS. Error messages never echo uploaded bytes.
 package gatewayidentity
 
 import (
@@ -69,13 +66,11 @@ type Warning struct {
 }
 
 // Bundle is the result of successfully inspecting an uploaded certificate
-// chain + private key pair.
+// chain and private key.
 type Bundle struct {
-	// Leaf is the first certificate in the chain (the identity presented on
-	// the wire).
+	// Leaf is the first certificate in the chain, presented on the wire.
 	Leaf *x509.Certificate
-	// Chain holds every certificate in the uploaded body, in order (leaf
-	// first).
+	// Chain holds every certificate in the body, leaf first.
 	Chain []*x509.Certificate
 	// PrivateKey is the parsed, unencrypted private key.
 	PrivateKey crypto.Signer
@@ -85,11 +80,9 @@ type Bundle struct {
 	Warnings []Warning
 }
 
-// ParseChain decodes every CERTIFICATE PEM block in data, in order (leaf
-// first), with no expiry check — used by read paths (listing, referential-
-// integrity checks) where an already-stored identity must still display
-// even if it has since expired. On failure the returned error is always a
-// *FieldError with Field set to "certificate".
+// ParseChain decodes every CERTIFICATE PEM block in data, leaf first, with no
+// expiry check so a stored identity still lists after it expires. Errors are
+// a *FieldError for "certificate".
 func ParseChain(pemData []byte) ([]*x509.Certificate, error) {
 	rest := []byte(pemData)
 	var chain []*x509.Certificate
@@ -115,10 +108,8 @@ func ParseChain(pemData []byte) ([]*x509.Certificate, error) {
 }
 
 // InspectCertificateChain parses and validates an uploaded PEM certificate
-// chain (leaf first, optionally followed by intermediates). now is the point
-// in time expiry is evaluated against (normally time.Now(), passed
-// explicitly for testability). On failure the returned error is always a
-// *FieldError with Field set to "certificate".
+// chain, leaf first, evaluating expiry at now. Errors are a *FieldError for
+// "certificate".
 func InspectCertificateChain(pemData []byte, now time.Time) ([]*x509.Certificate, error) {
 	chain, err := ParseChain(pemData)
 	if err != nil {
@@ -136,11 +127,9 @@ func InspectCertificateChain(pemData []byte, now time.Time) ([]*x509.Certificate
 	return chain, nil
 }
 
-// InspectPrivateKey parses and validates an uploaded PEM private key,
-// rejecting passphrase-protected keys outright (this gateway never prompts
-// for or stores a passphrase — the key itself is encrypted at rest instead).
-// Supports RSA/ECDSA/Ed25519 in PKCS#8, PKCS#1 (RSA) or SEC1 (EC) form. On
-// failure the returned error is always a *FieldError with Field set to
+// InspectPrivateKey parses an uploaded RSA, ECDSA or Ed25519 PEM private key
+// in PKCS#8, PKCS#1 or SEC1 form. Passphrase-protected keys are rejected,
+// since the gateway never stores a passphrase. Errors are a *FieldError for
 // "privateKey".
 func InspectPrivateKey(pemData []byte) (crypto.Signer, string, error) {
 	block, _ := pem.Decode(pemData)
@@ -151,8 +140,7 @@ func InspectPrivateKey(pemData []byte) (crypto.Signer, string, error) {
 	if block.Type == "ENCRYPTED PRIVATE KEY" {
 		return nil, "", &FieldError{Field: fieldPrivateKey, Message: msgPassphraseKey}
 	}
-	// Legacy OpenSSL-style encrypted PEM (RSA/EC PRIVATE KEY with a
-	// "Proc-Type: 4,ENCRYPTED" header) — reject before attempting to parse.
+	// OpenSSL-style encrypted PEM carries a "Proc-Type: 4,ENCRYPTED" header.
 	if procType, ok := block.Headers["Proc-Type"]; ok && strings.Contains(procType, "ENCRYPTED") {
 		return nil, "", &FieldError{Field: fieldPrivateKey, Message: msgPassphraseKey}
 	}
@@ -220,8 +208,7 @@ func keyMatchesLeaf(leaf *x509.Certificate, priv crypto.Signer) bool {
 
 // ClientAuthWarning returns an IDENTITY_NO_CLIENTAUTH_EKU warning when leaf
 // carries an ExtKeyUsage extension that does not include clientAuth or
-// "any". A leaf with no ExtKeyUsage extension at all returns nil — an
-// absent EKU imposes no restriction, so there is nothing to warn about.
+// "any". An absent extension imposes no restriction and returns nil.
 func ClientAuthWarning(leaf *x509.Certificate) *Warning {
 	if len(leaf.ExtKeyUsage) == 0 && len(leaf.UnknownExtKeyUsage) == 0 {
 		return nil
@@ -238,10 +225,9 @@ func ClientAuthWarning(leaf *x509.Certificate) *Warning {
 	}
 }
 
-// Inspect validates an uploaded certificate chain + private key pair as a
-// unit: parses both, rejects an expired or passphrase-protected identity,
-// and confirms the key matches the leaf's public key. now is the point in
-// time expiry is evaluated against.
+// Inspect validates an uploaded certificate chain and private key as a unit,
+// rejecting an expired or passphrase-protected identity and a key that does
+// not match the leaf. Expiry is evaluated at now.
 func Inspect(certPEM, keyPEM []byte, now time.Time) (*Bundle, error) {
 	chain, err := InspectCertificateChain(certPEM, now)
 	if err != nil {

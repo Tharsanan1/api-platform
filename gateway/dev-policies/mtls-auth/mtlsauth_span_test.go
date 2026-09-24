@@ -33,11 +33,9 @@ import (
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
-// callWithRecordedSpan runs OnRequestHeaders with a real, recording span in
-// its context (as the executor's per-policy span would be — see
-// gateway-runtime/policy-engine/internal/executor/chain.go) and returns the
-// resulting action plus that span's final attribute set, so a test can
-// assert exactly what this policy recorded for the request.
+// callWithRecordedSpan runs OnRequestHeaders with a recording span in its
+// context, as the executor's per-policy span would be, and returns the action
+// and the span's final attributes.
 func callWithRecordedSpan(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderContext) (policy.RequestHeaderAction, []attribute.KeyValue) {
 	t.Helper()
 	sr := tracetest.NewSpanRecorder()
@@ -84,9 +82,8 @@ func requireAttrAbsent(t *testing.T, attrs []attribute.KeyValue, key string) {
 	}
 }
 
-// requireNoPEMLeaked scans every attribute value's string form (regardless
-// of type) for PEM armor or the literal certificate content this policy must
-// never expose on a span.
+// requireNoPEMLeaked fails if any attribute value holds PEM armor or the
+// certificate content.
 func requireNoPEMLeaked(t *testing.T, attrs []attribute.KeyValue) {
 	t.Helper()
 	for _, a := range attrs {
@@ -95,8 +92,6 @@ func requireNoPEMLeaked(t *testing.T, attrs []attribute.KeyValue) {
 		}
 	}
 }
-
-// ─── Span attributes: allow ───────────────────────────────────────────────────
 
 func TestMtlsAuthPolicy_SpanAttributes_Allow(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
@@ -131,8 +126,6 @@ func TestMtlsAuthPolicy_SpanAttributes_Allow(t *testing.T) {
 	}
 	requireNoPEMLeaked(t, attrs)
 }
-
-// ─── Span attributes: every deny reason ──────────────────────────────────────
 
 func TestMtlsAuthPolicy_SpanAttributes_DenyReasons(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
@@ -236,8 +229,6 @@ func TestMtlsAuthPolicy_SpanAttributes_DenyReasons(t *testing.T) {
 	}
 }
 
-// ─── Span attributes: SAN mismatch and thumbprint mismatch reasons ──────────
-
 func TestMtlsAuthPolicy_SpanAttributes_SANAndThumbprintMismatch(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	leaf := newLeaf(t, rootA, "client-valid", certOpts{})
@@ -259,8 +250,6 @@ func TestMtlsAuthPolicy_SpanAttributes_SANAndThumbprintMismatch(t *testing.T) {
 		requireNoPEMLeaked(t, attrs)
 	})
 }
-
-// ─── Span attributes: header source with relayed_by, and bypass ─────────────
 
 func TestMtlsAuthPolicy_SpanAttributes_HeaderSourceAndBypass(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
@@ -308,12 +297,9 @@ func TestMtlsAuthPolicy_SpanAttributes_HeaderSourceAndBypass(t *testing.T) {
 	})
 }
 
-// ─── Most specific accept-list rejection reason across several entries ──────
-
-// TestMtlsAuthPolicy_Evaluate_MostSpecificReasonAcrossEntries locks in that
-// evaluateAcceptList reports the single most specific rejection reached
-// across every entry, not the first or last one tried, and that this holds
-// regardless of which order the entries are declared in.
+// TestMtlsAuthPolicy_Evaluate_MostSpecificReasonAcrossEntries guards that a
+// deny reports the most specific rejection across all entries, whatever
+// order they are declared in.
 func TestMtlsAuthPolicy_Evaluate_MostSpecificReasonAcrossEntries(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	rootX := newRootCA(t, "Unrelated Root CA")
@@ -348,13 +334,8 @@ func TestMtlsAuthPolicy_Evaluate_MostSpecificReasonAcrossEntries(t *testing.T) {
 	})
 }
 
-// ─── Log capture ─────────────────────────────────────────────────────────────
-
-// captureSlog redirects the process-wide default slog logger to a buffer for
-// the duration of fn, so a test can assert on WARN/Debug output without
-// depending on log level filtering or a test-specific logger (this policy
-// always logs via the package-level slog functions, matching every other dev
-// policy in this repo).
+// captureSlog redirects the default slog logger to a buffer for the duration
+// of fn, since this policy logs through the package-level slog functions.
 func captureSlog(t *testing.T, fn func()) string {
 	t.Helper()
 	var buf bytes.Buffer

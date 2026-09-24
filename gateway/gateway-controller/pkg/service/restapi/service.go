@@ -212,22 +212,16 @@ func (s *RestAPIService) Create(params CreateParams) (*CreateResult, error) {
 	}, nil
 }
 
-// ResolveMtlsAuthForResponse computes the mtls-auth warnings and the
-// resolved/echoed `accept` list for a successful deploy response, without
-// mutating what was (or will be) persisted — see
-// config.MtlsAuthValidator.ResolveMtlsAuthForResponse. Callers must only
-// invoke this after the configuration has already passed deploy-time
-// validation (Create/Update having returned no error).
+// ResolveMtlsAuthForResponse computes the mtls-auth warnings and accept-list
+// echo of a successful deploy without changing what is persisted.
 func (s *RestAPIService) ResolveMtlsAuthForResponse(cfg api.RestAPI) (api.RestAPI, []clientca.Warning) {
 	v := config.NewMtlsAuthValidator(s.db, s.routerConfig.HTTPSEnabled,
 		s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny)
 	return v.ResolveMtlsAuthForResponse(cfg)
 }
 
-// ResolveUpstreamTLSWarnings computes TLS_VERIFY_HOSTNAME_DISABLED and
-// TLS_IDENTITY_EXPIRED for every upstreamDefinitions tls block on cfg, for a
-// successful deploy response. Callers must only invoke this after the
-// configuration has already passed deploy-time validation.
+// ResolveUpstreamTLSWarnings computes the tls-block warnings of a successful
+// deploy.
 func (s *RestAPIService) ResolveUpstreamTLSWarnings(cfg api.RestAPI) []clientca.Warning {
 	v := config.NewUpstreamTLSValidator(s.db, s.systemConfig.Router.Upstream.TLS.DisableSslVerification)
 	return v.ResolveWarnings(cfg)

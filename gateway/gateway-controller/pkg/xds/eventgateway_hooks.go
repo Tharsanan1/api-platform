@@ -92,10 +92,8 @@ func (t *Translator) CreateRoutePerTopic(apiId, apiName, apiVersion, context, me
 }
 
 // CreateCluster exposes createCluster for use by EventGatewayXDSHooks
-// implementations. This exported signature is intentionally unchanged by
-// createCluster's tlsOpts/error addition: a WebSub hub cluster never carries
-// a tls block, so calling with nil tlsOpts means the error return is always
-// nil here — nothing outside this module needs to change.
+// implementations. A WebSub hub cluster never carries a tls block, so
+// createCluster cannot fail here.
 func (t *Translator) CreateCluster(name string, upstreamURL *url.URL, upstreamCerts map[string][]byte, connectTimeout *time.Duration) *cluster.Cluster {
 	c, _ := t.createCluster(name, upstreamURL, upstreamCerts, connectTimeout, nil, "")
 	return c
@@ -141,11 +139,8 @@ func (t *Translator) CreateTracingConfig() (*hcm.HttpConnectionManager_Tracing, 
 }
 
 // CreateDownstreamTLSContext exposes createDownstreamTLSContext for use by
-// EventGatewayXDSHooks implementations. The WebSub hub's own internal
-// listener never requests a client certificate — mtls-auth only derives
-// behavior for the main HTTPS listener built by TranslateConfigs/createListener
-// — so this always builds a validation-context-free TLS context, regardless
-// of whether any deployed API attaches mtls-auth.
+// EventGatewayXDSHooks implementations. The WebSub hub listener never
+// requests a client certificate.
 func (t *Translator) CreateDownstreamTLSContext() (*tlsv3.DownstreamTlsContext, error) {
 	return t.createDownstreamTLSContext(false)
 }

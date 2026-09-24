@@ -332,10 +332,7 @@ type ServerConfig struct {
 	MaxHeaderBytes    int           `koanf:"max_header_bytes"`
 
 	// MaxCertificateUploadBytes bounds the request body of POST /certificates
-	// and PUT /certificates/{id}. A certificate chain is a few KB, so the
-	// default covers any legitimate upload while stopping an oversized body
-	// from being read into memory. Must be non-zero -- defaultConfig supplies
-	// a safe default.
+	// and PUT /certificates/{id}. Must be non-zero.
 	MaxCertificateUploadBytes int64 `koanf:"max_certificate_upload_bytes"`
 }
 
@@ -696,44 +693,31 @@ type DownstreamTLS struct {
 	EcdhCurves string `koanf:"ecdh_curves"`
 
 	// ClientCertificateHeader configures the header carrying a client
-	// certificate relayed by a front proxy that terminates TLS ahead of this
-	// gateway. See mtls-header-relay/bypass/forward features and
-	// ClientCertificateHeader's own doc comment.
+	// certificate relayed by a front proxy that terminates TLS.
 	ClientCertificateHeader ClientCertificateHeader `koanf:"client_certificate_header"`
 }
 
-// ClientCertificateHeader configures how the mtls-auth policy treats a
-// client certificate relayed via an HTTP header (e.g. from a load balancer
-// that terminates TLS) rather than presented directly on the mTLS
-// connection. By default, the header is believed only when the connection
-// itself authenticated as a role: relay pool entry (published to the policy
-// engine by utils.ClientAuthorityPublisher); TrustAny and ForwardToBackend
-// are both narrow, off-by-default opt-ins.
+// ClientCertificateHeader configures how the mtls-auth policy treats a client
+// certificate relayed in an HTTP header. By default the header is believed
+// only when the connection authenticated as a role: relay pool entry.
 type ClientCertificateHeader struct {
-	// Name is the HTTP header carrying the relayed client certificate (PEM
-	// or base64-encoded PEM). Must be a valid HTTP header token (RFC 7230
-	// tchar), never empty.
+	// Name is the HTTP header carrying the relayed client certificate as PEM
+	// or base64-encoded PEM. It must be a valid HTTP header token.
 	Name string `koanf:"name"`
 
-	// TrustAny, when true, believes the header on ANY connection — the
-	// connection presenting it is never consulted, not even for a role:
-	// relay entry. Only safe when this gateway is reachable from nothing but
-	// a trusted front proxy; every mtls-auth deployment carries a
-	// HEADER_CERT_BYPASS_ACTIVE warning while this is true, and a startup
-	// WARN is logged once. Off by default.
+	// TrustAny believes the header on any connection without consulting the
+	// connection. It is safe only when nothing but a trusted front proxy can
+	// reach this gateway. Off by default.
 	TrustAny bool `koanf:"trust_any"`
 
-	// ForwardToBackend, when true, forwards a header the gateway believed
-	// (evaluated by mtls-auth on this route) to the backend instead of
-	// stripping it. A header the gateway did NOT believe (no relay entry
-	// vouched for it, or the route's own chain never evaluated it) is always
-	// stripped regardless of this setting. Off by default.
+	// ForwardToBackend forwards a header the gateway believed to the backend
+	// instead of stripping it. A header it did not believe is always
+	// stripped. Off by default.
 	ForwardToBackend bool `koanf:"forward_to_backend"`
 }
 
-// httpHeaderTokenPattern matches a single HTTP header field-name token per
-// RFC 7230 section 3.2.6 (tchar+): letters, digits, and
-// "!#$%&'*+-.^_`|~" — no spaces, no separators, no control characters.
+// httpHeaderTokenPattern matches an HTTP header field-name token (RFC 7230
+// tchar).
 var httpHeaderTokenPattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
 
 // DefaultClientCertificateHeaderName is the header a front proxy relays a
@@ -742,10 +726,7 @@ var httpHeaderTokenPattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9
 const DefaultClientCertificateHeaderName = "X-WSO2-CLIENT-CERTIFICATE"
 
 // ValidateClientCertificateHeaderName reports whether name is a valid HTTP
-// header token (RFC 7230 tchar). Config.Validate replaces an empty name with
-// DefaultClientCertificateHeaderName before calling this, so an empty value
-// here is accepted as "not set". Exported so deploy-time and
-// response-warning wiring reuse the same check.
+// header token. An empty name is accepted as not set.
 func ValidateClientCertificateHeaderName(name string) error {
 	if name == "" {
 		return nil
@@ -1832,12 +1813,9 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate the relayed client-certificate header's name unconditionally —
-	// a header-relay/bypass deployment is valid regardless of https_enabled
-	// (trust_any lets the header arrive over plaintext, per go-network-service-hardening.md).
-	// An empty header name means "the default": the router strips this header
-	// on every route that does not evaluate it and the policy reads it by this
-	// exact name, so a blank value would leave the two disagreeing.
+	// Validated regardless of https_enabled, since trust_any lets the header
+	// arrive over plaintext. An empty name becomes the default so the router
+	// and the policy agree on it.
 	if c.Router.DownstreamTLS.ClientCertificateHeader.Name == "" {
 		c.Router.DownstreamTLS.ClientCertificateHeader.Name = DefaultClientCertificateHeaderName
 	}

@@ -57,9 +57,7 @@ type AnalyticsEvent struct {
 }
 
 // RegisterAnalyticsSteps registers all analytics step definitions and
-// returns the AnalyticsSteps instance so another registration function
-// (e.g. RegisterMTLSObservabilitySteps) can reuse its "latest event" lookup
-// rather than re-implementing it against the collector's HTTP API.
+// returns the instance so other step groups can reuse its event lookup.
 func RegisterAnalyticsSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) *AnalyticsSteps {
 	a := &AnalyticsSteps{state: state, httpSteps: httpSteps}
 
@@ -238,11 +236,8 @@ func (a *AnalyticsSteps) theLatestAnalyticsEventShouldHaveRequestURI(expectedURI
 	return nil
 }
 
-// latestEventOrFetch returns the event a previous filtering assertion
-// (theLatestAnalyticsEventShouldHaveRequestURI) already matched this
-// scenario, or fetches the collector's latest event with no filter when
-// none has run yet. Every "the latest analytics event should have ..."
-// assertion shares this fallback rather than each reimplementing it.
+// latestEventOrFetch returns the event matched by an earlier request-URI
+// assertion in this scenario, or the collector's latest event when none ran.
 func (a *AnalyticsSteps) latestEventOrFetch() (*AnalyticsEvent, error) {
 	if a.lastMatchedEvent != nil {
 		return a.lastMatchedEvent, nil

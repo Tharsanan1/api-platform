@@ -67,9 +67,7 @@ type Gauge interface {
 type GaugeVec interface {
 	WithLabelValues(labels ...string) Gauge
 	With(prometheus.Labels) Gauge
-	// Reset removes every series previously set on this vector, so a
-	// subsequent recomputation starts from a clean slate instead of
-	// leaving a stale series for a row that no longer exists.
+	// Reset removes every series set on this vector.
 	Reset()
 }
 

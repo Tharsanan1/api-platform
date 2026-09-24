@@ -113,13 +113,9 @@ func buildResourceResponse(cfg any, status api.ResourceStatus) any {
 	return cfg
 }
 
-// buildRestAPIResourceResponseWithWarnings merges a resolved RestAPI value
-// (the mtls-auth `accept` echo already applied — see
-// config.MtlsAuthValidator.ResolveMtlsAuthForResponse) with the stored
-// config's status block, attaching warnings when there are any. resolvedCfg
-// is expected to be the RESPONSE-ONLY view: it must never be the value that
-// gets persisted, since persisting it would bake the resolved accept list
-// into storage instead of leaving it to keep tracking pool changes.
+// buildRestAPIResourceResponseWithWarnings merges a resolved RestAPI with the
+// stored config's status and any warnings. resolvedCfg must never be
+// persisted, or the accept list would stop tracking pool changes.
 func buildRestAPIResourceResponseWithWarnings(resolvedCfg api.RestAPI, stored *models.StoredConfig, warnings []clientca.Warning) any {
 	status := buildResourceStatus(stored)
 	if len(warnings) > 0 {

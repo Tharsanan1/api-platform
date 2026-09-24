@@ -169,12 +169,6 @@ func TestRequestContexts_DownstreamAccessors(t *testing.T) {
 }
 
 // ─── PeerCertificate ──────────────────────────────────────────────────────────
-//
-// Unlike every other accessor in this file, PeerCertificate has no live-header
-// fallback: a nil return must mean "the gateway asserts nothing", never "fall
-// back to something derived from headers" — inventing a fallback from
-// request-scoped data would let a caller spoof the very connection-level fact
-// this accessor exists to authenticate.
 
 func TestRequestHeaderContext_PeerCertificate(t *testing.T) {
 	t.Run("nil when Downstream nil", func(t *testing.T) {
@@ -197,10 +191,8 @@ func TestRequestHeaderContext_PeerCertificate(t *testing.T) {
 		}
 	})
 	t.Run("never consults headers: a header carrying a forged certificate is ignored without TLS", func(t *testing.T) {
-		// A context with headers set (including a spoofed X-Forwarded-Client-Cert)
-		// but no Downstream.TLS must still return nil — there is no live
-		// equivalent of connection-level TLS state to fall back to, unlike every
-		// other accessor in this file.
+		// Headers carry a forged XFCC value, but without Downstream.TLS the
+		// accessor must still return nil.
 		c := &RequestHeaderContext{
 			Headers: NewHeaders(map[string][]string{
 				"x-forwarded-client-cert": {`Subject="CN=forged";URI=urn:evil:actor`},

@@ -33,11 +33,8 @@ import (
 // Reduced from 2s to 500ms as xDS sync typically completes in <500ms.
 const policyPropagationDelay = 1 * time.Second
 
-// deployedAPINamesContextKey is the TestState.Context key under which every
-// API name this scenario has deployed is recorded (see recordDeployedAPIName
-// and the After-scenario cleanup hook below). Keeping this in TestState.Context
-// rather than a package-level slice means it's automatically scoped and reset
-// per scenario by TestState.Reset(), with no separate Before hook needed here.
+// deployedAPINamesContextKey holds the API names this scenario deployed. It
+// lives in TestState.Context so TestState.Reset clears it per scenario.
 const deployedAPINamesContextKey = "deployedAPINames"
 
 // apiConfigMetadata captures just enough of a RestApi configuration's YAML to
@@ -48,12 +45,9 @@ type apiConfigMetadata struct {
 	} `yaml:"metadata"`
 }
 
-// recordDeployedAPIName best-effort parses the deployed configuration's
-// metadata.name and appends it to this scenario's tracked list, so the
-// After-scenario cleanup hook can delete it regardless of which step pattern
-// or feature deployed it. A body that doesn't parse, or carries no name, is
-// silently skipped: if the configuration didn't parse, nothing was created
-// for this cleanup to worry about either.
+// recordDeployedAPIName records the configuration's metadata.name for
+// end-of-scenario cleanup. A body without a parseable name created nothing,
+// so it is skipped.
 func recordDeployedAPIName(state *TestState, body string) {
 	var cfg apiConfigMetadata
 	if err := yaml.Unmarshal([]byte(body), &cfg); err != nil || cfg.Metadata.Name == "" {
@@ -66,11 +60,8 @@ func recordDeployedAPIName(state *TestState, body string) {
 }
 
 // deployAPIConfiguration POSTs a RestApi configuration to the gateway
-// controller, records its name for end-of-scenario cleanup, and waits out
-// policy propagation when the controller accepted it; a rejected
-// configuration changed nothing, so there is nothing to wait for. Shared by every "deploy" step pattern registered below
-// and by the fixture-values deploy step in steps_mtls.go, so a single
-// implementation is what actually talks to the controller.
+// controller, records its name for cleanup, and waits out policy propagation
+// if the controller accepted it.
 func deployAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, body string) error {
 	recordDeployedAPIName(state, body)
 	httpSteps.SetHeader("Content-Type", "application/yaml")
@@ -93,9 +84,6 @@ func waitForPropagationIfAccepted(httpSteps *steps.HTTPSteps) {
 
 // updateAPIConfiguration PUTs a RestApi configuration to the gateway
 // controller under the given API name and waits out policy propagation.
-// Shared by the plain "I update the API ... with this configuration:" step
-// below and the fixture-values update step in steps_mtls.go, so both go
-// through a single implementation.
 func updateAPIConfiguration(httpSteps *steps.HTTPSteps, apiName, body string) error {
 	httpSteps.SetHeader("Content-Type", "application/yaml")
 	if err := httpSteps.SendPUTToService("gateway-controller", "/rest-apis/"+apiName, &godog.DocString{Content: body}); err != nil {
@@ -105,12 +93,8 @@ func updateAPIConfiguration(httpSteps *steps.HTTPSteps, apiName, body string) er
 	return nil
 }
 
-// cleanupDeployedAPIs deletes every API name this scenario recorded via
-// deployAPIConfiguration, authenticating as admin. Best-effort: a scenario
-// that already deleted its own API explicitly gets a silent 404 here, and a
-// name that never actually got created (e.g. a rejected deploy) is a no-op
-// too — sendRequest only errors on network-layer failures, never on the
-// resulting HTTP status.
+// cleanupDeployedAPIs deletes, as admin, every API this scenario recorded.
+// It is best-effort: an API already deleted or never created just gets a 404.
 func cleanupDeployedAPIs(state *TestState, httpSteps *steps.HTTPSteps) {
 	raw, ok := state.GetContextValue(deployedAPINamesContextKey)
 	if !ok {
@@ -171,13 +155,10 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 		return httpSteps.SendGETToService("gateway-controller", "/rest-apis/"+name)
 	})
 
-	// After-scenario cleanup for the mTLS features only: every API such a
-	// scenario deployed is deleted as admin, before the certificate cleanup
-	// hook runs (this function is registered ahead of RegisterMTLSSteps in
-	// suite_test.go, and godog runs After hooks in registration order), so
-	// an API can never hold a reference to a pool entry being removed. Other
-	// features manage their own APIs and may share one across scenarios, so
-	// they are left alone.
+	// @mtls scenarios delete their APIs here. This hook is registered before
+	// the certificate cleanup hook and godog runs After hooks in registration
+	// order, so no API still references a pool entry being removed. Other
+	// features may share an API across scenarios, so they are left alone.
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
 		if scenarioHasTag(sc, "@mtls") {
 			cleanupDeployedAPIs(state, httpSteps)

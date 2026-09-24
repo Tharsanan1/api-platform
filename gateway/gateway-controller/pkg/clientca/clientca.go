@@ -17,12 +17,9 @@
  */
 
 // Package clientca validates uploads to the client certificate authority
-// pool: the /certificates endpoint's usage=client purpose. A client-CA entry
-// may be a single certificate (an authority or a leaf trusted directly) or a
-// small chain (e.g. an issuing CA together with its root); this package
-// determines the "identity" certificate for such an upload, rejects uploads
-// that don't form a single coherent authority, and surfaces non-fatal
-// warnings (leaf, not-yet-valid, soon-to-expire).
+// pool. An entry is a single certificate or a small chain; the package finds
+// its identity certificate, rejects bodies holding more than one authority
+// and reports non-fatal warnings.
 package clientca
 
 import (
@@ -38,8 +35,7 @@ import (
 const ExpiryWarningHorizon = 30 * 24 * time.Hour
 
 // Warning is a non-fatal finding attached to a bundle or a stored
-// certificate. It is always returned alongside a successful result — it
-// never blocks an upload.
+// certificate. It never blocks an upload.
 type Warning struct {
 	Code    string `json:"code"`
 	Field   string `json:"field"`
@@ -53,7 +49,7 @@ type FieldError struct {
 	Message string
 }
 
-// Error implements the error interface, returning the human-readable message.
+// Error returns the human-readable message.
 func (e *FieldError) Error() string {
 	return e.Message
 }
@@ -65,8 +61,7 @@ type Bundle struct {
 	// certificate.
 	Identity *x509.Certificate
 
-	// Certificates holds every certificate found in the body, in the order
-	// they appeared.
+	// Certificates holds every certificate in the body, in order.
 	Certificates []*x509.Certificate
 
 	// IsLeaf is true when Identity lacks CA:TRUE (BasicConstraints), i.e. it
@@ -74,27 +69,18 @@ type Bundle struct {
 	// as a one-member authority that trusts exactly that certificate.
 	IsLeaf bool
 
-	// Warnings are non-fatal findings about the identity certificate
-	// (leaf, not-yet-valid). Expiry warnings are computed separately by
-	// ExpiryWarning, since they depend on when the bundle is being listed,
-	// not just when it was uploaded.
+	// Warnings are non-fatal findings about the identity certificate. Expiry
+	// is computed separately by ExpiryWarning because it depends on when the
+	// bundle is read.
 	Warnings []Warning
 }
 
-// MsgNotPEMCertificate is the sterile validation message for a
-// certificate/uploaded-value field that failed to parse as a PEM-encoded
-// certificate. Exported so every certificate-content validator in the
-// gateway-controller module (clientca, gatewayidentity, the
-// /certificates upload handler) reports this exact wording, rather than
-// each declaring its own copy of the same string.
+// MsgNotPEMCertificate is the validation message for a value that is not a
+// PEM-encoded certificate, shared by every certificate validator.
 const MsgNotPEMCertificate = "the value is not a PEM-encoded certificate"
 
 const (
-	// CodeClientCAIsLeaf, CodeClientCANotYetValid and CodeCertExpiresSoon are
-	// exported (unlike the field/message constants alongside them) so a
-	// cross-check against the OpenAPI CertificateWarning.code enum can
-	// reference the same values this package actually emits, rather than a
-	// second hardcoded copy of each string.
+	// Exported so tests can check them against the OpenAPI warning enum.
 	CodeClientCAIsLeaf      = "CLIENT_CA_IS_LEAF"
 	CodeClientCANotYetValid = "CLIENT_CA_NOT_YET_VALID"
 	CodeCertExpiresSoon     = "CERT_EXPIRES_SOON"
@@ -105,17 +91,12 @@ const (
 	msgLeafNotAuthority     = "the certificate is not a certificate authority; it is pooled as a one-member authority that trusts exactly this certificate"
 )
 
-// Inspect parses and validates an uploaded PEM body intended for the client
-// certificate authority pool. now is the point in time expiry/validity is
-// evaluated against (normally time.Now(), passed explicitly for testability).
-//
-// On failure the returned error is always a *FieldError with Field set to
-// "certificate". The error message never includes any part of the uploaded
-// body, and callers must not log the body either.
+// Inspect parses and validates an uploaded PEM body for the client authority
+// pool, evaluating validity at now. On failure it returns a *FieldError for
+// "certificate" whose message never includes the body; callers must not log
+// the body either.
 func Inspect(pemData []byte, now time.Time) (*Bundle, error) {
-	// Check for private key material across the WHOLE body before doing any
-	// certificate parsing, so a private key anywhere in the upload is always
-	// reported first regardless of what else is (or isn't) parseable.
+	// A private key anywhere in the body is always reported first.
 	if containsPrivateKeyBlock(pemData) {
 		return nil, &FieldError{Field: fieldCertificate, Message: msgPrivateKeyPresent}
 	}
@@ -132,12 +113,9 @@ func Inspect(pemData []byte, now time.Time) (*Bundle, error) {
 	return inspectBundle(certs, identity, now)
 }
 
-// IdentityCertificate re-derives the identity certificate (the bottom of the
-// chain, per the same rule Inspect uses) for a PEM body that was already
-// accepted into the pool. Unlike Inspect, it does not re-check expiry or
-// produce warnings — it exists for read paths (e.g. listing) where an
-// already-stored certificate must still display even if it has since
-// expired.
+// IdentityCertificate re-derives the identity certificate of a stored PEM
+// body. Unlike Inspect it does not check expiry, so an expired entry still
+// lists.
 func IdentityCertificate(pemData []byte) (*x509.Certificate, error) {
 	certs, err := parseCertificateBlocks(pemData)
 	if err != nil {
@@ -194,8 +172,7 @@ func ExpiryWarning(notAfter, now time.Time) *Warning {
 }
 
 // containsPrivateKeyBlock reports whether any PEM block in data has a type
-// ending in "PRIVATE KEY" (covers "PRIVATE KEY", "RSA PRIVATE KEY",
-// "EC PRIVATE KEY", etc).
+// ending in "PRIVATE KEY".
 func containsPrivateKeyBlock(data []byte) bool {
 	rest := data
 	for {
@@ -211,9 +188,7 @@ func containsPrivateKeyBlock(data []byte) bool {
 }
 
 // parseCertificateBlocks decodes every CERTIFICATE PEM block in data, in
-// order. Any block that fails to parse, or the absence of any CERTIFICATE
-// block at all, is reported as the same sterile error — the caller learns
-// only that the value isn't a usable PEM certificate, not why.
+// order. Every failure yields the same error, which does not say why.
 func parseCertificateBlocks(data []byte) ([]*x509.Certificate, error) {
 	rest := data
 	var certs []*x509.Certificate
@@ -238,14 +213,9 @@ func parseCertificateBlocks(data []byte) ([]*x509.Certificate, error) {
 	return certs, nil
 }
 
-// findIdentity determines the identity certificate of a bundle: the one
-// certificate that is not the issuer of any other certificate in the body
-// (the bottom of the chain). A single certificate trivially passes. For
-// more than one certificate, every certificate must sign or be signed by
-// another certificate in the body (checked via CheckSignatureFrom, never by
-// comparing issuer/subject names) and exactly one certificate may be the
-// bottom of the chain — otherwise the body contains more than one
-// unrelated authority.
+// findIdentity returns the one certificate in the body that signed no other,
+// the bottom of the chain. Relations are checked by signature, never by
+// name, and a body with more than one bottom holds unrelated authorities.
 func findIdentity(certs []*x509.Certificate) (*x509.Certificate, error) {
 	n := len(certs)
 	if n == 1 {
@@ -260,8 +230,7 @@ func findIdentity(certs []*x509.Certificate) (*x509.Certificate, error) {
 			if i == j {
 				continue
 			}
-			// certs[i].CheckSignatureFrom(certs[j]) == nil means certs[j]
-			// (the parent) signed certs[i] (the child).
+			// certs[j] signed certs[i].
 			if certs[i].CheckSignatureFrom(certs[j]) == nil {
 				isSignedByAnother[i] = true
 				isIssuerOfAnother[j] = true
@@ -272,7 +241,6 @@ func findIdentity(certs []*x509.Certificate) (*x509.Certificate, error) {
 	var bottom []*x509.Certificate
 	for i := 0; i < n; i++ {
 		if !isSignedByAnother[i] && !isIssuerOfAnother[i] {
-			// Unrelated to every other certificate in the body.
 			return nil, unrelatedAuthoritiesError()
 		}
 		if !isIssuerOfAnother[i] {

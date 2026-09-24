@@ -38,14 +38,12 @@ import (
 	"github.com/wso2/api-platform/httpkit/httputil"
 )
 
-// tlsTestDialTimeout bounds the whole probe (dial + handshake + canary
-// read) so a slow/unreachable backend cannot hold this handler open
-// indefinitely.
+// tlsTestDialTimeout bounds the whole probe so a slow backend cannot hold the
+// handler open.
 const tlsTestDialTimeout = 10 * time.Second
 
-// tlsTestCanaryReadTimeout is the short post-handshake read used to detect
-// a TLS 1.3 server rejecting the client certificate after the handshake
-// completes on the client's side (see TestUpstreamTLS's doc comment).
+// tlsTestCanaryReadTimeout is the post-handshake read that detects a TLS 1.3
+// server rejecting the client certificate after the handshake completes.
 const tlsTestCanaryReadTimeout = 500 * time.Millisecond
 
 // Result values for UpstreamTLSTestResponse.result.
@@ -57,10 +55,8 @@ const (
 	tlsTestResultConnectFailed        = "CONNECT_FAILED"
 )
 
-// upstreamTLSTestBackend mirrors api.UpstreamTLSTestBackend, built directly
-// (rather than via the generated type) so every field is always present
-// even when the generated type's pointer/omitempty fields would otherwise
-// hide a false/zero value.
+// upstreamTLSTestBackend mirrors api.UpstreamTLSTestBackend so that false and
+// zero values are always present in the response.
 type upstreamTLSTestBackend struct {
 	Subject         string `json:"subject"`
 	Issuer          string `json:"issuer"`
@@ -78,11 +74,9 @@ type upstreamTLSTestResponse struct {
 	Detail            *string                 `json:"detail"`
 }
 
-// TestUpstreamTLS implements POST /rest-apis/{id}/upstreams/{name}/tls-test:
-// dial the deployed upstream definition's first target once with the
-// identity/trust/hostname-verification it is configured with, complete (or
-// fail) the TLS handshake, and report the outcome. No HTTP request is made.
-// Always responds 200 — the outcome is carried in the body's `result` field.
+// TestUpstreamTLS handshakes once with an upstream definition's first target
+// using its configured TLS settings and reports the outcome in the result
+// field of a 200. No HTTP request is made.
 func (s *APIServer) TestUpstreamTLS(w http.ResponseWriter, r *http.Request, id string, name string) {
 	log := middleware.GetLogger(r, s.logger)
 
@@ -125,12 +119,8 @@ func (s *APIServer) TestUpstreamTLS(w http.ResponseWriter, r *http.Request, id s
 		identityName, trustedCANames, _ = config.ResolveUpstreamTLSFromParams(*def.Tls)
 	}
 
-	// Resolve the identity to a ready-to-present certificate before dialing
-	// anything: a load failure (missing row, undecryptable ciphertext,
-	// malformed cert/key) must refuse the probe outright rather than dial
-	// without presenting any client certificate, which would misreport a
-	// BACKEND_REJECTED_IDENTITY/CONNECT_FAILED result that actually
-	// reflects a broken identity on this side, not the backend's behavior.
+	// An identity that fails to load refuses the probe, so a broken identity
+	// here is never misreported as the backend's rejection.
 	var identityCert *tls.Certificate
 	if identityName != "" {
 		cert, err := s.loadIdentityCertificateForProbe(identityName)
@@ -162,13 +152,8 @@ func (s *APIServer) TestUpstreamTLS(w http.ResponseWriter, r *http.Request, id s
 	httputil.WriteJSON(w, http.StatusOK, resp)
 }
 
-// loadIdentityCertificateForProbe resolves a gateway identity by name (a
-// certificates row with usage: identity) to a ready-to-present
-// tls.Certificate for the tls-test probe. Returns an error when the row
-// cannot be found, its private key cannot be decrypted, or the resulting
-// certificate/key pair fails to parse — the caller (TestUpstreamTLS) must
-// refuse the whole probe (HTTP 500) rather than silently proceed without a
-// client certificate.
+// loadIdentityCertificateForProbe resolves a gateway identity by name to a
+// tls.Certificate for the probe.
 func (s *APIServer) loadIdentityCertificateForProbe(identityName string) (*tls.Certificate, error) {
 	translator := s.snapshotManager.GetTranslator()
 	if translator == nil || translator.GetCertStore() == nil {
@@ -185,14 +170,9 @@ func (s *APIServer) loadIdentityCertificateForProbe(identityName string) (*tls.C
 	return &cert, nil
 }
 
-// probeUpstreamTLS performs the actual dial/handshake/classification. It
-// never returns an error itself — every failure mode is expressed as a
-// (result, detail) pair, per the sterile-503/generic-rejection posture used
-// elsewhere in this handler package: the caller learns the classification,
-// never gateway-internal detail beyond the raw TLS error string. identityCert
-// is the already-resolved client certificate to present, or nil when the
-// definition names none — resolution (and its failure mode) happens in the
-// caller (TestUpstreamTLS), never here.
+// probeUpstreamTLS dials, handshakes and classifies the outcome as a
+// (result, detail) pair. identityCert is the client certificate to present,
+// or nil for none.
 func (s *APIServer) probeUpstreamTLS(
 	ctx context.Context,
 	target string,
@@ -212,14 +192,8 @@ func (s *APIServer) probeUpstreamTLS(
 	ctx, cancel := context.WithTimeout(ctx, tlsTestDialTimeout)
 	defer cancel()
 
-	// The target is an operator-configured backend, normally meant to be
-	// private (a service-mesh hostname, an RFC 1918 address) — the same
-	// SSRF posture as any other upstream dial, applied here since this
-	// process (not Envoy) is the one making the connection. Resolution and
-	// connection happen in one step (config.UpstreamSSRFDialContext, the
-	// one shared SSRF dialer for this codebase — see ssrf-prevention.md
-	// directive 6), closing the DNS-rebinding window between a check and
-	// the actual dial.
+	// This process, not Envoy, makes the connection, so it goes through the
+	// shared SSRF dialer.
 	dial := config.UpstreamSSRFDialContext(tlsTestDialTimeout)
 	conn, err := dial(ctx, "tcp", net.JoinHostPort(host, port))
 	if err != nil {
@@ -229,11 +203,8 @@ func (s *APIServer) probeUpstreamTLS(
 
 	tlsConfig := &tls.Config{
 		ServerName: host,
-		// Trust/hostname are evaluated manually below (against the
-		// definition's own trust set / a per-check hostname match) rather
-		// than by the stdlib's own verifier, so the probe can distinguish
-		// UNTRUSTED_BACKEND from HOSTNAME_MISMATCH instead of a single
-		// generic handshake failure.
+		// Trust and hostname are checked separately below so the probe can
+		// tell UNTRUSTED_BACKEND from HOSTNAME_MISMATCH.
 		InsecureSkipVerify: true, //nolint:gosec
 	}
 	if identityCert != nil {
@@ -260,12 +231,9 @@ func (s *APIServer) probeUpstreamTLS(
 		NotAfter: leaf.NotAfter.Format(time.RFC3339),
 	}
 
-	// TLS 1.3 delivers a server's rejection of the client certificate as a
-	// post-handshake alert, which the client only observes on its next
-	// read — a successful HandshakeContext above does not by itself mean
-	// the identity was accepted. A short read distinguishes the two: an
-	// alert or EOF within the deadline means rejection, a timeout means
-	// the connection is otherwise idle (accepted).
+	// TLS 1.3 reports a rejected client certificate as a post-handshake
+	// alert, seen only on the next read. An alert or EOF within the deadline
+	// means rejection; a timeout means the identity was accepted.
 	_ = tlsConn.SetReadDeadline(time.Now().Add(tlsTestCanaryReadTimeout))
 	buf := make([]byte, 1)
 	_, readErr := tlsConn.Read(buf)
@@ -287,11 +255,9 @@ func (s *APIServer) probeUpstreamTLS(
 	return tlsTestResultOK, nil, backend
 }
 
-// classifyUpstreamTrust reports which trust anchor (a named trustedCAs row,
-// or "gateway bundle") verifies peerCerts, trying each named certificate as
-// its own standalone root before falling back to the gateway-wide upstream
-// bundle when trustedCANames is empty. Returns ("", false) when none
-// verify.
+// classifyUpstreamTrust reports which trust anchor verifies peerCerts: a
+// named trustedCAs row, or the gateway bundle when trustedCANames is empty.
+// It returns ("", false) when none verify.
 func (s *APIServer) classifyUpstreamTrust(peerCerts []*x509.Certificate, trustedCANames []string) (string, bool) {
 	leaf := peerCerts[0]
 	intermediates := x509.NewCertPool()

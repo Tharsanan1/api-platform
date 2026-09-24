@@ -36,19 +36,11 @@ import (
 // ============================================================================
 // TestUpstreamTLS / probeUpstreamTLS
 // ============================================================================
-//
-// probeUpstreamTLS dials via config.UpstreamSSRFDialContext, which refuses
-// loopback addresses outright (see ssrf-prevention.md / upstream_ssrf.go) —
-// a 127.0.0.1/::1 listener would make every probe in this file report
-// CONNECT_FAILED for the wrong reason. These tests instead bind the in-test
-// TLS server to the host's own non-loopback (typically RFC 1918) address,
-// which the SSRF policy permits, exactly like a real private backend would
-// be reached.
+// The probe's SSRF dialer refuses loopback, so these backends listen on a
+// non-loopback host address.
 
-// nonLoopbackIPv4 returns a non-loopback IPv4 address configured on this
-// host, or skips the test if none is found (e.g. a fully isolated network
-// namespace with only lo) — a skip here is an environment limitation, not a
-// test failure.
+// nonLoopbackIPv4 returns a non-loopback IPv4 address of this host, or skips
+// the test when there is none.
 func nonLoopbackIPv4(t *testing.T) net.IP {
 	t.Helper()
 	addrs, err := net.InterfaceAddrs()
@@ -68,9 +60,8 @@ func nonLoopbackIPv4(t *testing.T) net.IP {
 	return nil
 }
 
-// issueServerCertForIP issues a serverAuth leaf, signed by ca, carrying ip as
-// its sole IP SAN — these tests dial a literal IP rather than a hostname, so
-// leaf.VerifyHostname(host) needs an IP SAN to ever match.
+// issueServerCertForIP issues a serverAuth leaf signed by ca with ip as its
+// only SAN, since the tests dial a literal IP.
 func issueServerCertForIP(t *testing.T, ca *pki.Entity, ip net.IP, cn string) *pki.Entity {
 	t.Helper()
 	return pki.NewLeaf(t, ca, cn, pki.WithIPSANs(ip), pki.WithEKU(x509.ExtKeyUsageServerAuth))
@@ -85,12 +76,9 @@ type probeTestBackend struct {
 
 func (b *probeTestBackend) Close() { _ = b.listener.Close() }
 
-// startProbeTLSBackend starts a TLS server on a non-loopback address serving
-// serverCert, optionally requiring (and validating) a client certificate
-// against clientCAPool. Each accepted connection is handshaken and then left
-// open briefly (so a canary read on the client side times out rather than
-// observing EOF) unless the server itself rejects the client certificate, in
-// which case tls.Conn's own handshake failure delivers the rejection.
+// startProbeTLSBackend starts a TLS server serving serverCert, requiring a
+// client certificate from clientCAPool when it is non-nil. Accepted
+// connections stay open briefly so the client's canary read times out.
 func startProbeTLSBackend(t *testing.T, ip net.IP, serverCert *pki.Entity, clientCAPool *x509.CertPool) *probeTestBackend {
 	t.Helper()
 
@@ -118,11 +106,8 @@ func startProbeTLSBackend(t *testing.T, ip net.IP, serverCert *pki.Entity, clien
 				if !ok {
 					return
 				}
-				// A client-cert-rejecting handshake surfaces the alert here
-				// (or, for TLS 1.3, only once the client attempts its canary
-				// read below) — either way this goroutine just needs to keep
-				// the connection open briefly so the client's short read
-				// times out rather than seeing an immediate EOF on success.
+				// Keep the connection open so a successful probe's canary
+				// read times out rather than seeing EOF.
 				_ = tlsConn.Handshake()
 				time.Sleep(tlsTestCanaryReadTimeout * 3)
 			}(conn)
@@ -152,10 +137,7 @@ func TestProbeUpstreamTLS_OK(t *testing.T) {
 			Usage: models.CertificateUsageUpstream, NotAfter: time.Now().Add(365 * 24 * time.Hour),
 		},
 	}
-	// createTestAPIServerWithIdentitySupport generates its own encryption
-	// manager; the identity ciphertext below must be produced with that SAME
-	// instance (accessible directly — this test file is in package handlers)
-	// so GetGatewayIdentityMaterial's decrypt actually succeeds.
+	// The ciphertext must come from this server's own encryption manager.
 	server := createTestAPIServerWithIdentitySupport(t, mockDB)
 	mockDB.certs = append(mockDB.certs, &models.StoredCertificate{
 		UUID: "ok-identity", Name: "probe-identity", Certificate: identity.PEM(),
@@ -313,9 +295,8 @@ func TestProbeUpstreamTLS_ConnectFailed(t *testing.T) {
 	assert.Nil(t, backendResult)
 }
 
-// mustEncrypt mirrors handlers.APIServer.encryptPrivateKey for building a
-// StoredCertificate fixture's PrivateKeyCiphertext directly, bypassing the
-// upload handler.
+// mustEncrypt builds a fixture's PrivateKeyCiphertext without the upload
+// handler.
 func mustEncrypt(t *testing.T, mgr *encryption.ProviderManager, plaintext []byte) string {
 	t.Helper()
 	payload, err := mgr.Encrypt(plaintext)

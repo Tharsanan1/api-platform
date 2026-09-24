@@ -16,10 +16,6 @@
  * under the License.
  */
 
-// Client-certificate-authority-pool step definitions
-// (features/mtls-client-ca-pool.feature, features/mtls-pool-references.feature):
-// uploading, listing, validation errors, fixture-derived assertions,
-// deletion, client-authority-pool state, and deploy-response warnings.
 package it
 
 import (
@@ -31,8 +27,6 @@ import (
 
 	"github.com/cucumber/godog"
 )
-
-// ============ Uploading ============
 
 func (m *mtlsSteps) recordUploaded(name string) {
 	m.uploadedNames = append(m.uploadedNames, name)
@@ -90,9 +84,8 @@ func (m *mtlsSteps) uploadFixtureWithUsageAndRole(fixture, name, usage, role str
 	return m.uploadRaw(name, string(certPEM), usage, role, nil)
 }
 
-// uploadFixtureWithUsageRoleAndDNSSAN uploads fixture as a relay entry (or any
-// role) narrowed by a single DNS SAN — a relay entry vouches only for a
-// connection whose own certificate carries that SAN.
+// uploadFixtureWithUsageRoleAndDNSSAN uploads the fixture narrowed by a single
+// DNS SAN, so a relay entry vouches only for a connection carrying that SAN.
 func (m *mtlsSteps) uploadFixtureWithUsageRoleAndDNSSAN(fixture, name, usage, role, dnsSAN string) error {
 	certPEM, err := m.readFixtureCert(fixture)
 	if err != nil {
@@ -183,10 +176,8 @@ func (m *mtlsSteps) uploadOversizedBody(megabytes int, name, usage string) error
 	return m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: string(bodyBytes)})
 }
 
-// deployWithFixtureValues expands {{thumbprint "name"}} markers in the
-// docstring and then deploys it exactly like the plain "I deploy this API
-// configuration:" step — sharing deployAPIConfiguration (steps_api.go) so
-// the deployed API's name is tracked for cleanup the same way.
+// deployWithFixtureValues expands {{thumbprint "name"}} markers and deploys
+// the configuration like the plain deploy step.
 func (m *mtlsSteps) deployWithFixtureValues(body *godog.DocString) error {
 	resolved, err := m.resolveThumbprintTemplates(body.Content)
 	if err != nil {
@@ -195,11 +186,8 @@ func (m *mtlsSteps) deployWithFixtureValues(body *godog.DocString) error {
 	return deployAPIConfiguration(m.state, m.httpSteps, resolved)
 }
 
-// updateWithFixtureValues is deployWithFixtureValues' update-in-place
-// counterpart: it expands {{thumbprint "name"}} markers in the docstring and
-// then delegates to the same updateAPIConfiguration (steps_api.go) the plain
-// "I update the API ... with this configuration:" step uses, so a fingerprint
-// cut-over scenario can update an API's accept list by fixture thumbprint.
+// updateWithFixtureValues expands {{thumbprint "name"}} markers and updates
+// the API like the plain update step.
 func (m *mtlsSteps) updateWithFixtureValues(apiName string, body *godog.DocString) error {
 	resolved, err := m.resolveThumbprintTemplates(body.Content)
 	if err != nil {
@@ -208,16 +196,8 @@ func (m *mtlsSteps) updateWithFixtureValues(apiName string, body *godog.DocStrin
 	return updateAPIConfiguration(m.httpSteps, apiName, resolved)
 }
 
-// ============ Listing assertions ============
-//
-// Listing has no dedicated step: the feature file lists via the existing
-// generic "I send a GET request to the ... service at ..." step. Everything
-// below only inspects whatever the last HTTP response was.
-
-// currentList parses the certificates array out of whatever the last HTTP
-// response was. It intentionally does not cache: scenarios freely interleave
-// list requests with other calls, so every assertion re-reads the live last
-// response rather than trusting state left over from an earlier step.
+// currentList parses the certificates array from the last HTTP response. It
+// does not cache, because scenarios interleave list requests with other calls.
 func (m *mtlsSteps) currentList() ([]map[string]any, error) {
 	var parsed struct {
 		Certificates []map[string]any `json:"certificates"`
@@ -361,8 +341,6 @@ func (m *mtlsSteps) listedCertShouldHaveNoWarnings(name string) error {
 	return nil
 }
 
-// ============ Validation errors ============
-
 func (m *mtlsSteps) validationErrors() ([]map[string]any, error) {
 	var parsed struct {
 		Errors []map[string]any `json:"errors"`
@@ -416,8 +394,6 @@ func (m *mtlsSteps) validationErrorAny(field string) error {
 	return fmt.Errorf("no validation error for field %q found in %v", field, errs)
 }
 
-// ============ Fixture-derived assertions ============
-
 func (m *mtlsSteps) jsonFieldShouldBeSubjectOfFixture(field, fixture string) error {
 	var parsed map[string]any
 	if err := json.Unmarshal(m.httpSteps.LastBody(), &parsed); err != nil {
@@ -441,13 +417,8 @@ func (m *mtlsSteps) jsonFieldShouldBeSubjectOfFixture(field, fixture string) err
 	return nil
 }
 
-// ============ Client authority pool state ============
-
-// clientAuthorityPoolIsEmpty empties the client-usage certificate pool by
-// listing every "client" usage entry and deleting it, as the current
-// authenticated user (the feature runs as admin throughout). A delete
-// returning anything other than 2xx/404 is treated as a failure; a 404 (the
-// entry already gone) is ignored.
+// clientAuthorityPoolIsEmpty deletes every "client" usage certificate as the
+// current user. A 404 is ignored and any other non-2xx status fails.
 func (m *mtlsSteps) clientAuthorityPoolIsEmpty() error {
 	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates?usage=client"); err != nil {
 		return err
@@ -472,11 +443,8 @@ func (m *mtlsSteps) clientAuthorityPoolIsEmpty() error {
 	return nil
 }
 
-// ============ Deploy-response warnings ============
-
-// responseWarnings reads the warnings array off the last response body,
-// wherever the deploy response places it: nested under "status.warnings" (a
-// k8s-style management resource) or top-level "warnings".
+// responseWarnings reads the warnings array from the last response, under
+// either "status.warnings" or top-level "warnings".
 func (m *mtlsSteps) responseWarnings() ([]map[string]any, error) {
 	var parsed map[string]any
 	if err := json.Unmarshal(m.httpSteps.LastBody(), &parsed); err != nil {
@@ -516,9 +484,8 @@ func (m *mtlsSteps) responseShouldIncludeWarningWithCodeForField(code, field str
 	return fmt.Errorf("no warning with code %q for field %q found in %v", code, field, warnings)
 }
 
-// responseShouldIncludeWarningWithCode is responseShouldIncludeWarningWithCodeForField
-// without the field constraint, for a warning (e.g. HEADER_CERT_BYPASS_ACTIVE)
-// that isn't tied to one particular field.
+// responseShouldIncludeWarningWithCode checks for a warning code regardless
+// of field.
 func (m *mtlsSteps) responseShouldIncludeWarningWithCode(code string) error {
 	warnings, err := m.responseWarnings()
 	if err != nil {
@@ -542,8 +509,6 @@ func (m *mtlsSteps) responseShouldIncludeNoWarnings() error {
 	}
 	return nil
 }
-
-// ============ Deletion ============
 
 func (m *mtlsSteps) findCertificateIDByName(name string) (string, error) {
 	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates"); err != nil {

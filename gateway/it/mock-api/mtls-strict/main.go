@@ -16,14 +16,9 @@
  * under the License.
  */
 
-// Command mock-mtls-strict is a minimal mutual-TLS backend for
-// gateway/it/features/mtls-outbound.feature's tls-test scenario: unlike the
-// nginx-based mock backends in ../ (which complete the handshake and answer
-// with an HTTP-level rejection for an untrusted client certificate), this
-// server sets tls.RequireAndVerifyClientCert, so a client certificate that
-// doesn't chain to its configured ClientCAs is rejected inside the TLS
-// handshake itself — the one way to produce the gateway's
-// BACKEND_REJECTED_IDENTITY probe result.
+// Command mock-mtls-strict is a mutual-TLS backend that rejects an untrusted
+// client certificate inside the TLS handshake, which is what produces the
+// gateway's BACKEND_REJECTED_IDENTITY probe result.
 package main
 
 import (
@@ -36,9 +31,8 @@ import (
 	"time"
 )
 
-// requireEnv reads a required configuration value, failing startup
-// immediately (rather than falling back to a default) when it is missing —
-// this server has no safe default for any of its three inputs.
+// requireEnv reads a required configuration value and fails startup when it
+// is missing, since none of the inputs has a safe default.
 func requireEnv(name string) string {
 	v := os.Getenv(name)
 	if v == "" {
@@ -88,8 +82,7 @@ func main() {
 		})
 	})
 
-	// Explicit timeouts per go-network-service-hardening.md — never a bare
-	// zero-value server, even for a test-only mock.
+	// A zero-value server has no timeouts, so set them explicitly.
 	server := &http.Server{
 		Addr:         ":8443",
 		Handler:      mux,

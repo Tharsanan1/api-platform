@@ -25,35 +25,22 @@ import (
 	policyenginev1 "github.com/wso2/api-platform/sdk/core/policyengine"
 )
 
-// The mtls-auth policy runs inside the policy engine, which reads the
-// gateway's client certificate authority pool from shared lazy resources
-// (see utils.ClientAuthorityPublisher). A policy chain therefore carries no
-// certificate material: only what this API's author wrote, in the form the
-// engine evaluates, plus the router's client-certificate header settings.
-// These keys are injected into every mtls-auth instance's params at
-// chain-build time (see injectMtlsInternalParams) and must never be accepted
-// from an author — the deploy validator (pkg/config/mtls_auth_validator.go)
-// already rejects unknown params, and __wso2_internal_* is the existing
-// convention for engine-internal parameters (see
-// sdk/core/policy/v1alpha2/system_parameters.go).
+// Parameters injected into every mtls-auth instance at chain-build time. The
+// policy engine reads the client authority pool from shared lazy resources,
+// so a chain carries only the author's accept list and the router's
+// client-certificate header settings. Authors can never supply these keys.
 const (
-	// mtlsInternalAcceptParam is the policy's own `accept` param as an
-	// ordered array of {"ca", "match"?, "thumbprints"?} objects, with each
-	// thumbprint normalised to 64 lowercase hex. Absent when the author
-	// omitted `accept`: the policy then accepts every client authority in the
-	// pool, resolved against the pool it currently holds.
+	// mtlsInternalAcceptParam is the policy's accept list with thumbprints
+	// normalised. Absent when accept was omitted, so the whole pool applies.
 	mtlsInternalAcceptParam = "__wso2_internal_mtls_accept"
 
-	// mtlsInternalHeaderParam is {"name", "trustAny", "forwardToBackend"},
-	// mirroring router.downstream_tls.client_certificate_header — the
-	// policy's only source of that config, since it runs outside the
-	// controller process.
+	// mtlsInternalHeaderParam mirrors client_certificate_header, which the
+	// policy cannot read from the controller's config.
 	mtlsInternalHeaderParam = "__wso2_internal_mtls_header"
 )
 
-// injectMtlsInternalParams mutates every mtls-auth PolicyInstance in chain in
-// place, adding the __wso2_internal_mtls_* parameters above. A chain with no
-// mtls-auth instance is left untouched.
+// injectMtlsInternalParams adds the __wso2_internal_mtls_* parameters to every
+// mtls-auth instance in chain, in place.
 func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, headerConfig config.ClientCertificateHeader) {
 	header := map[string]interface{}{
 		"name":             headerConfig.Name,
@@ -75,13 +62,9 @@ func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, headerConfi
 	}
 }
 
-// engineAcceptEntries converts one mtls-auth instance's own `accept` param
-// (params["accept"], as authored — untouched by this function) into the
-// entries the policy engine evaluates: the authority name, the author's
-// match copied through, and thumbprints normalised. ok is false when the
-// author omitted `accept`, or supplied something that is not an array (the
-// deploy validator already refuses that; the policy then treats the list as
-// omitted, exactly as it would for a missing key).
+// engineAcceptEntries converts an instance's accept param into the entries
+// the policy engine evaluates, normalising thumbprints. ok is false when
+// accept is absent or not an array.
 func engineAcceptEntries(params map[string]interface{}) ([]interface{}, bool) {
 	acceptSlice, ok := params["accept"].([]interface{})
 	if !ok {
@@ -107,12 +90,9 @@ func engineAcceptEntries(params map[string]interface{}) ([]interface{}, bool) {
 	return result, true
 }
 
-// normalizeThumbprintsForEngine canonicalises an author-supplied thumbprints
-// array to 64 lowercase hex, reusing the same normaliser the deploy-response
-// echo uses (config.NormalizeThumbprint) so the policy engine and the
-// deploy-response view of an accept entry never disagree on the canonical
-// form. An entry that fails to normalise (unreachable past deploy-time
-// validation) is passed through unchanged rather than dropped.
+// normalizeThumbprintsForEngine canonicalises a thumbprints array with the
+// same normaliser as the deploy response. An entry that fails to normalise
+// passes through unchanged rather than being dropped.
 func normalizeThumbprintsForEngine(raw interface{}) interface{} {
 	tpSlice, ok := raw.([]interface{})
 	if !ok {

@@ -16,14 +16,6 @@
  * under the License.
  */
 
-// Gateway identities (features/mtls-outbound.feature).
-//
-// A gateway identity is not a separate resource: it is a certificate pooled
-// through the existing /certificates endpoint with usage: "identity" and a
-// privateKey field alongside certificate. These steps talk to /certificates
-// throughout; the only thing identity-specific is filtering the list by
-// ?usage=identity so a certificate and an identity that happen to share
-// nothing else in common are still resolved unambiguously by name.
 package it
 
 import (
@@ -37,10 +29,9 @@ func (m *mtlsSteps) recordUploadedIdentity(name string) {
 	m.uploadedIdentityNames = append(m.uploadedIdentityNames, name)
 }
 
-// uploadGatewayIdentityRaw POSTs {name, usage: "identity", certificate,
-// privateKey} to /certificates, reading the certificate from
-// fixture+certExt (".crt" for a bare leaf, ".chain.crt" for a leaf plus its
-// intermediate chain) and the private key from fixture+".key".
+// uploadGatewayIdentityRaw pools a gateway identity: a certificate with
+// usage "identity" and its private key. certExt is ".crt" for a bare leaf or
+// ".chain.crt" for a leaf plus its intermediate chain.
 func (m *mtlsSteps) uploadGatewayIdentityRaw(fixture, name, certExt string) error {
 	m.recordUploadedIdentity(name)
 
@@ -76,10 +67,8 @@ func (m *mtlsSteps) uploadGatewayIdentityFixtureWithChain(fixture, name string) 
 	return m.uploadGatewayIdentityRaw(fixture, name, ".chain.crt")
 }
 
-// gatewayIdentityFixtureIsStored uploads fixture and fails unless the
-// gateway accepted it (status 201) — the "Given" precondition form used by
-// scenarios that need a stored identity but aren't themselves testing the
-// upload response.
+// gatewayIdentityFixtureIsStored uploads the fixture and fails unless the
+// gateway answered 201.
 func (m *mtlsSteps) gatewayIdentityFixtureIsStored(fixture, name string) error {
 	if err := m.uploadGatewayIdentityFixture(fixture, name); err != nil {
 		return err
@@ -104,13 +93,8 @@ func (m *mtlsSteps) recordUploadedIdentityNameFromJSON(body string) {
 	}
 }
 
-// uploadGatewayIdentityRawBody posts an arbitrary docstring body to
-// /certificates after expanding {{pem}}/{{key}}/{{encryptedkey}}/
-// {{notafter}} markers via the shared resolveTemplates — used by the
-// "uploads that could never work are refused" style scenarios. The
-// docstring itself carries usage: "identity" (or, for the one negative case
-// testing that privateKey is rejected on a non-identity certificate,
-// usage: "client") — this step doesn't inject usage on its own.
+// uploadGatewayIdentityRawBody posts a templated docstring body to
+// /certificates. The body sets its own usage field.
 func (m *mtlsSteps) uploadGatewayIdentityRawBody(body *godog.DocString) error {
 	resolved, err := m.resolveTemplates(body.Content)
 	if err != nil {
@@ -122,11 +106,8 @@ func (m *mtlsSteps) uploadGatewayIdentityRawBody(body *godog.DocString) error {
 	return m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: resolved})
 }
 
-// findGatewayIdentityIDByName resolves NAME to its certificate id via
-// GET /certificates?usage=identity — narrower than m.findCertificateIDByName
-// so an identity and an unrelated certificate can never be confused, even if
-// a caller reused a name across both (which the gateway itself should reject
-// as a name conflict, but the test lookup doesn't need to depend on that).
+// findGatewayIdentityIDByName resolves a name among usage=identity
+// certificates only, so an identity is never confused with a certificate.
 func (m *mtlsSteps) findGatewayIdentityIDByName(name string) (string, error) {
 	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates?usage=identity"); err != nil {
 		return "", err
@@ -145,10 +126,8 @@ func (m *mtlsSteps) findGatewayIdentityIDByName(name string) (string, error) {
 	return "", fmt.Errorf("no gateway identity named %q found", name)
 }
 
-// deleteGatewayIdentityNamed resolves NAME to its id via the usage:identity
-// list endpoint and issues the DELETE — failing clearly (rather than a bare
-// 404) when the name isn't found, since a missing identity usually means an
-// earlier step in the scenario didn't create what this step expects.
+// deleteGatewayIdentityNamed deletes the named gateway identity, failing
+// with a clear error rather than a bare 404 when the name is not found.
 func (m *mtlsSteps) deleteGatewayIdentityNamed(name string) error {
 	id, err := m.findGatewayIdentityIDByName(name)
 	if err != nil {
@@ -157,10 +136,8 @@ func (m *mtlsSteps) deleteGatewayIdentityNamed(name string) error {
 	return m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
 }
 
-// updateGatewayIdentityWithFixtureAndChain PUTs {certificate, privateKey} —
-// the fixture's leaf+intermediate chain and matching key — to the named
-// gateway identity's existing certificate id, exercising in-place identity
-// rotation.
+// updateGatewayIdentityWithFixtureAndChain rotates the named gateway identity
+// in place to the fixture's chain and key.
 func (m *mtlsSteps) updateGatewayIdentityWithFixtureAndChain(name, fixture string) error {
 	id, err := m.findGatewayIdentityIDByName(name)
 	if err != nil {
@@ -189,11 +166,8 @@ func (m *mtlsSteps) updateGatewayIdentityWithFixtureAndChain(name, fixture strin
 	return m.httpSteps.SendPUTToService("gateway-controller", "/certificates/"+id, &godog.DocString{Content: string(bodyBytes)})
 }
 
-// updateCertificateWithIdentityFixture PUTs an identity-shaped body
-// ({certificate, privateKey} from fixture, with no usage field) to the named
-// (non-identity) certificate's id — used to assert that only usage: identity
-// certificates accept an update at all, regardless of what the update body
-// contains.
+// updateCertificateWithIdentityFixture PUTs an identity-shaped body to a
+// non-identity certificate, which the gateway must refuse.
 func (m *mtlsSteps) updateCertificateWithIdentityFixture(name, fixture string) error {
 	id, err := m.findCertificateIDByName(name)
 	if err != nil {

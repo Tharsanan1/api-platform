@@ -16,15 +16,6 @@
  * under the License.
  */
 
-// Requests relaying a client certificate through a header instead of (or
-// alongside) the TLS handshake (features/mtls-header-relay.feature,
-// mtls-header-forward.feature, mtls-header-bypass.feature).
-//
-// A front proxy that terminates TLS relays the client certificate it saw to
-// the gateway in a header instead of (or alongside) its own TLS handshake.
-// These steps build that header value and set it via useHeaderForOneRequest
-// for one request only, so it never leaks into a later request that must be
-// sent without it.
 package it
 
 import (
@@ -41,9 +32,8 @@ const (
 	headerCertEncodingBase64 = "base64" // bare base64 of the DER bytes, no PEM armor
 )
 
-// encodeCertificateForHeader renders fixture "name"'s certificate the way a
-// front proxy would place it in a header, per the requested encoding. An
-// empty encoding means the default: "url".
+// encodeCertificateForHeader renders the fixture certificate the way a front
+// proxy would place it in a header. An empty encoding means "url".
 func (m *mtlsSteps) encodeCertificateForHeader(name, encoding string) (string, error) {
 	certPEM, err := m.readFixtureCert(name)
 	if err != nil {
@@ -67,11 +57,9 @@ func (m *mtlsSteps) encodeCertificateForHeader(name, encoding string) (string, e
 	}
 }
 
-// useHeaderForOneRequest sets header name to value for the next request only
-// and returns a function that restores whatever was in place before it, so a
-// value never leaks into a later request that must be sent without it —
-// used both for a relayed client certificate and for a bearer JWT
-// (Authorization) set for a single request (steps_mtls_request.go).
+// useHeaderForOneRequest sets a header for the next request and returns a
+// function that restores the previous value, so it never leaks into a later
+// request.
 func (m *mtlsSteps) useHeaderForOneRequest(name, value string) func() {
 	previous, had := m.httpSteps.Header(name)
 	m.httpSteps.SetHeader(name, value)
@@ -91,7 +79,7 @@ func (m *mtlsSteps) getWithClientCertificateAndHeaderCertificate(reqURL, certNam
 	return m.getWithClientCertificateAndHeaderCertificateEncoded(reqURL, certName, headerName, certFixture, "")
 }
 
-// getWithClientCertificateAndHeaderCertificateEncoded is the same pairing,
+// getWithClientCertificateAndHeaderCertificateEncoded is the same request
 // with an explicit header encoding ("url", "pem", or "base64").
 func (m *mtlsSteps) getWithClientCertificateAndHeaderCertificateEncoded(reqURL, certName, headerName, certFixture, encoding string) error {
 	encoded, err := m.encodeCertificateForHeader(certFixture, encoding)
@@ -104,9 +92,8 @@ func (m *mtlsSteps) getWithClientCertificateAndHeaderCertificateEncoded(reqURL, 
 }
 
 // getWithNoClientCertificateAndHeaderCertificate presents no TLS client
-// certificate at all while relaying certFixture (default encoding) in
-// headerName - the case where the connection itself carries no identity and
-// only the header claims one.
+// certificate while relaying certFixture in headerName, so only the header
+// claims an identity.
 func (m *mtlsSteps) getWithNoClientCertificateAndHeaderCertificate(reqURL, headerName, certFixture string) error {
 	encoded, err := m.encodeCertificateForHeader(certFixture, "")
 	if err != nil {
@@ -117,10 +104,8 @@ func (m *mtlsSteps) getWithNoClientCertificateAndHeaderCertificate(reqURL, heade
 	return m.getWithNoClientCertificate(reqURL)
 }
 
-// getWithHeaderCertificate sends a request over plaintext HTTP or over HTTPS
-// without presenting any client certificate, relaying certFixture (default
-// encoding) in headerName. Shares tlsClientNoCertificate's per-request client:
-// its TLS settings are simply unused when reqURL is a plain http:// URL.
+// getWithHeaderCertificate relays certFixture in headerName over plain HTTP
+// or over HTTPS without a client certificate.
 func (m *mtlsSteps) getWithHeaderCertificate(reqURL, headerName, certFixture string) error {
 	return m.getWithNoClientCertificateAndHeaderCertificate(reqURL, headerName, certFixture)
 }

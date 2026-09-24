@@ -22,13 +22,9 @@ const (
 	ExtProcFilterName = "api_platform.policy_engine.envoy.filters.http.ext_proc"
 	ExtProcFilter     = "envoy.filters.http.ext_proc"
 
-	// Connection-level ext_proc request attributes surfacing the mTLS verdict
-	// and peer-certificate details from the derived HTTPS listener, read from
-	// req.Attributes[ExtProcFilter].Fields. These string values must match the
-	// gateway-controller's pkg/constants (which configures Envoy to send them
-	// under this same attribute namespace) exactly — the two are separate Go
-	// modules with no shared type, only the agreed-upon wire string. See
-	// go-control-plane-xds-security.md and the mtls-listener feature file.
+	// Connection-level ext_proc attributes carrying the mTLS verdict and peer
+	// certificate, read from req.Attributes[ExtProcFilter].Fields. The strings
+	// must match the controller's copies exactly: the modules share no type.
 	ExtProcAttrConnectionMTLS                   = "connection.mtls"
 	ExtProcAttrConnectionPeerCertificate        = "connection.peer_certificate"
 	ExtProcAttrConnectionPeerCertificateDigest  = "connection.sha256_peer_certificate_digest"

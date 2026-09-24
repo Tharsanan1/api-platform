@@ -38,10 +38,8 @@ type PolicyValidator struct {
 	mtlsAuthValidator *MtlsAuthValidator
 }
 
-// NewPolicyValidator creates a new policy validator. mtlsAuthValidator wires
-// the mtls-auth-specific validator (client-CA pool lookups + HTTPS-listener
-// enablement); a nil value disables mtls-auth-specific validation entirely —
-// callers that don't need it (e.g. most unit tests) simply pass nil.
+// NewPolicyValidator creates a new policy validator. A nil mtlsAuthValidator
+// disables mtls-auth-specific validation.
 func NewPolicyValidator(policyDefinitions map[string]models.PolicyDefinition, mtlsAuthValidator *MtlsAuthValidator) *PolicyValidator {
 	return &PolicyValidator{
 		policyDefinitions: policyDefinitions,
@@ -109,10 +107,7 @@ func (pv *PolicyValidator) ValidateRestAPIPolicies(apiConfig *api.RestAPI) []Val
 		}
 	}
 
-	// mtls-auth validation is cross-cutting (duplicate-in-scope, attached at
-	// both API and operation level, client-CA pool state) and needs the whole
-	// API's policy chains at once, so it runs here rather than inside the
-	// per-policy loop above.
+	// mtls-auth validation needs every policy chain of the API at once.
 	if pv.mtlsAuthValidator != nil {
 		errors = append(errors, pv.mtlsAuthValidator.ValidateRestAPI(apiConfig)...)
 	}
@@ -189,14 +184,8 @@ func (pv *PolicyValidator) validatePolicy(policy api.Policy, fieldPath string) [
 	}
 
 	// Coerce then validate policy parameters against the declared JSON schema.
-	//
-	// mtls-auth is exempt from the generic gojsonschema pass: its own
-	// validator (MtlsAuthValidator, invoked from ValidateRestAPIPolicies)
-	// produces the exact human messages for every structural problem
-	// (unknown parameter, malformed accept entry, etc.), and running both
-	// would duplicate a single problem as two errors — a generic
-	// "Additional property X is not allowed" alongside the specific
-	// "unknown parameter X".
+	// mtls-auth is exempt: its own validator reports these problems, and both
+	// would report each one twice.
 	if policyDef.Parameters != nil && policy.Name != MtlsAuthPolicyName {
 		params := make(map[string]interface{})
 		if policy.Params != nil {
@@ -516,9 +505,8 @@ func (pv *PolicyValidator) validatePolicyParams(params map[string]interface{}, s
 }
 
 // refuseMtlsAuthOutsideRestAPI reports the validation error for an mtls-auth
-// reference on a kind the listener, the pool material injection and the
-// reference tracking do not cover. Only RestApi carries client-certificate
-// authentication.
+// reference on any kind but RestApi, the only kind that carries
+// client-certificate authentication.
 func refuseMtlsAuthOutsideRestAPI(policyName, fieldPath string) (ValidationError, bool) {
 	if policyName != MtlsAuthPolicyName {
 		return ValidationError{}, false

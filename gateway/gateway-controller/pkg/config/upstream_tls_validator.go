@@ -28,47 +28,39 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 )
 
-// Warning-code constants for the tls-block deploy-response warnings. See
-// (*UpstreamTLSValidator).ResolveWarnings.
+// Warning codes for the tls-block deploy-response warnings.
 const (
 	WarningCodeTLSVerifyHostNameDisabled = "TLS_VERIFY_HOSTNAME_DISABLED"
 	WarningCodeTLSIdentityExpired        = "TLS_IDENTITY_EXPIRED"
 )
 
-// upstreamTLSAllowedParams is the set of top-level parameter names the tls
-// block accepts. Generic gojsonschema validation never runs against this
-// field (it is a free-form map like mtls-auth's params — see
-// mtls_auth_validator.go), so this validator is the sole source of "unknown
-// parameter" errors for it.
+// upstreamTLSAllowedParams is the set of parameter names the tls block
+// accepts. The block is a free-form map with no schema validation, so this is
+// the only source of unknown-parameter errors for it.
 var upstreamTLSAllowedParams = map[string]bool{
 	"identity":       true,
 	"trustedCAs":     true,
 	"verifyHostName": true,
 }
 
-// UpstreamTLSCertificateStore is the subset of storage.Storage the tls-block
-// validator needs: a read-only lookup against the certificates table, which
-// also holds gateway identities as usage: identity rows. A narrow interface
-// (rather than depending on storage.Storage directly) so tests can supply a
-// minimal fake.
+// UpstreamTLSCertificateStore is the read-only subset of storage.Storage the
+// tls-block validator needs to look up certificates and gateway identities.
 type UpstreamTLSCertificateStore interface {
 	GetCertificateByName(name string) (*models.StoredCertificate, error)
 }
 
-// UpstreamTLSValidator validates deploy-time use of the tls block on
-// upstreamDefinitions entries (identity/trustedCAs/verifyHostName), rejects
-// it on an inline (main/sandbox) upstream, and resolves the warnings shown
-// on a successful deploy response.
+// UpstreamTLSValidator validates the tls block on upstreamDefinitions
+// entries, rejects it on an inline upstream, and resolves the warnings of a
+// successful deploy.
 type UpstreamTLSValidator struct {
 	store UpstreamTLSCertificateStore
-	// sslVerificationDisabled mirrors router.upstream.tls.disable_ssl_verification:
-	// while it is on, Envoy verifies no backend at all, so a tls block asking
-	// for per-upstream trust or hostname verification could never be honoured.
+	// sslVerificationDisabled mirrors disable_ssl_verification, under which a
+	// tls block's trust or hostname settings could never be honoured.
 	sslVerificationDisabled bool
 }
 
-// NewUpstreamTLSValidator creates a validator bound to the gateway's
-// certificate/gateway-identity store and the router's verification posture.
+// NewUpstreamTLSValidator creates a validator bound to the certificate store
+// and the router's verification setting.
 func NewUpstreamTLSValidator(store UpstreamTLSCertificateStore, sslVerificationDisabled bool) *UpstreamTLSValidator {
 	return &UpstreamTLSValidator{store: store, sslVerificationDisabled: sslVerificationDisabled}
 }
@@ -83,9 +75,8 @@ type resolvedUpstreamTLS struct {
 }
 
 // parseUpstreamTLSParams parses one tls block's raw params, reporting an
-// "unknown parameter" error for any key outside identity/trustedCAs/
-// verifyHostName. fieldPath is the path to the tls block itself (e.g.
-// "spec.upstreamDefinitions[0].tls").
+// unknown-parameter error for any other key. fieldPath is the tls block's
+// path.
 func parseUpstreamTLSParams(fieldPath string, params map[string]interface{}) (resolvedUpstreamTLS, []ValidationError) {
 	var errs []ValidationError
 	r := resolvedUpstreamTLS{verifyHostName: true}
@@ -123,12 +114,8 @@ func parseUpstreamTLSParams(fieldPath string, params map[string]interface{}) (re
 	return r, errs
 }
 
-// ValidateRestAPI reports every deploy-blocking problem with the tls block
-// on apiConfig: an inline (main/sandbox) upstream carrying tls at all, and,
-// for every upstreamDefinitions entry with a tls block, unknown parameters,
-// an unresolvable identity/trustedCAs reference, an empty trustedCAs list,
-// a trustedCAs entry that names a usage: client authority, and any target
-// URL that is not https://.
+// ValidateRestAPI reports every deploy-blocking problem with the tls blocks
+// on apiConfig.
 func (v *UpstreamTLSValidator) ValidateRestAPI(apiConfig *api.RestAPI) []ValidationError {
 	var errs []ValidationError
 
@@ -231,8 +218,7 @@ func (v *UpstreamTLSValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validat
 }
 
 // validateInlineUpstreamTLS rejects a tls block declared directly on a
-// main/sandbox upstream (fieldPrefix e.g. "spec.upstream.main") — tls is
-// only valid on an upstreamDefinitions entry.
+// main or sandbox upstream.
 func (v *UpstreamTLSValidator) validateInlineUpstreamTLS(fieldPrefix string, tls *map[string]interface{}) []ValidationError {
 	if tls == nil {
 		return nil
@@ -243,10 +229,8 @@ func (v *UpstreamTLSValidator) validateInlineUpstreamTLS(fieldPrefix string, tls
 	}}
 }
 
-// ResolveWarnings computes TLS_VERIFY_HOSTNAME_DISABLED and
-// TLS_IDENTITY_EXPIRED for every upstreamDefinitions tls block on apiConfig,
-// for a successful deploy response. Callers must only invoke this after
-// ValidateRestAPI has reported zero errors.
+// ResolveWarnings computes the tls-block warnings for a successful deploy.
+// Call it only after ValidateRestAPI reported no errors.
 func (v *UpstreamTLSValidator) ResolveWarnings(apiConfig api.RestAPI) []clientca.Warning {
 	var warnings []clientca.Warning
 	if apiConfig.Spec.UpstreamDefinitions == nil {
@@ -286,19 +270,14 @@ func (v *UpstreamTLSValidator) ResolveWarnings(apiConfig api.RestAPI) []clientca
 }
 
 // ResolveUpstreamTLSFromParams extracts the effective identity, trustedCAs
-// and verifyHostName settings from an already-validated tls block. Callers
-// (the RestAPI transformer) must only use this after ValidateRestAPI has
-// reported zero errors for the owning configuration — it performs no
-// validation itself.
+// and verifyHostName from a tls block that has already been validated.
 func ResolveUpstreamTLSFromParams(params map[string]interface{}) (identity string, trustedCAs []string, verifyHostName bool) {
 	r, _ := parseUpstreamTLSParams("", params)
 	return r.identity, r.trustedCAs, r.verifyHostName
 }
 
 // NamedTLSIdentityFieldPaths returns, in document order, the field path of
-// every upstreamDefinitions[].tls.identity entry on apiConfig that
-// explicitly names identityName. Used by the gateway-identity delete
-// referential-integrity check.
+// every upstreamDefinitions[].tls.identity on apiConfig naming identityName.
 func NamedTLSIdentityFieldPaths(apiConfig *api.RestAPI, identityName string) []string {
 	var paths []string
 	if apiConfig.Spec.UpstreamDefinitions == nil {
@@ -321,10 +300,7 @@ func NamedTLSIdentityFieldPaths(apiConfig *api.RestAPI, identityName string) []s
 }
 
 // NamedTLSTrustedCAFieldPaths returns, in document order, the field path of
-// every upstreamDefinitions[].tls.trustedCAs[k] entry on apiConfig that
-// explicitly names certName. Used by the certificate delete
-// referential-integrity check (usage: upstream certificates named as
-// per-upstream trust).
+// every upstreamDefinitions[].tls.trustedCAs[k] on apiConfig naming certName.
 func NamedTLSTrustedCAFieldPaths(apiConfig *api.RestAPI, certName string) []string {
 	var paths []string
 	if apiConfig.Spec.UpstreamDefinitions == nil {
@@ -353,9 +329,7 @@ func NamedTLSTrustedCAFieldPaths(apiConfig *api.RestAPI, certName string) []stri
 }
 
 // HasUpstreamTLSAttached reports whether apiConfig configures a tls block on
-// any upstreamDefinitions entry. Exposed for callers that need to know
-// whether the tls-block machinery applies at all without duplicating the
-// traversal.
+// any upstreamDefinitions entry.
 func HasUpstreamTLSAttached(apiConfig *api.RestAPI) bool {
 	if apiConfig.Spec.UpstreamDefinitions == nil {
 		return false

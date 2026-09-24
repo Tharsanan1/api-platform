@@ -28,25 +28,19 @@ import (
 	"github.com/cucumber/godog"
 )
 
-// mtlsObservabilitySteps holds the step definitions for
-// features/mtls-observability.feature: container-log polling, analytics
-// attribution, and the metric-absence assertion these scenarios need beyond
-// what steps_mtls.go, steps_analytics.go and steps_metrics.go already
-// provide. It reuses those existing steps' instances rather than
-// duplicating fixture-reading or analytics-lookup logic.
+// mtlsObservabilitySteps holds the mTLS container-log and analytics
+// attribution steps, reusing the mTLS and analytics step instances.
 type mtlsObservabilitySteps struct {
 	composeManager *ComposeManager
 	mtls           *mtlsSteps
 	analytics      *AnalyticsSteps
 
-	// scenarioStart is the wall-clock time this scenario began, used as
-	// --since for polling a container's logs so a line left over from an
-	// earlier scenario can never satisfy this scenario's assertion.
+	// scenarioStart bounds log polling so a line from an earlier scenario
+	// cannot satisfy this scenario's assertion.
 	scenarioStart time.Time
 }
 
-// RegisterMTLSObservabilitySteps registers step definitions for
-// features/mtls-observability.feature.
+// RegisterMTLSObservabilitySteps registers the mTLS observability steps.
 func RegisterMTLSObservabilitySteps(ctx *godog.ScenarioContext, composeManager *ComposeManager, mtls *mtlsSteps, analytics *AnalyticsSteps) {
 	o := &mtlsObservabilitySteps{composeManager: composeManager, mtls: mtls, analytics: analytics}
 
@@ -57,12 +51,8 @@ func RegisterMTLSObservabilitySteps(ctx *godog.ScenarioContext, composeManager *
 
 	ctx.Step(`^the "([^"]*)" container log should contain the thumbprint of fixture "([^"]*)" within (\d+) seconds$`,
 		o.containerLogShouldContainThumbprintOfFixtureWithin)
-	// (.*) rather than [^"]* — the expected substring is itself a quoted JSON
-	// field fragment (e.g. `\"peerSubj\":\"CN=client-valid\"`), and godog does
-	// not interpret `\"` as an escape, so the captured text can carry literal
-	// embedded quote characters that [^"]* would stop at (see
-	// unescapeGherkinQuotes in steps_metrics.go for why this also needs
-	// unescaping before use).
+	// (.*) because the expected substring can carry escaped quotes (e.g.
+	// `\"peerSubj\":\"CN=client-valid\"`), which [^"]* would stop at.
 	ctx.Step(`^the "([^"]*)" container log should contain "(.*)" within (\d+) seconds$`,
 		o.containerLogShouldContainWithin)
 
@@ -72,10 +62,8 @@ func RegisterMTLSObservabilitySteps(ctx *godog.ScenarioContext, composeManager *
 		o.latestAnalyticsEventShouldHaveNoMetadataField)
 }
 
-// containerLogShouldContainWithin polls `service`'s container log (since
-// this scenario started) until it contains substr, or fails once seconds
-// elapses. Exact, case-sensitive substring match — the feature's expected
-// strings are byte-exact JSON field fragments (e.g. `"peerSubj":"CN=..."`).
+// containerLogShouldContainWithin polls the service's log since the scenario
+// started until it contains substr, matched exactly and case-sensitively.
 func (o *mtlsObservabilitySteps) containerLogShouldContainWithin(service, substr string, seconds int) error {
 	substr = unescapeGherkinQuotes(substr)
 	return o.pollLogs(service, seconds, func(logs string) bool {
@@ -83,10 +71,9 @@ func (o *mtlsObservabilitySteps) containerLogShouldContainWithin(service, substr
 	}, fmt.Sprintf("%q", substr))
 }
 
-// containerLogShouldContainThumbprintOfFixtureWithin polls `service`'s
-// container log for fixture's SHA-256 thumbprint, matched case-insensitively
-// since Envoy's own %DOWNSTREAM_PEER_FINGERPRINT_256% rendering case isn't
-// guaranteed to match thumbprintOf's lowercase-hex convention.
+// containerLogShouldContainThumbprintOfFixtureWithin polls the service's log
+// for the fixture's thumbprint, case-insensitively because Envoy's
+// fingerprint rendering case is not guaranteed.
 func (o *mtlsObservabilitySteps) containerLogShouldContainThumbprintOfFixtureWithin(service, fixture string, seconds int) error {
 	thumbprint, err := o.mtls.thumbprintOf(fixture)
 	if err != nil {
@@ -98,9 +85,8 @@ func (o *mtlsObservabilitySteps) containerLogShouldContainThumbprintOfFixtureWit
 	}, fmt.Sprintf("the thumbprint of fixture %q (%s)", fixture, thumbprint))
 }
 
-// pollLogs polls composeManager.ServiceLogs(service, o.scenarioStart) every
-// 500ms until match returns true or seconds elapses, at which point it fails
-// with a message naming what it was looking for (describeWant).
+// pollLogs polls the service's log every 500ms until match returns true or
+// the timeout elapses.
 func (o *mtlsObservabilitySteps) pollLogs(service string, seconds int, match func(logs string) bool, describeWant string) error {
 	if o.composeManager == nil {
 		return fmt.Errorf("compose manager is not initialized")
@@ -127,12 +113,9 @@ func (o *mtlsObservabilitySteps) pollLogs(service string, seconds int, match fun
 	}
 }
 
-// mtlsAuthSubjectIdentity mirrors mtls-auth's own subject derivation (see
-// dev-policies/mtls-auth's sanNarrowedSubject): a certificate's first URI
-// SAN wins if it carries one, else its first DNS SAN, else its Subject DN —
-// this is what ends up as AuthContext.Subject and, downstream, the
-// analytics event's user_id, regardless of whether the accept entry itself
-// narrows by SAN.
+// mtlsAuthSubjectIdentity mirrors the mtls-auth policy's subject: the first
+// URI SAN, else the first DNS SAN, else the Subject DN. It becomes the
+// analytics event's user_id.
 func mtlsAuthSubjectIdentity(cert *x509.Certificate) string {
 	if len(cert.URIs) > 0 {
 		return cert.URIs[0].String()
@@ -144,8 +127,7 @@ func mtlsAuthSubjectIdentity(cert *x509.Certificate) string {
 }
 
 // latestAnalyticsEventShouldHaveUserIDOfFixture verifies the latest
-// analytics event's user_id equals the identity mtls-auth derived for
-// fixture's certificate (see mtlsAuthSubjectIdentity).
+// analytics event's user_id is the fixture certificate's subject identity.
 func (o *mtlsObservabilitySteps) latestAnalyticsEventShouldHaveUserIDOfFixture(fixture string) error {
 	event, err := o.analytics.latestEventOrFetch()
 	if err != nil {

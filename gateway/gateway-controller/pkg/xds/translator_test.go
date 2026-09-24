@@ -1751,12 +1751,8 @@ func TestTranslator_CreateExtProcFilter(t *testing.T) {
 		assert.Equal(t, constants.ExtProcFilterName, filter.Name)
 	})
 
-	// Guards the mTLS-aware ext_proc request attributes: mtls-auth (and any
-	// future connection-aware policy) needs the route name plus every
-	// connection.* fact — mTLS negotiated state, the peer certificate
-	// (digest/subject/SANs), TLS version, SNI and Envoy's own X.509
-	// verification verdict — surfaced as ext_proc request attributes. Missing
-	// any one of these silently starves the policy engine of a fact it needs.
+	// mtls-auth needs every connection.* attribute; a missing one silently
+	// starves the policy engine of a fact.
 	t.Run("RequestAttributes carries every connection.* fact plus the route name", func(t *testing.T) {
 		routerCfg := testRouterConfig()
 		cfg := testConfig()
@@ -2655,11 +2651,8 @@ func TestTranslator_CreateUpstreamTLSContext(t *testing.T) {
 // Outbound mTLS: gateway identity + per-upstream trust
 // ============================================================================
 
-// noInlineBytesAnywhere walks every DataSource-bearing field this TLS context
-// can carry and asserts none of them is a DataSource_InlineBytes — the
-// identity's certificate/key and the per-upstream trust bundle must both
-// arrive exclusively via SDS (see go-control-plane-xds-security.md directive
-// 3), never inlined into this Cluster resource.
+// assertNoInlineBytesAnywhere asserts no DataSource in the TLS context is
+// inline bytes: identity and trust material must arrive via SDS.
 func assertNoInlineBytesAnywhere(t *testing.T, tlsCtx *tlsv3.UpstreamTlsContext) {
 	t.Helper()
 	common := tlsCtx.GetCommonTlsContext()
@@ -2747,10 +2740,7 @@ func TestTranslator_CreateUpstreamTLSContextWithMTLS_VerifyHostNameFalse_NoSANMa
 	assertNoInlineBytesAnywhere(t, tlsCtx)
 }
 
-// TestTranslator_CreateUpstreamTLSContextWithMTLS_IPAddressTarget_UsesIPMatcher
-// guards that hostname verification against an IP-literal target uses an
-// IP_ADDRESS SAN matcher (and no SNI, which is meaningless for a bare IP),
-// not a DNS matcher.
+// An IP-literal target gets an IP_ADDRESS SAN matcher and no SNI.
 func TestTranslator_CreateUpstreamTLSContextWithMTLS_IPAddressTarget_UsesIPMatcher(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -2758,10 +2748,7 @@ func TestTranslator_CreateUpstreamTLSContextWithMTLS_IPAddressTarget_UsesIPMatch
 	cfg := testConfig()
 	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
 	require.NoError(t, err)
-	// A validation context object only exists to attach a SAN matcher to
-	// when one of the trust branches actually fires; a non-nil cert store
-	// (the general SDS-via-ADS bundle) is the simplest way to get one here,
-	// mirroring TestTranslator_CreateUpstreamTLSContext_SDSViaADS.
+	// A cert store gives the context a validation context to hold the matcher.
 	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
 
 	tlsOpts := &models.UpstreamTLS{HasTLSBlock: true, VerifyHostName: true, TrustedCANames: []string{"partner-ca"}}
@@ -2775,11 +2762,8 @@ func TestTranslator_CreateUpstreamTLSContextWithMTLS_IPAddressTarget_UsesIPMatch
 	assert.Equal(t, tlsv3.SubjectAltNameMatcher_IP_ADDRESS, sanMatchers[0].GetSanType())
 }
 
-// TestTranslator_CreateUpstreamTLSContextWithMTLS_NoTLSBlock_Unchanged guards
-// that a definition with no tls block at all (tlsOpts nil) produces a TLS
-// context byte-identical in shape to createUpstreamTLSContext — no identity
-// SDS reference, and hostname verification/trust falls back to the
-// router-wide defaults rather than anything cluster-specific.
+// A definition with no tls block presents no identity and uses the
+// router-wide trust and hostname defaults.
 func TestTranslator_CreateUpstreamTLSContextWithMTLS_NoTLSBlock_Unchanged(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -2802,12 +2786,7 @@ func TestTranslator_CreateUpstreamTLSContextWithMTLS_NoTLSBlock_Unchanged(t *tes
 		"trust must fall back to the router-wide default, exactly as before tls blocks existed")
 }
 
-// TestTranslator_CollectUpstreamTLSSecretRefs guards that only a cluster
-// whose upstream definition carried an explicit, non-empty tls block (an
-// identity and/or trustedCAs) contributes an UpstreamTLSSecretRef — a
-// definition with no tls block, a nil TLS altogether, or an empty `tls: {}`
-// block must produce none, leaving those clusters unaffected (no SDS wiring
-// at all).
+// Only a tls block that sets identity or trustedCAs yields a secret ref.
 func TestTranslator_CollectUpstreamTLSSecretRefs(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -2849,12 +2828,8 @@ func TestTranslator_CollectUpstreamTLSSecretRefs(t *testing.T) {
 	assert.Equal(t, []string{"out-backend-ca"}, refs[0].TrustedCANames)
 }
 
-// TestNewTranslator_CertStoreInitFailure_SurfacesAsError guards
-// go-network-service-hardening.md/authentication_authorization.md
-// GO-AUTH-011's fail-closed contract: a certstore.LoadCertificates failure at
-// construction time must surface as NewTranslator's own returned error, with
-// no *Translator constructed alongside it — main() must check the error
-// explicitly rather than have any use for a partially-initialized value.
+// A certificate store load failure is returned as an error with no
+// Translator.
 func TestNewTranslator_CertStoreInitFailure_SurfacesAsError(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -2997,13 +2972,8 @@ func TestTranslator_CreateListener_PerConnectionBufferLimitBytes(t *testing.T) {
 	assert.Equal(t, uint32(2097152), listener.GetPerConnectionBufferLimitBytes().GetValue())
 }
 
-// TestTranslator_CreateListener_LocalReplyConfig_SterileUF503Body guards
-// error-handling.md's sterile-response contract for an upstream connection
-// failure (Envoy's UF response flag): both the HTTP and HTTPS listener's HCM
-// must carry the exact fixed JSON body — never Envoy's own generated reason
-// text ("reset reason", "transport failure reason", etc.) — and this must
-// hold independent of which upstream/definition failed, since createListener
-// applies it once, shared by both listeners.
+// Both listeners replace Envoy's upstream-failure reason text with the fixed
+// JSON body.
 func TestTranslator_CreateListener_LocalReplyConfig_SterileUF503Body(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -3047,12 +3017,7 @@ func TestTranslator_CreateListener_LocalReplyConfig_SterileUF503Body(t *testing.
 	}
 }
 
-// TestTranslator_CreateDownstreamTLSContext_ListenerCertViaSDS guards that the
-// listener's own certificate/key are never inlined into the LDS resource:
-// createDownstreamTLSContext must reference the downstream_listener_cert SDS
-// secret by name, and TlsCertificates (the inline-bytes field) must stay
-// empty regardless of whether any cert/key files exist on disk — the whole
-// point of the SDS path is that this function never reads them.
+// The listener certificate is referenced via SDS and never inlined.
 func TestTranslator_CreateDownstreamTLSContext_ListenerCertViaSDS(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -3071,10 +3036,7 @@ func TestTranslator_CreateDownstreamTLSContext_ListenerCertViaSDS(t *testing.T) 
 		"the listener certificate/key must never be inlined into the LDS resource")
 }
 
-// TestTranslator_CreateDownstreamTLSContext_NoClientCARequired guards the
-// "no deployed API attaches mtls-auth" case: no validation context at all,
-// and RequireClientCertificate left nil (Envoy's own default, equivalent to
-// false) — the listener does not ask for a client certificate.
+// Without mtls-auth the listener does not ask for a client certificate.
 func TestTranslator_CreateDownstreamTLSContext_NoClientCARequired(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -3089,12 +3051,8 @@ func TestTranslator_CreateDownstreamTLSContext_NoClientCARequired(t *testing.T) 
 	assert.Nil(t, tlsContext.RequireClientCertificate)
 }
 
-// TestTranslator_CreateDownstreamTLSContext_ClientCARequired guards the "at
-// least one deployed API attaches mtls-auth" case: the validation context
-// references the client-CA pool's SDS secret by name, and
-// RequireClientCertificate is explicitly false — the listener requests but
-// never requires a certificate, so a connection presenting none (or one the
-// pool doesn't trust) is never closed over it.
+// With mtls-auth the listener validates against the client-CA pool and
+// requests, but never requires, a certificate.
 func TestTranslator_CreateDownstreamTLSContext_ClientCARequired(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -3717,10 +3675,8 @@ func TestTranslateRuntimeConfig_PeerHostnameOnEveryEndpoint(t *testing.T) {
 	assert.Equal(t, 4, checked, "expected to have checked all 4 endpoints across both clusters (1 + 3)")
 }
 
-// makeRestAPIWithOperationLevelMTLSAuth mirrors makeRestAPI (snapshot_test.go)
-// but attaches mtls-auth to its one operation, so TranslateConfigs treats
-// this config as requiring the HTTPS listener to request a client
-// certificate (see configAttachesMTLSAuth).
+// makeRestAPIWithOperationLevelMTLSAuth is makeRestAPI with mtls-auth on its
+// one operation.
 func makeRestAPIWithOperationLevelMTLSAuth(uuid, name, ctx string) *models.StoredConfig {
 	cfg := api.RestAPI{
 		Kind:     api.RestAPIKindRestApi,
@@ -3783,12 +3739,8 @@ func extractDownstreamTLSContext(t *testing.T, l *listener.Listener) *tlsv3.Down
 	return &tlsCtx
 }
 
-// TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClientCA
-// is the end-to-end guard for the derived (never configured) HTTPS listener
-// behavior: once at least one deployed RestAPI attaches mtls-auth at
-// operation level, the HTTPS listener's own DownstreamTlsContext must
-// reference the client-CA pool's SDS secret and request (not require) a
-// client certificate.
+// An API with operation-level mtls-auth makes the HTTPS listener request a
+// client certificate against the client-CA pool.
 func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClientCA(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -3812,11 +3764,8 @@ func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClie
 	assert.False(t, tlsCtx.RequireClientCertificate.GetValue())
 }
 
-// TestTranslator_TranslateConfigs_HTTPSListener_NoMTLSAuth_NoClientCA is the
-// converse: with no deployed API attaching mtls-auth anywhere, the HTTPS
-// listener must not carry a client-CA validation context at all — the
-// listener's behavior is entirely derived from what's deployed, never a
-// standing router-config switch.
+// With no mtls-auth deployed, the HTTPS listener carries no client-CA
+// validation context.
 func TestTranslator_TranslateConfigs_HTTPSListener_NoMTLSAuth_NoClientCA(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -3838,13 +3787,9 @@ func TestTranslator_TranslateConfigs_HTTPSListener_NoMTLSAuth_NoClientCA(t *test
 	assert.Nil(t, tlsCtx.RequireClientCertificate)
 }
 
-// TestSnapshotReferencesSDSSecret covers every referencing shape
-// SnapshotReferencesSDSSecret must recognise: a listener's
-// ValidationContextSdsSecretConfig (client-CA pool), a listener's
-// TlsCertificateSdsSecretConfigs entry (the listener's own cert/key), and a
-// cluster's CombinedValidationContext (upstream trust) — plus the negative
-// case where the requested secret name isn't referenced by anything in the
-// snapshot.
+// TestSnapshotReferencesSDSSecret covers listener validation context,
+// listener certificate and cluster trust references, and an unreferenced
+// name.
 func TestSnapshotReferencesSDSSecret(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -3855,10 +3800,7 @@ func TestSnapshotReferencesSDSSecret(t *testing.T) {
 	cfg.Router = *routerCfg
 	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
 	require.NoError(t, err)
-	// Only t.certStore != nil matters for createUpstreamTLSContext's SDS
-	// path — construct one directly rather than routing through
-	// NewTranslator's CustomCertsPath init, which calls LoadCertificates
-	// against a real db.Storage (see TestTranslator_CreateUpstreamTLSContext_SDSViaADS).
+	// A non-nil cert store is all the SDS path needs.
 	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
 
 	httpsListener, _, err := translator.createListener(nil, true, true)
@@ -3885,13 +3827,8 @@ func TestSnapshotReferencesSDSSecret(t *testing.T) {
 		"a secret name referenced by nothing in the snapshot must report false")
 }
 
-// TestTranslator_CreateListener_ForwardClientCertDetails guards the shared
-// HCM's client-certificate forwarding config: SANITIZE_SET (never
-// APPEND_FORWARD, which would let a caller's own forged
-// x-forwarded-client-cert survive alongside Envoy's own value) and every one
-// of the five SetCurrentClientCertDetails flags explicitly true, so the
-// header mtls-auth (and the per-route stripping below) depends on is always
-// fully populated when a certificate was presented.
+// The HCM uses SANITIZE_SET, so a forged x-forwarded-client-cert never
+// survives, and sets every SetCurrentClientCertDetails flag.
 func TestTranslator_CreateListener_ForwardClientCertDetails(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -3916,25 +3853,13 @@ func TestTranslator_CreateListener_ForwardClientCertDetails(t *testing.T) {
 	assert.True(t, details.GetDns())
 }
 
-// TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSAuth
-// is the per-route half of the forwarded-client-cert contract: a route whose
-// policy chain doesn't include mtls-auth must strip
-// x-forwarded-client-cert before it ever reaches that route's own backend,
-// while a route whose chain does include it must leave the header alone so
-// the policy engine (and, for an accepted certificate, the backend) can read
-// it. RequestHeadersToRemove is applied by the router filter after ext_proc,
-// so the policy engine sees the header on both routes — only the backend for
-// the non-mtls-auth route never does.
+// A route without mtls-auth strips x-forwarded-client-cert before its
+// backend; a route with it keeps the header.
 func TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSAuth(t *testing.T) {
 	translator := createTestTranslator()
 
-	// A minimal hand-built RuntimeDeployConfig — the same level
-	// TestTranslator_TranslateRuntimeConfig_AppliesConnectTimeout and
-	// TestTranslateRuntimeConfig_PeerHostnameOnEveryEndpoint exercise —
-	// rather than routing through the full transform package (which itself
-	// imports this package, so a test-only import of it here would be a
-	// build-time import cycle). rdc.Routes and rdc.PolicyChains share the
-	// same routeKey space, exactly as createRouteFromRDC expects.
+	// Hand-built because importing the transform package here would be an
+	// import cycle.
 	rdc := &models.RuntimeDeployConfig{
 		Metadata: models.Metadata{UUID: "u", Kind: "RestApi"},
 		Routes: map[string]*models.Route{
@@ -3949,9 +3874,7 @@ func TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSA
 		},
 		PolicyChains: map[string]*models.PolicyChain{
 			"mtls-route": {Policies: []models.Policy{{Name: "mtls-auth", Version: "v1.0.0"}}},
-			// "plain-route" deliberately has no entry at all — chainAttachesMTLSAuth
-			// must treat a route with no chain the same as one that has a chain
-			// without mtls-auth.
+			// "plain-route" has no chain at all.
 		},
 		UpstreamClusters: map[string]*models.UpstreamCluster{
 			"backend": {BasePath: "/", Endpoints: []models.Endpoint{{Host: "backend.example.com", Port: 8080}}},
@@ -3979,10 +3902,7 @@ func TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSA
 		"a route whose chain attaches mtls-auth must not strip x-forwarded-client-cert")
 }
 
-// mtlsHeaderStrippingRDC is the same two-route (plain-route/mtls-route)
-// shape TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSAuth
-// uses, reused here for the relayed client-certificate header's own
-// stripping rule.
+// mtlsHeaderStrippingRDC builds a plain route and an mtls-auth route.
 func mtlsHeaderStrippingRDC() *models.RuntimeDeployConfig {
 	return &models.RuntimeDeployConfig{
 		Metadata: models.Metadata{UUID: "u", Kind: "RestApi"},
@@ -4020,12 +3940,8 @@ func findRoutesByName(t *testing.T, routes []*route.Route) (plainRoute, mtlsRout
 	return plainRoute, mtlsRoute
 }
 
-// TestTranslator_CreateRouteFromRDC_StripsClientCertificateHeader_UnlessBelieved
-// is the relayed client-certificate header's own per-route stripping rule
-// (go-network-service-hardening.md/mtls-header-forward feature): a route
-// whose chain doesn't attach mtls-auth strips the configured header
-// unconditionally, since no policy in that chain could ever have believed
-// it — regardless of forward_to_backend.
+// A route without mtls-auth always strips the relayed header, whatever
+// forward_to_backend says.
 func TestTranslator_CreateRouteFromRDC_StripsClientCertificateHeader_UnlessBelieved(t *testing.T) {
 	t.Run("forward_to_backend false: both routes strip it", func(t *testing.T) {
 		translator := createTestTranslator()
@@ -4078,8 +3994,7 @@ func TestTranslator_CreateRouteFromRDC_StripsClientCertificateHeader_UnlessBelie
 }
 
 // Routes that never carry a policy chain evaluating the client-certificate
-// headers (the WebSub per-topic route and the legacy route builder) must
-// strip both headers before their backend.
+// headers strip both headers before their backend.
 func TestTranslator_RoutesWithoutPolicyChain_StripClientCertificateHeaders(t *testing.T) {
 	translator := createTestTranslator()
 	translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{Name: "X-WSO2-CLIENT-CERTIFICATE"}

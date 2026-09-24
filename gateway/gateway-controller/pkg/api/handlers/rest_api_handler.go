@@ -198,10 +198,8 @@ func (h *RestAPIHandler) UpdateRestAPI(w http.ResponseWriter, r *http.Request, i
 	httputil.WriteJSON(w, http.StatusOK, h.buildDeployResponse(result.Config.SourceConfiguration, result.Config))
 }
 
-// buildDeployResponse builds the create/update response body. For a RestAPI
-// SourceConfiguration it resolves mtls-auth's `accept` echo and attaches any
-// warnings (see restapi.RestAPIService.ResolveMtlsAuthForResponse); every
-// other configuration shape falls back to the plain resource response.
+// buildDeployResponse builds the create/update response body, adding the
+// accept-list echo and warnings for a RestAPI.
 func (h *RestAPIHandler) buildDeployResponse(sourceConfig any, stored *models.StoredConfig) any {
 	switch cfg := sourceConfig.(type) {
 	case api.RestAPI:
@@ -410,9 +408,8 @@ func isRestAPICreateBadRequest(err error) bool {
 		strings.Contains(message, "invalid or missing origin")
 }
 
-// logDeployWarnings records every deploy-time warning at WARN, so a
-// condition the response body reports to the caller is also visible to the
-// operator reading the controller log.
+// logDeployWarnings logs every deploy warning so the operator sees what the
+// caller was told.
 func (h *RestAPIHandler) logDeployWarnings(stored *models.StoredConfig, warnings []clientca.Warning) {
 	if h.logger == nil {
 		return

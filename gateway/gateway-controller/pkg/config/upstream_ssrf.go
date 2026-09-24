@@ -26,45 +26,18 @@ import (
 	"github.com/wso2/api-platform/httpkit/netguard"
 )
 
-// UpstreamSSRFPolicy is the single, shared address policy for every place
-// this controller process itself dials (or otherwise resolves) an
-// operator-configured upstream/backend host — see ssrf-prevention.md
-// directive 6: exactly one shared validation helper across every
-// upstream/backend feature, never a per-feature reimplementation.
-//
-// Private/RFC 1918 addresses are permitted: an upstream backend is normally
-// meant to be private (a Kubernetes ClusterIP, a docker-compose service
-// name, a VPC-internal host), so blocking them would break ordinary
-// deployments. What stays refused is the set of addresses that is never a
-// legitimate backend but is a standard SSRF target or a hazard: loopback,
-// link-local (which is where the cloud instance metadata endpoint
-// 169.254.169.254 lives), the unspecified address, and multicast/broadcast.
-//
-// As of this writing, this helper's only caller is
-// (*APIServer).probeUpstreamTLS (the POST .../tls-test handshake probe,
-// pkg/api/handlers/upstream_tls_probe.go) — the only place in
-// gateway-controller that dials an operator-configured upstream host
-// directly from this process. pkg/config's deploy-time upstream URL
-// validators (api_validator.go's validateUpstreamUrl/
-// validateUpstreamDefinitionsList, and the MCP/LLM equivalents) currently
-// perform only syntactic checks (scheme, host presence) and do not resolve
-// or dial the target at all; extending them to call this same helper is a
-// separate, broader change (deploy-time validation would then perform a
-// live DNS lookup on every RestApi/MCP/LLM deploy) that should be its own
-// reviewed change rather than folded into this one, so any future feature
-// that does need to dial such a host, or any effort to retrofit those
-// validators, must call this function rather than re-implementing the
-// policy inline.
+// UpstreamSSRFPolicy is the one address policy for every place this process
+// dials an operator-configured upstream host; callers must use it rather
+// than reimplement it. Private addresses are allowed because backends are
+// normally private. Loopback, link-local (including cloud metadata),
+// unspecified and multicast/broadcast addresses are refused.
 func UpstreamSSRFPolicy() netguard.Policy {
 	return netguard.PermitPrivateBlockMetadata()
 }
 
-// UpstreamSSRFDialContext returns a dial function (compatible with
-// net.Dialer.DialContext / http.Transport.DialContext) that resolves the
-// target host and validates every candidate address against
-// UpstreamSSRFPolicy before connecting — never the original hostname again
-// once validated, so a DNS answer that changes between the check and the
-// connection (DNS rebinding) cannot smuggle a disallowed address through.
+// UpstreamSSRFDialContext returns a DialContext function that validates every
+// resolved address against UpstreamSSRFPolicy and dials the validated address,
+// never the hostname, so DNS rebinding cannot bypass the check.
 func UpstreamSSRFDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return netguard.DialContext(UpstreamSSRFPolicy(), timeout)
 }

@@ -97,11 +97,9 @@ func (t *Translator) ToProtoDownstream(ds *policy.DownstreamContext) *proto.Down
 	}
 }
 
-// toProtoDownstreamTLS converts the connection-level TLS/mTLS snapshot into the
-// transport form. Returns nil when the gateway did not populate it (see
-// policy.DownstreamTLS's doc comment) — the wire field then stays unset, which
-// a Python-side mtls-auth-equivalent policy must treat as "no certificate
-// accepted", never as "not required", exactly like the Go-side accessor.
+// toProtoDownstreamTLS converts the TLS snapshot into the transport form. A
+// nil snapshot leaves the wire field unset, which a Python policy must treat
+// as no certificate accepted, never as not required.
 func (t *Translator) toProtoDownstreamTLS(tls *policy.DownstreamTLS) *proto.DownstreamTLS {
 	if tls == nil {
 		return nil

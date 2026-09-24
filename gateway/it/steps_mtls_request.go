@@ -16,9 +16,6 @@
  * under the License.
  */
 
-// The HTTPS listener probe and requests carrying (or omitting) a client
-// certificate, alone or paired with a JWT (features/mtls-auth.feature,
-// features/mtls-listener.feature).
 package it
 
 import (
@@ -31,30 +28,22 @@ import (
 	"time"
 )
 
-// httpsListenerAddr is the derived HTTPS listener's dial address, probed
-// directly at the TCP/TLS level (rather than through httpSteps) to observe
-// whether the server asked for a client certificate.
+// httpsListenerAddr is the HTTPS listener's address, dialed directly at the
+// TLS level to observe whether the server asks for a client certificate.
 const httpsListenerAddr = "localhost:8443"
 
-// mtlsListenerProbeRetries/Interval bound the retry loop used only for the
-// positive case (listener should now be requesting a certificate), to absorb
-// xDS propagation lag after a deploy. The negative case probes once
-// immediately — the feature file waits explicitly wherever propagation lag
-// matters there.
+// mtlsListenerProbeRetries and mtlsListenerProbeInterval absorb xDS
+// propagation lag when asserting the listener requests a certificate. The
+// negative assertion probes once.
 const (
 	mtlsListenerProbeRetries  = 10
 	mtlsListenerProbeInterval = 500 * time.Millisecond
 )
 
-// ============ HTTPS listener probing ============
-
-// probeClientCertRequested opens a direct TLS connection to the derived
-// HTTPS listener with a GetClientCertificate callback that records whether
-// it was invoked, then completes the handshake with no certificate (an
-// empty tls.Certificate). The listener validates optionally rather than
-// requiring a certificate (see the "never drops a connection" scenario), so
-// the handshake is expected to succeed either way — the callback having run
-// is itself the signal that a CertificateRequest was sent.
+// probeClientCertRequested reports whether the HTTPS listener sent a
+// CertificateRequest, detected by the GetClientCertificate callback running.
+// It answers with no certificate; the listener validates optionally, so the
+// handshake succeeds either way.
 func (m *mtlsSteps) probeClientCertRequested() (bool, error) {
 	invoked := false
 	conf := &tls.Config{
@@ -103,21 +92,11 @@ func (m *mtlsSteps) httpsListenerShouldNotRequestClientCertificate() error {
 	return nil
 }
 
-// ============ Requests carrying (or omitting) a client certificate ============
-
-// tlsClientWithCertificate builds a one-off *http.Client whose transport
-// presents the named certificate fixture (and, when includeChain is true,
-// its intermediate chain) for the TLS handshake. Keep-alives are disabled so
-// each step is a fresh connection — the certificate is negotiated per
-// connection, not per request.
-//
-// The certificate is presented unconditionally. Go's default selection
-// withholds a certificate whose issuer is not among the authorities the
-// server names in its CertificateRequest, which would turn every
-// "certificate from an authority outside the pool" scenario into a
-// no-certificate handshake; presenting it regardless is what curl and
-// OpenSSL-based clients do, and it is the only way to exercise the listener
-// accepting an untrusted certificate and the policy rejecting it.
+// tlsClientWithCertificate builds a one-off client that presents the named
+// fixture, optionally with its chain. Keep-alives are off because the
+// certificate is negotiated per connection. The certificate is presented
+// unconditionally, as curl does: Go's default selection would withhold one
+// whose issuer the server did not name, hiding untrusted-certificate cases.
 func (m *mtlsSteps) tlsClientWithCertificate(name string, includeChain bool) (*http.Client, error) {
 	certPEM, err := m.readFixtureCert(name)
 	if err != nil {
@@ -191,9 +170,6 @@ func (m *mtlsSteps) getWithNoClientCertificate(url string) error {
 	return m.httpSteps.SendRequestWithClient(m.tlsClientNoCertificate(), http.MethodGet, url)
 }
 
-// requireJWTToken guards the two steps below exactly like steps_jwt.go's own
-// "with the JWT token" steps do, so the failure mode (call the token-fetch
-// step first) is identical whether or not a client certificate is involved.
 func (m *mtlsSteps) requireJWTToken() error {
 	if m.jwtSteps == nil || m.jwtSteps.currentToken == "" {
 		return fmt.Errorf("no JWT token available - call 'I get a JWT token from the mock JWKS server' first")
@@ -201,12 +177,8 @@ func (m *mtlsSteps) requireJWTToken() error {
 	return nil
 }
 
-// getWithJWTTokenAndClientCertificate combines the existing JWT-bearer
-// Authorization header (steps_jwt.go) with a per-request client-certificate
-// TLS client (above): the header is a persistent header applied by
-// HTTPSteps.SendRequestWithClient, so setting it here (via
-// useHeaderForOneRequest, steps_mtls_header.go) and delegating to
-// getWithClientCertificate carries both credentials on the same request.
+// getWithJWTTokenAndClientCertificate sends the bearer JWT and the client
+// certificate on the same request.
 func (m *mtlsSteps) getWithJWTTokenAndClientCertificate(url, name string) error {
 	if err := m.requireJWTToken(); err != nil {
 		return err
@@ -216,9 +188,8 @@ func (m *mtlsSteps) getWithJWTTokenAndClientCertificate(url, name string) error 
 	return m.getWithClientCertificate(url, name)
 }
 
-// getWithJWTTokenAndNoClientCertificate is the same pairing as above without
-// a client certificate — used to assert that the JWT alone isn't sufficient
-// where an mtls-auth policy is also attached.
+// getWithJWTTokenAndNoClientCertificate sends the bearer JWT without a
+// client certificate.
 func (m *mtlsSteps) getWithJWTTokenAndNoClientCertificate(url string) error {
 	if err := m.requireJWTToken(); err != nil {
 		return err
@@ -228,10 +199,8 @@ func (m *mtlsSteps) getWithJWTTokenAndNoClientCertificate(url string) error {
 	return m.getWithNoClientCertificate(url)
 }
 
-// httpsListenerShouldPresentCertificateFile completes a TLS handshake with
-// the HTTPS listener and checks that the leaf certificate it presented is
-// byte-for-byte the certificate in the given PEM file — the file the
-// controller is configured with and serves to Envoy as the listener secret.
+// httpsListenerShouldPresentCertificateFile checks that the HTTPS listener's
+// leaf certificate is byte-for-byte the certificate in the given PEM file.
 func (m *mtlsSteps) httpsListenerShouldPresentCertificateFile(path string) error {
 	pemBytes, err := os.ReadFile(path)
 	if err != nil {

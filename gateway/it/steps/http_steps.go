@@ -142,7 +142,7 @@ func (h *HTTPSteps) Header(name string) (string, bool) {
 	return v, ok
 }
 
-// RemoveHeader removes a persistent header so it is no longer sent on subsequent requests.
+// RemoveHeader removes a persistent header from subsequent requests.
 func (h *HTTPSteps) RemoveHeader(name string) {
 	delete(h.headers, name)
 }
@@ -484,10 +484,8 @@ func (h *HTTPSteps) sendRequest(method, url string, body []byte) error {
 	return h.doRequest(h.client, req)
 }
 
-// doRequest sends an already-built request using the given client and
-// records the request/response/body into the shared HTTPSteps state exactly
-// as every send*/assertion step expects. sendRequest and SendRequestWithClient
-// both funnel through this so the two paths stay in sync.
+// doRequest sends an already-built request with the given client and records
+// the request, response and body for the assertion steps.
 func (h *HTTPSteps) doRequest(client *http.Client, req *http.Request) error {
 	h.lastRequest = req
 
@@ -528,14 +526,9 @@ func (h *HTTPSteps) doRequest(client *http.Client, req *http.Request) error {
 	return nil
 }
 
-// SendRequestWithClient builds and sends a GET-equivalent request for the
-// given method/url using the given client instead of the shared HTTPSteps
-// client, applying the same persistent headers (set via "I set header" /
-// basic auth) and Host override as every other send* step, and records the
-// response into the shared state so every existing assertion step (status
-// code, body, headers, JSON fields) keeps working unchanged. Used by steps
-// that need a fresh per-connection client — e.g. one carrying a specific TLS
-// client certificate, where the certificate is negotiated per connection.
+// SendRequestWithClient sends a bodyless request with the given client
+// instead of the shared one, applying the persistent headers and Host
+// override. It serves steps that need a per-connection TLS client certificate.
 func (h *HTTPSteps) SendRequestWithClient(client *http.Client, method, url string) error {
 	req, err := http.NewRequest(method, url, nil)
 	if err != nil {

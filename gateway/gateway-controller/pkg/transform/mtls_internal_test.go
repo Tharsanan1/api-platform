@@ -168,15 +168,14 @@ func TestBuildPolicyChain_MtlsAuth_CopiesMatchNormalisesThumbprints_LeavesAuthor
 	}
 	p := transformMtlsAuth(t, testRouterCfg(), map[string]interface{}{"accept": authoredAccept}, false)
 
-	// The author's own `accept` key is untouched — same value, not normalised.
+	// The author's accept is not normalised.
 	assert.Equal(t, authoredMatch, p.Params["accept"].([]interface{})[0].(map[string]interface{})["match"],
 		"author's accept.match must be passed through as the same value, never rewritten")
 	gotAuthoredThumbprints := p.Params["accept"].([]interface{})[0].(map[string]interface{})["thumbprints"].([]interface{})
 	require.Len(t, gotAuthoredThumbprints, 1)
 	assert.Equal(t, authoredThumbprint, gotAuthoredThumbprints[0], "the author-facing accept must keep the as-authored thumbprint form")
 
-	// The internal, engine-facing accept list carries the match through and
-	// normalises the thumbprint to 64 lowercase hex.
+	// The engine-facing list carries the match and a normalised thumbprint.
 	internalAccept := asInterfaceSlice(t, p.Params[mtlsInternalAcceptParam])
 	require.Len(t, internalAccept, 1)
 	internalEntry, ok := internalAccept[0].(map[string]interface{})
@@ -209,11 +208,7 @@ func TestBuildPolicyChain_MtlsAuth_NoInjectionForOtherPolicies(t *testing.T) {
 
 // ============ __wso2_internal_mtls_header ============
 
-// TestBuildPolicyChain_MtlsAuth_HeaderParam_CarriesRouterConfig guards that
-// __wso2_internal_mtls_header mirrors
-// router.downstream_tls.client_certificate_header exactly — the policy
-// engine's only source of that config, since it runs outside the controller
-// process.
+// __wso2_internal_mtls_header mirrors client_certificate_header exactly.
 func TestBuildPolicyChain_MtlsAuth_HeaderParam_CarriesRouterConfig(t *testing.T) {
 	routerCfg := testRouterCfg()
 	routerCfg.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{

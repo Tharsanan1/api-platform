@@ -90,7 +90,6 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	correlationID := middleware.GetCorrelationID(r)
 	log := s.logger.With(slog.String("correlation_id", correlationID))
 
-	// Bound the request body before reading it, per go-network-service-hardening.md.
 	r.Body = http.MaxBytesReader(w, r.Body, s.systemConfig.Controller.Server.MaxCertificateUploadBytes)
 
 	var req UploadCertificateRequest
@@ -98,7 +97,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
-			// Generic message: never state the configured limit (file-access.md).
+			// Generic message: never state the configured limit.
 			httputil.WriteJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
 				"status":  "error",
 				"message": "the request body is too large",
@@ -119,8 +118,8 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if validation.legacyUpstreamCertErr != nil && len(validation.fieldErrors) == 0 {
-		// Exactly today's response for an invalid upstream certificate: no
-		// errors[] envelope, same flat shape and message text.
+		// An invalid upstream certificate alone gets a flat error body with
+		// no errors[] envelope; existing callers depend on that shape.
 		log.Warn("Invalid certificate provided", slog.Any("error", validation.legacyUpstreamCertErr))
 		httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
 			"status":  "error",
@@ -141,7 +140,6 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract certificate metadata and count for the response/storage record.
 	var (
 		subject, issuer      string
 		notBefore            time.Time
@@ -199,8 +197,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		var err error
 		subject, issuer, notBefore, notAfter, err = s.extractCertificateMetadata(certData)
 		if err != nil {
-			// Should not happen: validateCertificate already succeeded above
-			// against the same bytes. Preserve the legacy flat error shape.
+			// Unreachable: validateCertificate already accepted these bytes.
 			log.Warn("Failed to extract certificate metadata", slog.Any("error", err))
 			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
 				"status":  "error",
@@ -210,7 +207,6 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		}
 		count, err = s.validateCertificate(certData)
 		if err != nil {
-			// Already validated above; defensive only.
 			log.Warn("Invalid certificate provided", slog.Any("error", err))
 			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
 				"status":  "error",
@@ -225,10 +221,8 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A client-CA authority or gateway identity uploaded already within its
-	// expiry horizon gets the same CERT_EXPIRES_SOON warning the listing
-	// endpoint would report for it later — the caller shouldn't have to poll
-	// GET /certificates just to learn what upload already knew.
+	// A client authority or identity already inside its expiry horizon gets
+	// the same CERT_EXPIRES_SOON warning the listing endpoint reports.
 	if effectiveUsage == models.CertificateUsageClient || effectiveUsage == models.CertificateUsageIdentity {
 		if warning := clientca.ExpiryWarning(notAfter, time.Now()); warning != nil {
 			warnings = append(warnings, *warning)
@@ -456,9 +450,8 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 			if referencedByApis, err := s.countClientCertificateReferences(cert.Name); err != nil {
 				log.Warn("Failed to compute referencedByApis for client-CA authority",
 					slog.String("name", cert.Name), slog.Any("error", err))
-				// item.ReferencedByApis stays nil (absent in the response) rather
-				// than a possibly-wrong count — see checkClientAuthorityDeletable's
-				// doc comment for why a read failure isn't "no references".
+				// Leave referencedByApis absent rather than report a count
+				// that may be wrong.
 			} else {
 				item.ReferencedByApis = &referencedByApis
 			}
@@ -471,9 +464,7 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 			}
 
 			if warning := clientca.ExpiryWarning(cert.NotAfter, now); warning != nil {
-				// The expiry sweep (see pkg/certmetrics) is what logs this
-				// warning on a fixed schedule; the listing only returns it
-				// in the response body.
+				// Not logged here: the periodic expiry sweep logs it.
 				item.Warnings = []clientca.Warning{*warning}
 			}
 		} else if usage == models.CertificateUsageIdentity {
@@ -557,11 +548,8 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// A client-CA authority (never a relay entry — header mode simply turns
-	// off when its last relay row goes away) cannot be removed while a
-	// deployed API still depends on it: either by naming it explicitly in an
-	// accept list, or — when it's the pool's last non-relay authority — by
-	// inheriting the pool at all. See checkClientAuthorityDeletable.
+	// A non-relay client authority cannot be removed while a deployed API
+	// depends on it. Removing the last relay entry just turns header mode off.
 	if preDeleteCert != nil {
 		role := preDeleteCert.Role
 		if role == "" {
@@ -774,9 +762,8 @@ func (s *APIServer) validateCertificate(data []byte) (int, error) {
 	return count, nil
 }
 
-// UpdateCertificate rotates a usage: identity certificate's chain and
-// private key in place, keeping its name intact. Refused for any other
-// usage.
+// UpdateCertificate rotates a usage: identity certificate's chain and private
+// key in place, keeping its name. Other usages are refused.
 // PUT /certificates/{id}
 func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id string) {
 	correlationID := middleware.GetCorrelationID(r)
@@ -822,9 +809,8 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 		})
 		return
 	}
-	// Name/usage/role/match are immutable on rotation — force them to the
-	// existing row's shape so validateCertificateUpload validates only the
-	// certificate+key pair, regardless of what the caller sent.
+	// Name, usage, role and match are immutable on rotation, so only the
+	// certificate and key from the request are validated.
 	req.Name = existing.Name
 	req.Usage = models.CertificateUsageIdentity
 	req.Role = ""
@@ -884,11 +870,8 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Identity rows never enter the upstream trust/system bundle, so
-	// certStore.Reload() is a no-op for them — still called for parity with
-	// the upload/delete paths. The SDS snapshot update is what actually
-	// matters: it rebuilds this identity's gateway_identity:<name> secret
-	// from the new certificate/key.
+	// The SDS update rebuilds this identity's gateway_identity:<name> secret.
+	// Reload does nothing for identity rows but keeps parity with upload.
 	if translator := s.snapshotManager.GetTranslator(); translator != nil && translator.GetCertStore() != nil {
 		if err := translator.GetCertStore().Reload(); err != nil {
 			log.Warn("Failed to reload certificate store after identity rotation", slog.Any("error", err))
@@ -931,8 +914,8 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 	httputil.WriteJSON(w, http.StatusOK, resp)
 }
 
-// encryptPrivateKey encrypts a usage: identity upload's raw PEM private key
-// bytes and marshals the result for storage. Reused by upload and update.
+// encryptPrivateKey encrypts a usage: identity PEM private key and marshals
+// the result for storage.
 func (s *APIServer) encryptPrivateKey(privateKeyPEM string) (string, error) {
 	payload, err := s.encryptionManager.Encrypt([]byte(privateKeyPEM))
 	if err != nil {
@@ -941,22 +924,10 @@ func (s *APIServer) encryptPrivateKey(privateKeyPEM string) (string, error) {
 	return encryption.MarshalPayload(payload), nil
 }
 
-// deployedRestAPIConfigs returns every currently-deployed RestApi
-// configuration, read from the database rather than the in-memory
-// ConfigStore. The in-memory store converges from the database
-// asynchronously via the event-hub listener, so a certificate-delete
-// referential-integrity check racing a just-completed API delete would see a
-// stale, already-removed API if it read the in-memory store instead — the
-// database reflects the committed state synchronously, which is what this
-// check needs.
-//
-// A non-nil error means the database read itself failed — callers decide
-// how to handle that: the DELETE path (checkClientAuthorityDeletable) must
-// fail closed (refuse the delete) rather than silently treat a failed read
-// as "no references found"; the GET listing (countClientCertificateReferences)
-// may instead log and report the count as absent for that one request. A
-// nil s.db (not wired, e.g. some unit tests) is not treated as an error —
-// it simply yields no configs, consistent with there being nothing to check.
+// deployedRestAPIConfigs returns every deployed RestApi configuration from
+// both the database and the in-memory store. An error means the database
+// read failed; delete paths must treat that as a refusal, never as "no
+// references". A nil database yields no configs.
 func (s *APIServer) deployedRestAPIConfigs() ([]*models.StoredConfig, error) {
 	seen := make(map[string]*models.StoredConfig)
 
@@ -972,19 +943,9 @@ func (s *APIServer) deployedRestAPIConfigs() ([]*models.StoredConfig, error) {
 		}
 	}
 
-	// Also consult the in-memory ConfigStore, deduped by UUID with the
-	// database results above. The two sources converge asynchronously (the
-	// event-hub listener applies a database-committed change to the
-	// in-memory store on its own schedule), so a referential-integrity
-	// check that reads only one of them races: a delete already committed
-	// to the database can still be reachable through an in-memory-only
-	// deployed config for a short window (or vice versa, a deploy visible
-	// in memory before its database write lands). Treating a reference
-	// found in EITHER source as live is what closes that window — reading
-	// only the database is exactly what let a gateway-identity delete
-	// through while an API's upstreamDefinitions[].tls.identity still
-	// named it in the not-yet-converged in-memory store, which then broke
-	// SDS secret generation for that API on the next snapshot.
+	// The in-memory store converges from the database asynchronously, so a
+	// reference found in either source counts as live. Reading only one
+	// lets a delete through while the other still uses the certificate.
 	if s.store != nil {
 		for _, cfg := range s.store.GetAllByKind(string(models.KindRestApi)) {
 			if cfg.DesiredState != models.StateDeployed {
@@ -1004,12 +965,8 @@ func (s *APIServer) deployedRestAPIConfigs() ([]*models.StoredConfig, error) {
 }
 
 // countClientCertificateReferences counts the deployed RestApi configurations
-// whose mtls-auth instances (API- or operation-level) explicitly name
-// certName in an accept entry's `ca`. An API that merely inherits the pool
-// (accept omitted) is never counted — only an explicit reference. A non-nil
-// error means the underlying database read failed; the caller (ListCertificates)
-// logs it and reports referencedByApis as absent for that response, rather
-// than a possibly-wrong count.
+// whose mtls-auth instances name certName in an accept entry's ca. An API
+// that only inherits the pool is not counted.
 func (s *APIServer) countClientCertificateReferences(certName string) (int, error) {
 	restAPIs, err := s.deployedRestAPIConfigs()
 	if err != nil {
@@ -1028,17 +985,14 @@ func (s *APIServer) countClientCertificateReferences(certName string) (int, erro
 	return count, nil
 }
 
-// clientAuthorityReference is one deployed API's dependency on a client-CA
-// pool authority, either by naming it explicitly or by attaching mtls-auth
-// (used for the "last non-relay authority" check, where inheriting counts
-// too).
+// clientAuthorityReference is one deployed API's dependency on the client
+// authority pool, either by naming an authority or by inheriting the pool.
 type clientAuthorityReference struct {
 	apiHandle string
 	fieldPath string
 }
 
-// pluralDeployedAPIs renders the "N deployed APIs" / "1 deployed API" clause
-// used by both certificate-delete referential-integrity messages below.
+// pluralDeployedAPIs renders "1 deployed API" or "N deployed APIs".
 func pluralDeployedAPIs(n int) string {
 	if n == 1 {
 		return "1 deployed API"
@@ -1046,30 +1000,11 @@ func pluralDeployedAPIs(n int) string {
 	return fmt.Sprintf("%d deployed APIs", n)
 }
 
-// checkClientAuthorityDeletable reports whether cert (a usage: client,
-// non-relay authority — callers must check this before calling) can be
-// removed from the pool right now. It never mutates anything; callers still
-// perform the actual delete.
-//
-// Two refusal conditions, checked in order (the first one that applies wins,
-// since a named reference is the more specific problem even when the
-// authority also happens to be the pool's last one):
-//
-//  1. The authority is explicitly named in some deployed API's accept list —
-//     removing it would silently invalidate that API's own configuration.
-//  2. Removing it would leave the pool with zero non-relay client
-//     authorities while some deployed API still attaches mtls-auth (whether
-//     or not it names an authority explicitly) — that API could never
-//     authenticate any caller again.
-//
-// A third condition, checked first of all: if the deployed-config read
-// itself fails, this fails CLOSED — refuse the delete with a 500 rather than
-// silently proceeding as though no API referenced the authority. A read
-// failure is not evidence of an empty reference set.
-//
-// Returns the ready-to-write ErrorResponse body, the HTTP status to write it
-// with, and true when refused; false (with an empty body/status) when the
-// deletion may proceed.
+// checkClientAuthorityDeletable reports whether cert, a non-relay usage:
+// client authority, can be removed. It refuses when a deployed API names the
+// authority, or when it is the last non-relay authority and any deployed API
+// attaches mtls-auth. A failed read refuses with a 500. When refused it
+// returns the error body, the status and true.
 func (s *APIServer) checkClientAuthorityDeletable(cert *models.StoredCertificate) (api.ErrorResponse, int, bool) {
 	restAPIs, err := s.deployedRestAPIConfigs()
 	if err != nil {
@@ -1156,10 +1091,8 @@ func (s *APIServer) checkClientAuthorityDeletable(cert *models.StoredCertificate
 }
 
 // checkUpstreamCertificateDeletable reports whether a usage: upstream
-// certificate (cert) can be removed right now: refused when some deployed
-// API's upstreamDefinitions[].tls.trustedCAs still names it explicitly by
-// name. A deployed-config read failure fails closed (500) rather than
-// silently proceeding as though nothing referenced it.
+// certificate can be removed. It refuses while a deployed API names it in
+// upstreamDefinitions[].tls.trustedCAs, and refuses with a 500 on a failed read.
 func (s *APIServer) checkUpstreamCertificateDeletable(cert *models.StoredCertificate) (api.ErrorResponse, int, bool) {
 	restAPIs, err := s.deployedRestAPIConfigs()
 	if err != nil {
@@ -1217,11 +1150,9 @@ func (s *APIServer) countGatewayIdentityReferences(identityName string) (int, er
 	return count, nil
 }
 
-// checkGatewayIdentityDeletable reports whether a usage: identity
-// certificate (cert) can be removed right now: refused when some deployed
-// API's upstreamDefinitions[].tls.identity still names it. A deployed-config
-// read failure fails closed (500) rather than silently proceeding as though
-// nothing referenced it.
+// checkGatewayIdentityDeletable reports whether a usage: identity certificate
+// can be removed. It refuses while a deployed API names it in
+// upstreamDefinitions[].tls.identity, and refuses with a 500 on a failed read.
 func (s *APIServer) checkGatewayIdentityDeletable(cert *models.StoredCertificate) (api.ErrorResponse, int, bool) {
 	restAPIs, err := s.deployedRestAPIConfigs()
 	if err != nil {
@@ -1260,8 +1191,7 @@ func (s *APIServer) checkGatewayIdentityDeletable(cert *models.StoredCertificate
 }
 
 // firstX509Certificate parses and returns the first CERTIFICATE PEM block in
-// data, matching the same "first cert in bundle" convention used for
-// upstream certificate metadata (extractCertificateMetadata).
+// data.
 func firstX509Certificate(data []byte) (*x509.Certificate, error) {
 	rest := data
 	for {
@@ -1366,9 +1296,8 @@ func decodeCertificateUpload(body io.Reader, req *UploadCertificateRequest) ([]u
 	return shape, nil
 }
 
-// certificateUploadInvalidMessage is the single top-level message returned
-// for any 400 from certificate upload validation, regardless of how many
-// individual field problems were found.
+// certificateUploadInvalidMessage is the top-level message of every
+// certificate upload validation 400.
 const certificateUploadInvalidMessage = "certificate upload is invalid"
 
 var certificateNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -1378,18 +1307,13 @@ var certificateNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 type certUploadValidation struct {
 	fieldErrors []api.ValidationError
 
-	// legacyUpstreamCertErr holds a certificate-content failure for
-	// usage: upstream uploads, validated via the pre-existing
-	// s.validateCertificate path. When it is the ONLY problem found, the
-	// response keeps today's exact flat shape/message (no errors[]
-	// envelope) for backward compatibility with callers already depending
-	// on it; when combined with other field errors it is folded into the
-	// same errors[] list instead.
+	// legacyUpstreamCertErr holds a usage: upstream certificate-content
+	// failure. Alone, it is returned as a flat error with no errors[]
+	// envelope; with other problems it joins the errors[] list.
 	legacyUpstreamCertErr error
 
-	// identityBundle holds the inspected certificate chain + private key
-	// for a usage: identity upload (nil unless usage is identity and both
-	// certificate and privateKey passed inspection).
+	// identityBundle is the inspected chain and key of a usage: identity
+	// upload; nil unless both passed inspection.
 	identityBundle *gatewayidentity.Bundle
 }
 
@@ -1404,10 +1328,8 @@ func (v *certUploadValidation) hasProblems() bool {
 	return len(v.fieldErrors) > 0 || v.legacyUpstreamCertErr != nil
 }
 
-// validateMatchLists validates a role: relay entry's optional match narrowing:
-// each of dnsSANs/uriSANs, when present at all, must list at least one
-// non-empty SAN. A list omitted entirely (nil) is not an error — it simply
-// doesn't narrow on that dimension.
+// validateMatchLists checks a relay entry's match narrowing: dnsSANs and
+// uriSANs, when present, must each list at least one non-empty SAN.
 func (v *certUploadValidation) validateMatchLists(match *models.CertificateMatch) {
 	v.validateMatchList("match.dnsSANs", match.DNSSANs)
 	v.validateMatchList("match.uriSANs", match.URISANs)
@@ -1429,17 +1351,10 @@ func (v *certUploadValidation) validateMatchList(fieldPath string, list []string
 	}
 }
 
-// validateCertificateUpload validates every request-level field on a
-// certificate upload and, depending on usage, validates the certificate
-// content itself (usage: client), the certificate+key pair as a unit
-// (usage: identity), or the legacy upstream-certificate path. All problems
-// that can be determined independently of one another are collected
-// together so the caller can report them in a single 400.
-//
-// It returns the accumulated validation result, the effective usage/role
-// (defaulted when the request omitted them), and — for usage: client — the
-// inspected client-CA Bundle (nil otherwise). For usage: identity, the
-// inspected certificate+key bundle is on v.identityBundle instead.
+// validateCertificateUpload validates an upload's fields and its certificate
+// content for the given usage, collecting every problem for a single 400. It
+// returns the result, the defaulted usage and role, and for usage: client the
+// inspected bundle.
 func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*certUploadValidation, string, string, *clientca.Bundle) {
 	v := &certUploadValidation{}
 
@@ -1546,14 +1461,8 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 	return v, effectiveUsage, effectiveRole, bundle
 }
 
-// Every handler that can change the usage: client pool republishes it to the
-// policy engine through publishClientAuthorities (below) once the change has
-// committed and SDS is updated. PUT /certificates/{id} changes only a usage:
-// identity row, so it never does.
-
 // publishClientAuthorities republishes the usage: client pool to the policy
-// engine (see utils.ClientAuthorityPublisher). A server built without a
-// publisher (some unit tests) has nothing to publish to.
+// engine after a committed change. A server without a publisher skips it.
 func (s *APIServer) publishClientAuthorities(correlationID string) error {
 	if s.clientAuthorities == nil {
 		return nil

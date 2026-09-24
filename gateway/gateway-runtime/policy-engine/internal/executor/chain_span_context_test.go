@@ -30,10 +30,8 @@ import (
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
-// The policies below each record the span visible via trace.SpanFromContext
-// at the moment the executor calls them, so a test can assert that it's the
-// per-policy span the executor started for this iteration — not the caller's
-// parent span passed in to ExecuteXPolicies.
+// Each policy below records the span in its context when called, so a test
+// can assert it is the executor's per-policy span, not the caller's parent.
 
 type spanCapturingRequestHeaderPolicy struct {
 	mode policy.ProcessingMode

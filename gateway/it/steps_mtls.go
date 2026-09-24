@@ -16,24 +16,6 @@
  * under the License.
  */
 
-// Package it's mtls step definitions are split by concern across several
-// files, all registering onto the same *mtlsSteps receiver defined here:
-//
-//   - steps_mtls.go (this file): the mtlsSteps type, step registration, and
-//     the fixture-reading/templating helpers every other file shares.
-//   - steps_mtls_pool.go: the client-certificate-authority-pool feature
-//     (features/mtls-client-ca-pool.feature) — uploading, listing,
-//     validation errors, deletion, and deploy-response warnings.
-//   - steps_mtls_request.go: the HTTPS listener probe and requests carrying
-//     (or omitting) a client certificate, alone or paired with a JWT
-//     (features/mtls-auth.feature, features/mtls-listener.feature).
-//   - steps_mtls_header.go: requests relaying a client certificate through a
-//     header instead of (or alongside) the TLS handshake (features/mtls-
-//     header-relay.feature, mtls-header-forward.feature, mtls-header-
-//     bypass.feature).
-//   - steps_mtls_outbound.go: gateway identities (features/mtls-outbound.feature).
-//   - steps_mtls_cleanup.go: best-effort scenario teardown shared by every
-//     feature above.
 package it
 
 import (
@@ -53,9 +35,8 @@ import (
 	"github.com/wso2/api-platform/gateway/it/steps"
 )
 
-// mtlsFixturesDir is where resources/mtls-pki/generate.go writes certificate
-// and key fixtures. Tests run with the working directory set to the `it`
-// module root, so this relative path resolves correctly.
+// mtlsFixturesDir holds the generated certificate and key fixtures, relative
+// to the `it` module root that tests run from.
 const mtlsFixturesDir = "resources/mtls-pki"
 
 // mtlsPemPlaceholder, mtlsKeyPlaceholder and mtlsEncryptedKeyPlaceholder match
@@ -68,11 +49,7 @@ var (
 )
 
 // mtlsNotAfterPlaceholder matches {{notafter "name"}} template markers,
-// expanded to fixture "name"'s certificate NotAfter timestamp (RFC3339,
-// matching resources/mtls-pki/manifest.json's notAfter format). Used both
-// inside docstring request bodies (via resolveTemplates) and inside plain
-// step-argument strings such as an Examples table's expected message column
-// (via resolveNotAfterTemplates).
+// expanded to fixture "name"'s certificate NotAfter timestamp in RFC3339.
 var mtlsNotAfterPlaceholder = regexp.MustCompile(`\{\{notafter "([^"]+)"\}\}`)
 
 // mtlsThumbprintPlaceholder matches {{thumbprint "name"}} template markers
@@ -80,14 +57,8 @@ var mtlsNotAfterPlaceholder = regexp.MustCompile(`\{\{notafter "([^"]+)"\}\}`)
 // thumbprint (64 lowercase hex characters of the certificate's DER bytes).
 var mtlsThumbprintPlaceholder = regexp.MustCompile(`\{\{thumbprint "([^"]+)"\}\}`)
 
-// mtlsSteps holds scenario-scoped bookkeeping for the client-certificate-
-// authority-pool step definitions: every certificate name this scenario
-// attempted to upload, for best-effort cleanup. Listing itself has no
-// dedicated step — the feature file lists via the existing generic
-// "I send a GET request to the ... service at ..." step — so the "list
-// certificates" assertion steps below deliberately don't cache anything:
-// they re-parse whatever the last HTTP response was, straight off the
-// shared HTTPSteps.LastBody(), each time they run.
+// mtlsSteps holds the mTLS step definitions and the certificate names this
+// scenario attempted to upload, for best-effort cleanup.
 type mtlsSteps struct {
 	state     *TestState
 	httpSteps *steps.HTTPSteps
@@ -95,18 +66,13 @@ type mtlsSteps struct {
 
 	uploadedNames []string
 
-	// uploadedIdentityNames tracks every gateway identity name this scenario
-	// attempted to upload (features/mtls-outbound.feature), deleted before
-	// uploadedNames (certificates) — see cleanupTrackedCertificates.
+	// uploadedIdentityNames tracks gateway identities this scenario attempted
+	// to upload. Cleanup deletes them before uploadedNames.
 	uploadedIdentityNames []string
 }
 
-// RegisterMTLSSteps registers step definitions for the client certificate
-// authority pool feature (features/mtls-client-ca-pool.feature) and the
-// client-certificate-authentication feature (features/mtls-auth.feature). It
-// returns the mtlsSteps instance so another registration function (e.g.
-// RegisterMTLSObservabilitySteps) can reuse its fixture-reading helpers
-// (thumbprintOf, parseFixtureCert) rather than re-implementing them.
+// RegisterMTLSSteps registers the mTLS step definitions and returns the
+// instance so other step groups can reuse its fixture helpers.
 func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps, jwtSteps *JWTSteps) *mtlsSteps {
 	m := &mtlsSteps{state: state, httpSteps: httpSteps, jwtSteps: jwtSteps}
 
@@ -116,16 +82,9 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 		return c, nil
 	})
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
-		// Only the mTLS features hand their APIs and certificates to this
-		// hook; other features manage their own APIs and may share one
-		// across scenarios. A pooled certificate cannot be removed while a
-		// deployed API still references it (or while it is the last
-		// authority an mtls-auth API depends on), so the APIs this scenario
-		// deployed are deleted first, explicitly, rather than relying on the
-		// order godog runs After hooks in; a second deletion by the API
-		// steps' own hook is a harmless 404. Gateway identities go next —
-		// after APIs (which may reference them) but before certificates
-		// (which are independent of identities).
+		// A pooled certificate cannot be removed while a deployed API still
+		// references it, so APIs are deleted first; a repeat deletion by the
+		// API steps' own hook is a harmless 404.
 		if !scenarioHasTag(sc, "@mtls") {
 			return c, nil
 		}
@@ -134,7 +93,7 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 		return c, nil
 	})
 
-	// ---- Uploading ----
+	// Uploading
 	ctx.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)" and dns SAN "([^"]*)"$`, m.uploadFixtureWithUsageRoleAndDNSSAN)
 	ctx.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)"$`, m.uploadFixtureWithUsageAndRole)
 	ctx.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)" with usage "([^"]*)"$`, m.uploadFixtureWithUsage)
@@ -145,9 +104,7 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^I upload to the certificates endpoint the body:$`, m.uploadRawBody)
 	ctx.Step(`^I upload a certificate body of (\d+) megabytes as "([^"]*)" with usage "([^"]*)"$`, m.uploadOversizedBody)
 
-	// ---- Gateway identities (features/mtls-outbound.feature) ----
-	// A gateway identity is a certificate pooled via /certificates with
-	// usage: "identity"; see steps_mtls_outbound.go.
+	// Gateway identities: certificates pooled with usage "identity".
 	ctx.Step(`^I upload the gateway identity fixture "([^"]*)" with its chain as "([^"]*)"$`, m.uploadGatewayIdentityFixtureWithChain)
 	ctx.Step(`^I upload the gateway identity fixture "([^"]*)" as "([^"]*)"$`, m.uploadGatewayIdentityFixture)
 	ctx.Step(`^the gateway identity fixture "([^"]*)" is stored as "([^"]*)"$`, m.gatewayIdentityFixtureIsStored)
@@ -156,14 +113,11 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^I update the gateway identity "([^"]*)" with the fixture "([^"]*)" and its chain$`, m.updateGatewayIdentityWithFixtureAndChain)
 	ctx.Step(`^I update the certificate "([^"]*)" with the identity fixture "([^"]*)"$`, m.updateCertificateWithIdentityFixture)
 
-	// ---- Deploying/updating with fixture-derived values ----
+	// Deploying and updating with fixture-derived values
 	ctx.Step(`^I deploy this API configuration with fixture values:$`, m.deployWithFixtureValues)
 	ctx.Step(`^I update the API "([^"]*)" with this configuration with fixture values:$`, m.updateWithFixtureValues)
 
-	// ---- Listing assertions ----
-	// Listing itself is done via the existing generic
-	// "I send a GET request to the ... service at ..." step; these steps only
-	// inspect whatever the last response was.
+	// Listing assertions, run against the last response
 	ctx.Step(`^the certificate list should contain "([^"]*)"$`, m.listShouldContain)
 	ctx.Step(`^the certificate list should not contain "([^"]*)"$`, m.listShouldNotContain)
 	ctx.Step(`^the listed certificate "([^"]*)" should have "([^"]*)" equal to "?([^"]*)"?$`, m.listedCertShouldHaveFieldEqualTo)
@@ -172,23 +126,23 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^the listed certificate "([^"]*)" should have a warning with field "([^"]*)"$`, m.listedCertShouldHaveWarningWithField)
 	ctx.Step(`^the listed certificate "([^"]*)" should have no warnings$`, m.listedCertShouldHaveNoWarnings)
 
-	// ---- Validation errors ----
+	// Validation errors
 	ctx.Step(`^the response should list a validation error for field "([^"]*)" with message "([^"]*)"$`, m.validationErrorWithMessage)
 	ctx.Step(`^the response should list a validation error for field "([^"]*)" containing "([^"]*)"$`, m.validationErrorContaining)
 	ctx.Step(`^the response should list a validation error for field "([^"]*)"$`, m.validationErrorAny)
 
-	// ---- Fixture-derived assertions ----
+	// Fixture-derived assertions
 	ctx.Step(`^the JSON response field "([^"]*)" should be the subject of fixture "([^"]*)"$`, m.jsonFieldShouldBeSubjectOfFixture)
 
-	// ---- Deletion ----
+	// Deletion
 	ctx.Step(`^I delete the certificate named "([^"]*)"$`, m.deleteCertificateNamed)
 
-	// ---- HTTPS listener probing ----
+	// HTTPS listener probing
 	ctx.Step(`^the HTTPS listener should request a client certificate$`, m.httpsListenerShouldRequestClientCertificate)
 	ctx.Step(`^the HTTPS listener should not request a client certificate$`, m.httpsListenerShouldNotRequestClientCertificate)
 	ctx.Step(`^the HTTPS listener should present the certificate in "([^"]*)"$`, m.httpsListenerShouldPresentCertificateFile)
 
-	// ---- Requests carrying (or omitting) a client certificate ----
+	// Requests carrying or omitting a client certificate
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and its chain$`, m.getWithClientCertificateAndChain)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and header "([^"]*)" carrying certificate "([^"]*)" encoded as "([^"]*)"$`, m.getWithClientCertificateAndHeaderCertificateEncoded)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and header "([^"]*)" carrying certificate "([^"]*)"$`, m.getWithClientCertificateAndHeaderCertificate)
@@ -199,18 +153,16 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^I send a GET request to "([^"]*)" with the JWT token and client certificate "([^"]*)"$`, m.getWithJWTTokenAndClientCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with the JWT token and no client certificate$`, m.getWithJWTTokenAndNoClientCertificate)
 
-	// ---- Client authority pool state ----
+	// Client authority pool state
 	ctx.Step(`^the client authority pool is empty$`, m.clientAuthorityPoolIsEmpty)
 
-	// ---- Deploy-response warnings ----
+	// Deploy-response warnings
 	ctx.Step(`^the response should include a warning with code "([^"]*)" for field "([^"]*)"$`, m.responseShouldIncludeWarningWithCodeForField)
 	ctx.Step(`^the response should include a warning with code "([^"]*)"$`, m.responseShouldIncludeWarningWithCode)
 	ctx.Step(`^the response should include no warnings$`, m.responseShouldIncludeNoWarnings)
 
 	return m
 }
-
-// ============ Fixture reading ============
 
 func (m *mtlsSteps) readFixtureFile(fixture, ext string) ([]byte, error) {
 	path := filepath.Join(mtlsFixturesDir, fixture+ext)
@@ -237,10 +189,8 @@ func (m *mtlsSteps) parseFixtureCert(fixture string) (*x509.Certificate, error) 
 	return x509.ParseCertificate(block.Bytes)
 }
 
-// resolveTemplates replaces {{pem "name"}} / {{key "name"}} /
-// {{encryptedkey "name"}} / {{notafter "name"}} markers with the
-// JSON-string-escaped contents (or, for notafter, value) of the named
-// fixture.
+// resolveTemplates replaces {{pem}}, {{key}}, {{encryptedkey}} and
+// {{notafter}} markers with the named fixture's JSON-string-escaped value.
 func (m *mtlsSteps) resolveTemplates(body string) (string, error) {
 	var firstErr error
 
@@ -262,9 +212,8 @@ func (m *mtlsSteps) resolveTemplates(body string) (string, error) {
 				}
 				return match
 			}
-			// escaped is a JSON string literal including surrounding quotes;
-			// strip them since the placeholder already sits inside a quoted
-			// JSON string value in the docstring template.
+			// Strip the quotes: the placeholder already sits inside a quoted
+			// JSON string in the template.
 			return string(escaped[1 : len(escaped)-1])
 		})
 	}
@@ -301,10 +250,8 @@ func (m *mtlsSteps) resolveTemplates(body string) (string, error) {
 	return body, nil
 }
 
-// thumbprintOf returns fixture "name"'s SHA-256 thumbprint: 64 lowercase hex
-// characters over the certificate's DER bytes, matching both what
-// resources/mtls-pki/manifest.json records and what the mtls-auth policy's
-// own thumbprint field expects.
+// thumbprintOf returns the fixture's SHA-256 thumbprint as lowercase hex
+// over the certificate's DER bytes, the form the mtls-auth policy expects.
 func (m *mtlsSteps) thumbprintOf(fixture string) (string, error) {
 	cert, err := m.parseFixtureCert(fixture)
 	if err != nil {
@@ -314,11 +261,8 @@ func (m *mtlsSteps) thumbprintOf(fixture string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// resolveThumbprintTemplates replaces {{thumbprint "name"}} markers with
-// fixture "name"'s SHA-256 thumbprint. Unlike resolveTemplates' {{pem}}/
-// {{key}} substitution, the replacement is a bare hex string — it needs no
-// JSON escaping, since a hex thumbprint contains no characters a YAML or
-// JSON string would need to escape.
+// resolveThumbprintTemplates replaces {{thumbprint "name"}} markers with the
+// fixture's thumbprint. Hex needs no escaping.
 func (m *mtlsSteps) resolveThumbprintTemplates(body string) (string, error) {
 	var firstErr error
 	resolved := mtlsThumbprintPlaceholder.ReplaceAllStringFunc(body, func(match string) string {
@@ -339,9 +283,7 @@ func (m *mtlsSteps) resolveThumbprintTemplates(body string) (string, error) {
 	return resolved, nil
 }
 
-// notAfterOf returns fixture "name"'s certificate NotAfter timestamp,
-// formatted as RFC3339 in UTC — matching resources/mtls-pki/generate.go's
-// manifest.json notAfter field.
+// notAfterOf returns the fixture certificate's NotAfter as RFC3339 in UTC.
 func (m *mtlsSteps) notAfterOf(fixture string) (string, error) {
 	cert, err := m.parseFixtureCert(fixture)
 	if err != nil {
@@ -350,12 +292,8 @@ func (m *mtlsSteps) notAfterOf(fixture string) (string, error) {
 	return cert.NotAfter.UTC().Format(time.RFC3339), nil
 }
 
-// resolveNotAfterTemplates replaces {{notafter "name"}} markers in a plain
-// (non-JSON) string — such as an Examples table's expected validation-error
-// message — with fixture "name"'s NotAfter timestamp. Unlike resolveTemplates'
-// use of the same placeholder inside a docstring body, no JSON escaping is
-// applied here since the caller is comparing against plain text, not
-// embedding into a JSON document.
+// resolveNotAfterTemplates replaces {{notafter "name"}} markers in plain
+// text, such as an expected error message, without JSON escaping.
 func (m *mtlsSteps) resolveNotAfterTemplates(s string) (string, error) {
 	var firstErr error
 	resolved := mtlsNotAfterPlaceholder.ReplaceAllStringFunc(s, func(match string) string {

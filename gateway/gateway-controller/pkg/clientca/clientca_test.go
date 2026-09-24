@@ -38,9 +38,8 @@ func joinPEM(entities ...*pki.Entity) []byte {
 	return buf
 }
 
-// base64BodyOf strips PEM header/footer lines and whitespace, returning just
-// the base64-encoded body — used to check an error message doesn't leak the
-// actual key bytes.
+// base64BodyOf returns the base64 body of a PEM block, to check an error
+// message does not leak it.
 func base64BodyOf(pemBytes []byte) string {
 	var body []string
 	for _, line := range strings.Split(string(pemBytes), "\n") {

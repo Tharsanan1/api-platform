@@ -32,8 +32,7 @@ import (
 // MtlsAuthPolicyName is the policy name this validator applies to.
 const MtlsAuthPolicyName = "mtls-auth"
 
-// Warning-code constants for the mtls-auth-specific deploy-response warnings.
-// See ResolveMtlsAuthForResponse.
+// Warning codes for the mtls-auth deploy-response warnings.
 const (
 	WarningCodeMTLSAcceptInheritsPool   = "MTLS_ACCEPT_INHERITS_POOL"
 	WarningCodeMTLSAcceptUnnarrowed     = "MTLS_ACCEPT_UNNARROWED"
@@ -41,25 +40,19 @@ const (
 	WarningCodeMTLSThumbprintNormalised = "MTLS_THUMBPRINT_NORMALISED"
 
 	// WarningCodeMTLSAcceptNamesRelayAuthority is raised for an accept entry
-	// whose authority is also pooled as a role: relay entry. Such an API
-	// authenticates that front proxy itself, so it never evaluates a
-	// certificate the proxy relays — legitimate, but easy to write by
-	// accident.
+	// whose authority is also a relay entry's. Such an API authenticates the
+	// front proxy itself and never a certificate it relays.
 	WarningCodeMTLSAcceptNamesRelayAuthority = "MTLS_ACCEPT_NAMES_RELAY_AUTHORITY"
 
-	// WarningCodeHeaderCertBypassActive is attached to every mtls-auth
-	// deploy response while
-	// router.downstream_tls.client_certificate_header.trust_any is true: the
-	// relayed-certificate header is believed from any connection, so the
-	// connection presenting it is never consulted.
+	// WarningCodeHeaderCertBypassActive is attached to every mtls-auth deploy
+	// response while client_certificate_header.trust_any is true, because the
+	// relayed-certificate header is then believed from any connection.
 	WarningCodeHeaderCertBypassActive = "HEADER_CERT_BYPASS_ACTIVE"
 )
 
 // mtlsAuthAllowedParams is the set of top-level parameter names mtls-auth
-// accepts. Generic gojsonschema validation is skipped entirely for mtls-auth
-// (see PolicyValidator.validatePolicy) so this validator is the sole source
-// of "unknown parameter" errors — never duplicated with a generic
-// "Additional property X is not allowed" schema message.
+// accepts. Generic schema validation is skipped for mtls-auth, so this is
+// the only source of unknown-parameter errors.
 var mtlsAuthAllowedParams = map[string]bool{
 	"accept":              true,
 	"onFailureStatusCode": true,
@@ -93,35 +86,27 @@ var mtlsAuthPrecedingAuthPolicies = map[string]bool{
 
 var thumbprintHexPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// MtlsAuthCertificateStore is the subset of storage.Storage the mtls-auth
-// validator needs: read-only lookups against the client certificate
-// authority pool. Kept as a narrow interface (rather than depending on
-// storage.Storage directly) so tests can supply a minimal fake.
+// MtlsAuthCertificateStore is the read-only subset of storage.Storage the
+// mtls-auth validator needs to look up the client authority pool.
 type MtlsAuthCertificateStore interface {
 	GetCertificateByName(name string) (*models.StoredCertificate, error)
 	ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error)
 }
 
 // MtlsAuthValidator validates deploy-time use of the mtls-auth policy and
-// resolves the warnings/echoed-accept-list shown on a successful deploy
-// response. See go-network-service-hardening.md and
-// authentication_authorization.md for why an mtls-auth deployment that could
-// never authenticate anyone (empty pool, an accept list naming nothing
-// reachable) must be refused rather than silently deployed inert.
+// resolves the warnings and accept-list echo of a successful deploy. A
+// deployment that could never authenticate anyone is refused, not deployed
+// inert.
 type MtlsAuthValidator struct {
 	store          MtlsAuthCertificateStore
 	httpsEnabled   bool
 	headerTrustAny bool
 }
 
-// NewMtlsAuthValidator creates a validator bound to the gateway's
-// certificate store and the router facts governing mtls-auth's
-// HTTPS-listener requirement: httpsEnabled is router.https_enabled, and
-// headerTrustAny is
-// router.downstream_tls.client_certificate_header.trust_any — when true, the
-// HTTPS-listener requirement is relaxed (a relayed header can legitimately
-// arrive over plaintext from a trusted front proxy) and every resolved
-// response carries WarningCodeHeaderCertBypassActive.
+// NewMtlsAuthValidator creates a validator bound to the certificate store.
+// httpsEnabled is router.https_enabled. headerTrustAny is
+// client_certificate_header.trust_any; when true the HTTPS-listener
+// requirement is relaxed, since a relayed header can arrive over plaintext.
 func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled, headerTrustAny bool) *MtlsAuthValidator {
 	return &MtlsAuthValidator{store: store, httpsEnabled: httpsEnabled, headerTrustAny: headerTrustAny}
 }
@@ -147,9 +132,8 @@ func paramsOrEmpty(p *map[string]interface{}) map[string]interface{} {
 	return *p
 }
 
-// collectMTLSAuthOccurrences finds every mtls-auth attachment, in document
-// order, across the API-level policies list and every operation's own
-// policies list.
+// collectMTLSAuthOccurrences finds every mtls-auth attachment at API and
+// operation level, in document order.
 func collectMTLSAuthOccurrences(apiConfig *api.RestAPI) []mtlsOccurrence {
 	var occs []mtlsOccurrence
 
@@ -188,12 +172,8 @@ func collectMTLSAuthOccurrences(apiConfig *api.RestAPI) []mtlsOccurrence {
 }
 
 // NamedAcceptEntryFieldPaths returns, in document order, the field path of
-// every accept entry across every mtls-auth occurrence on apiConfig (API- or
-// operation-level) whose `ca` explicitly names caName. An omitted `accept`
-// (inheriting the whole pool) never contributes a path here — this reports
-// only an EXPLICIT reference, which is what makes a client-CA authority
-// unremovable while the reference stands (see the certificate-delete
-// referential-integrity check in pkg/api/handlers/certificates.go).
+// every mtls-auth accept entry on apiConfig whose ca names caName. An omitted
+// accept, which inherits the pool, contributes nothing.
 func NamedAcceptEntryFieldPaths(apiConfig *api.RestAPI, caName string) []string {
 	var paths []string
 	for _, occ := range collectMTLSAuthOccurrences(apiConfig) {
@@ -220,11 +200,7 @@ func NamedAcceptEntryFieldPaths(apiConfig *api.RestAPI, caName string) []string 
 }
 
 // MtlsAuthAttachmentFieldPaths returns the field path of every mtls-auth
-// occurrence on apiConfig (spec.policies[i] or an operation's
-// spec.operations[k].policies[j]), in document order — used to build one 409
-// error entry per referencing API when the client-CA pool is about to lose
-// its last non-relay authority while some deployed API still attaches
-// mtls-auth (whether or not it names that authority explicitly).
+// occurrence on apiConfig, in document order.
 func MtlsAuthAttachmentFieldPaths(apiConfig *api.RestAPI) []string {
 	occs := collectMTLSAuthOccurrences(apiConfig)
 	paths := make([]string, 0, len(occs))
@@ -234,10 +210,8 @@ func MtlsAuthAttachmentFieldPaths(apiConfig *api.RestAPI) []string {
 	return paths
 }
 
-// ValidateRestAPI reports every deploy-blocking problem with every mtls-auth
-// attachment on apiConfig. Called from PolicyValidator.ValidateRestAPIPolicies
-// alongside (not instead of) the generic per-policy validation that runs for
-// every other policy name.
+// ValidateRestAPI reports every deploy-blocking problem with the mtls-auth
+// attachments on apiConfig.
 func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []ValidationError {
 	occs := collectMTLSAuthOccurrences(apiConfig)
 	if len(occs) == 0 {
@@ -246,9 +220,7 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 
 	var errs []ValidationError
 
-	// One occurrence per scope (spec.policies as a whole, or a single
-	// operation's own policies list): every occurrence after the first in
-	// the same scope is refused.
+	// Only one occurrence is allowed per policy chain.
 	seenScope := map[string]bool{}
 	for _, occ := range occs {
 		if seenScope[occ.scopeKey] {
@@ -260,9 +232,7 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 		seenScope[occ.scopeKey] = true
 	}
 
-	// API-level and operation-level attachment together: every
-	// operation-level occurrence is refused when an API-level occurrence
-	// also exists.
+	// Operation-level occurrences are refused when an API-level one exists.
 	hasAPILevel := false
 	for _, occ := range occs {
 		if occ.apiLevel {
@@ -311,9 +281,8 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 	return errs
 }
 
-// validateParams validates one mtls-auth occurrence's own params (unknown
-// keys and the accept list's structure), assuming the client-CA pool is
-// non-empty and HTTPS is enabled (both checked by the caller first).
+// validateParams validates one occurrence's params: unknown keys and the
+// accept list's structure.
 func (v *MtlsAuthValidator) validateParams(fieldPath string, params map[string]interface{}) []ValidationError {
 	var errs []ValidationError
 	paramsPath := fieldPath + ".params"
@@ -533,11 +502,9 @@ func validateAcceptEntryThumbprints(entryPath string, entry map[string]interface
 	return errs
 }
 
-// normalizeThumbprint canonicalises a caller-supplied thumbprint: lowercase,
-// no colon separators, no "sha256:" prefix. valid reports whether the result
-// is exactly 64 hex characters; changed reports whether normalisation
-// altered the input (used to decide whether MTLS_THUMBPRINT_NORMALISED is
-// warranted).
+// normalizeThumbprint canonicalises a thumbprint to lowercase with no colons
+// and no "sha256:" prefix. valid reports whether the result is 64 hex
+// characters; changed reports whether the input was altered.
 func normalizeThumbprint(raw string) (normalized string, changed bool, valid bool) {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	s = strings.TrimPrefix(s, "sha256:")
@@ -548,11 +515,8 @@ func normalizeThumbprint(raw string) (normalized string, changed bool, valid boo
 	return s, s != raw, true
 }
 
-// NormalizeThumbprint is the exported form of normalizeThumbprint, reused by
-// the chain-build-time injection in pkg/transform so the canonical 64
-// lowercase hex form served to the mtls-auth policy engine (in
-// __wso2_internal_mtls_accept) is produced by exactly the same normaliser as
-// the deploy-response echo in ResolveMtlsAuthForResponse.
+// NormalizeThumbprint is the exported form of normalizeThumbprint, so the
+// policy engine and the deploy response see the same canonical thumbprints.
 func NormalizeThumbprint(raw string) (normalized string, changed bool, valid bool) {
 	return normalizeThumbprint(raw)
 }
@@ -564,10 +528,9 @@ func unknownParamError(basePath, key string) ValidationError {
 	}
 }
 
-// clientAuthorityPool is the usage: client part of the certificate store as
-// the deploy-response resolution needs it: the non-relay authorities an
-// omitted accept inherits (in store order), every entry by name, and the
-// relay entries an accept entry might share an authority with.
+// clientAuthorityPool is the usage: client part of the certificate store: the
+// non-relay authorities an omitted accept inherits, every entry by name, and
+// the relay entries.
 type clientAuthorityPool struct {
 	names  []string
 	byName map[string]*models.StoredCertificate
@@ -621,17 +584,10 @@ func (p clientAuthorityPool) relaySharingAuthority(caName string) *models.Stored
 	return nil
 }
 
-// ResolveMtlsAuthForResponse computes the warnings and the echoed/resolved
-// view of every mtls-auth policy on apiConfig for a SUCCESSFUL deploy
-// response. It never mutates apiConfig — it returns a new value whose
-// mtls-auth policies carry the resolved `accept` list, leaving the caller's
-// original (which is what gets persisted) untouched, per
-// "the stored configuration stays exactly as the caller sent it, so pool
-// changes keep applying".
-//
-// Callers must only invoke this after ValidateRestAPI has reported zero
-// errors for apiConfig — it assumes every mtls-auth occurrence is
-// well-formed and does not re-validate.
+// ResolveMtlsAuthForResponse returns a copy of apiConfig whose mtls-auth
+// policies carry the resolved accept list, plus the deploy warnings. The
+// stored configuration stays as sent so pool changes keep applying. Call it
+// only after ValidateRestAPI reported no errors.
 func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (api.RestAPI, []clientca.Warning) {
 	if collectMTLSAuthOccurrences(&apiConfig) == nil {
 		return apiConfig, nil
@@ -670,10 +626,8 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 	return apiConfig, warnings
 }
 
-// resolvePolicyList resolves every mtls-auth entry in one policy chain
-// (either spec.policies or a single operation's policies), and reports
-// MTLS_AUTH_NOT_FIRST for any of the other auth policies preceding it in
-// that same chain.
+// resolvePolicyList resolves every mtls-auth entry in one policy chain and
+// reports MTLS_AUTH_NOT_FIRST for any auth policy preceding it.
 func (v *MtlsAuthValidator) resolvePolicyList(policies []api.Policy, listPath string, pool clientAuthorityPool) ([]api.Policy, []clientca.Warning) {
 	resolved := make([]api.Policy, len(policies))
 	copy(resolved, policies)
@@ -713,12 +667,8 @@ func (v *MtlsAuthValidator) resolvePolicyList(policies []api.Policy, listPath st
 	return resolved, warnings
 }
 
-// resolveOnePolicy resolves a single mtls-auth policy's accept list for the
-// response echo and reports MTLS_ACCEPT_INHERITS_POOL (accept omitted while
-// more than one authority is pooled), MTLS_ACCEPT_UNNARROWED (an explicit
-// entry with neither match nor thumbprints, whatever the pool size),
-// MTLS_ACCEPT_NAMES_RELAY_AUTHORITY (an explicit entry whose authority is
-// also a relay entry's) and MTLS_THUMBPRINT_NORMALISED as applicable.
+// resolveOnePolicy resolves one mtls-auth policy's accept list for the
+// response echo and reports the accept-list warnings that apply.
 func (v *MtlsAuthValidator) resolveOnePolicy(p api.Policy, fieldPath string, pool clientAuthorityPool) (api.Policy, []clientca.Warning) {
 	params := paramsOrEmpty(p.Params)
 	newParams := make(map[string]interface{}, len(params))
@@ -813,21 +763,10 @@ func (v *MtlsAuthValidator) resolveOnePolicy(p api.Policy, fieldPath string, poo
 	return p, warnings
 }
 
-// ValidateMTLSStartupInvariant enforces, once at startup, that no persisted
-// RestAPI attaches mtls-auth while neither the HTTPS listener nor the
-// header-relay trust_any relaxation can satisfy its authentication
-// requirement. This mirrors the deploy-time check in ValidateRestAPI,
-// applied to whatever is already on disk: httpsEnabled is
-// router.https_enabled and headerTrustAny is
-// router.downstream_tls.client_certificate_header.trust_any — when true the
-// HTTPS-listener requirement is relaxed, as a relayed header can
-// legitimately arrive over plaintext from a trusted front proxy. Both are
-// config-file-sourced and static per process, so this only ever fires when
-// the operator disabled HTTPS (and the header relaxation) after previously
-// deploying an mtls-auth API, per authentication_authorization.md
-// GO-AUTH-011: validate the *effective* startup state and fail closed
-// (refuse to start) rather than silently running with a listener that can
-// never satisfy an already-deployed API's authentication requirement.
+// ValidateMTLSStartupInvariant refuses to start when a persisted RestAPI
+// attaches mtls-auth but neither HTTPS nor header trust_any is enabled, so
+// such an API can never authenticate a caller. It applies the deploy-time
+// check to configurations already stored.
 func ValidateMTLSStartupInvariant(configs []*models.StoredConfig, httpsEnabled, headerTrustAny bool) error {
 	if httpsEnabled || headerTrustAny {
 		return nil

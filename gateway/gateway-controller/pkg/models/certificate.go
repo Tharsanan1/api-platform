@@ -20,50 +20,36 @@ package models
 
 import "time"
 
-// Certificate usage values. Usage determines which trust purpose a stored
-// certificate serves: verifying upstream/backend HTTPS connections, pooling
-// client certificate authorities for mutual TLS, or (identity) a gateway
-// identity the gateway itself presents to a backend requiring mutual TLS.
-// The three purposes never share a trust bundle (see pkg/certstore) — a
-// usage: identity row is never treated as a trust anchor and never counts
-// toward the usage: client last-authority rule.
+// Certificate usage values. The three purposes never share a trust bundle,
+// and an identity row is never a trust anchor.
 const (
-	// CertificateUsageUpstream marks a certificate as backend/upstream trust
-	// (the original, pre-mTLS purpose of the /certificates endpoint).
+	// CertificateUsageUpstream marks a certificate as backend/upstream trust.
 	CertificateUsageUpstream = "upstream"
 
 	// CertificateUsageClient marks a certificate as a pooled client
 	// certificate authority, used to authenticate API callers over mTLS.
 	CertificateUsageClient = "client"
 
-	// CertificateUsageIdentity marks a row as a gateway identity: a
-	// certificate chain (leaf first) plus its encrypted private key
-	// (PrivateKeyCiphertext), presented by the gateway on outbound
-	// connections to a backend requiring mutual TLS. Named by
-	// upstreamDefinitions[].tls.identity.
+	// CertificateUsageIdentity marks a row as a gateway identity: a chain and
+	// encrypted private key the gateway presents to a backend requiring
+	// mutual TLS.
 	CertificateUsageIdentity = "identity"
 )
 
 // Certificate role values. Role only applies to usage: client certificates
 // and describes how the gateway is expected to use the authority.
 const (
-	// CertificateRoleClient is the default role for a client-CA entry: the
-	// authority is used to validate a client certificate presented directly
-	// on the mTLS connection.
+	// CertificateRoleClient is the default role: the authority validates a
+	// client certificate presented on the connection.
 	CertificateRoleClient = "client"
 
-	// CertificateRoleRelay marks a client-CA entry as trusted for validating
-	// a client certificate relayed via a header (e.g. from a terminating
-	// load balancer/proxy) rather than presented on the connection itself.
+	// CertificateRoleRelay marks an entry as a front proxy whose connection
+	// vouches for a client certificate relayed in a header.
 	CertificateRoleRelay = "relay"
 )
 
-// CertificateMatch narrows a role: relay pool entry to the connections it
-// vouches for: a relayed header is only believed when the connection itself
-// authenticated as this relay entry AND (when Match is non-nil) its
-// certificate carries at least one of the listed SANs. A nil Match (the
-// common case) means the relay entry vouches for any connection
-// authenticated as it, with no further narrowing.
+// CertificateMatch narrows a relay entry to connections whose certificate
+// carries at least one of the listed SANs. A nil Match does not narrow.
 type CertificateMatch struct {
 	DNSSANs []string `json:"dnsSANs,omitempty"`
 	URISANs []string `json:"uriSANs,omitempty"`
@@ -83,14 +69,11 @@ type StoredCertificate struct {
 	Role        string            `json:"role"`            // "client" (default) or "relay"; meaningful only for usage: client
 	Match       *CertificateMatch `json:"match,omitempty"` // Only meaningful for role: relay; nil means unnarrowed
 
-	// PrivateKeyCiphertext is the encryption package's marshalled payload
-	// (see encryption.MarshalPayload) for a usage: identity row's private
-	// key — never the plaintext, and never marshalled into any API
-	// response. Empty for every other usage.
+	// PrivateKeyCiphertext is a usage: identity row's encrypted private key.
+	// It is never marshalled into an API response.
 	PrivateKeyCiphertext string `json:"-"`
 
-	// KeyAlgorithm names a usage: identity row's leaf key algorithm (e.g.
-	// "RSA", "ECDSA", "Ed25519"). Empty for every other usage.
+	// KeyAlgorithm names a usage: identity row's leaf key algorithm.
 	KeyAlgorithm string `json:"keyAlgorithm,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"` // When uploaded

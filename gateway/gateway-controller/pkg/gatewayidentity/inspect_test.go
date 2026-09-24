@@ -36,11 +36,8 @@ import (
 )
 
 // ============ Certificate/key generation helpers ============
-//
-// pkg/testutil/pki only generates ECDSA keys; this package's own tests need
-// RSA and Ed25519 leaves too (directive: chain+key match for all three
-// algorithms), so a small self-contained generator lives here instead of
-// widening pki for one caller.
+// These tests need RSA and Ed25519 leaves, which the shared pki helper does
+// not generate.
 
 func mustSerial(t *testing.T) *big.Int {
 	t.Helper()
@@ -100,8 +97,7 @@ func issueLeaf(t *testing.T, cn string, key crypto.Signer, parent *x509.Certific
 	return der
 }
 
-// issueRootCA creates a self-signed CA certificate (always ECDSA — the CA's
-// own algorithm is irrelevant to what these tests exercise).
+// issueRootCA creates a self-signed ECDSA CA certificate.
 func issueRootCA(t *testing.T, cn string) (*x509.Certificate, crypto.Signer) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -239,10 +235,7 @@ func TestInspect_KeyDoesNotMatchCertificate_ExactMessage(t *testing.T) {
 // ============ InspectPrivateKey: passphrase-protected keys ============
 
 func TestInspectPrivateKey_EncryptedPKCS8Header_ExactMessage(t *testing.T) {
-	// A genuine EncryptedPrivateKeyInfo isn't needed — InspectPrivateKey
-	// rejects on the PEM type header alone, before attempting to parse the
-	// body, matching what a real `openssl pkcs8 -topk8 -v2 aes-256-cbc`
-	// output looks like from the outside.
+	// The PEM type alone causes the rejection, so the body need not decrypt.
 	block := pem.EncodeToMemory(&pem.Block{Type: "ENCRYPTED PRIVATE KEY", Bytes: []byte("not actually decryptable")})
 
 	_, _, err := InspectPrivateKey(block)
@@ -262,9 +255,7 @@ func TestInspectPrivateKey_EncryptedPKCS8Header_ExactMessage(t *testing.T) {
 }
 
 func TestInspectPrivateKey_LegacyProcTypeEncryptedHeader_ExactMessage(t *testing.T) {
-	// Legacy OpenSSL-style "-----BEGIN RSA PRIVATE KEY-----" with a
-	// "Proc-Type: 4,ENCRYPTED" header — must be rejected by the header alone,
-	// same as the PKCS#8 case above.
+	// OpenSSL-style RSA PRIVATE KEY with a "Proc-Type: 4,ENCRYPTED" header.
 	block := pem.EncodeToMemory(&pem.Block{
 		Type:    "RSA PRIVATE KEY",
 		Headers: map[string]string{"Proc-Type": "4,ENCRYPTED", "DEK-Info": "AES-128-CBC,0123456789ABCDEF"},

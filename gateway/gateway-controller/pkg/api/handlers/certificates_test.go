@@ -212,10 +212,8 @@ MIIEowIBAAKCAQEA...
 // These tests don't need snapshot manager mocking
 
 // newCertListHandler wraps ListCertificates with CorrelationIDMiddleware for testing.
-// ListCertificates takes a generated ListCertificatesParams argument (for the
-// "usage" query parameter); this builds it from the request's own query
-// string rather than the generated router, since these tests call the
-// handler directly.
+// newCertListHandler builds ListCertificatesParams from the query string,
+// since these tests bypass the generated router.
 func newCertListHandler(server *APIServer) http.Handler {
 	listCertificates := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var params management.ListCertificatesParams
@@ -909,20 +907,15 @@ func TestUploadCertificate_JSONBoundaries(t *testing.T) {
 // Client certificate authority pool (mTLS) tests
 // ============================================================================
 
-// createTestAPIServerWithCertStore builds a server with a real, working
-// xds.SnapshotManager/Translator/CertStore — needed for upload flows that
-// succeed all the way through (they reload the cert store and update the SDS
-// snapshot). db must already contain at least one certificate before this is
-// called: the translator's cert store eagerly loads once at construction
-// time and is left permanently nil if that first load finds nothing to load.
+// createTestAPIServerWithCertStore builds a server with a real snapshot
+// manager and certificate store, for flows that reload the store and update
+// SDS.
 func createTestAPIServerWithCertStore(t *testing.T, db storage.Storage) *APIServer {
 	t.Helper()
 	server := createTestAPIServerWithDB(db)
 	server.routerConfig.Upstream.TLS.CustomCertsPath = t.TempDir()
-	// Translating even zero deployed APIs still builds the base HTTP listener,
-	// which loads the request-transformation lua script from disk; point it at
-	// the real file (relative to this package directory) rather than the
-	// default "./lua/..." path, which only resolves from the repo root.
+	// The base listener loads this script; the default path only resolves
+	// from the repo root.
 	server.routerConfig.Lua.RequestTransformation.ScriptPath = "../../../lua/request_transformation.lua"
 	snapshotManager, err := xds.NewSnapshotManager(server.store, server.logger, server.routerConfig, db, server.systemConfig)
 	require.NoError(t, err)
@@ -1008,9 +1001,8 @@ func TestUploadCertificate_SelfSignedLeaf_UsageClient_FlaggedAsLeaf(t *testing.T
 	assert.Equal(t, "CLIENT_CA_IS_LEAF", w0["code"])
 }
 
-// uploadClientCertificateBody is a small helper for the rejection tests
-// below: none of them reach the snapshot manager (validation fails first),
-// so createTestAPIServerWithDB is enough — no cert store setup needed.
+// uploadCertificateBody posts an upload for rejection tests, which fail
+// validation before reaching the snapshot manager.
 func uploadCertificateBody(t *testing.T, server *APIServer, reqBody UploadCertificateRequest) *httptest.ResponseRecorder {
 	t.Helper()
 	handler := newUploadCertHandler(server)
@@ -1192,10 +1184,8 @@ func TestListCertificates_FilterByUsage_ClientOnly(t *testing.T) {
 	assert.Equal(t, "client-cert", resp.Certificates[0].Name)
 }
 
-// TestListCertificates_WarningsAndFieldPresence covers three related
-// assertions in one pass over a mixed upstream/client listing: a client row
-// expiring soon carries a CERT_EXPIRES_SOON warning and referencedByApis: 0,
-// while an upstream row carries none of warnings/referencedByApis/role.
+// A client row expiring soon carries CERT_EXPIRES_SOON and referencedByApis:
+// 0; an upstream row carries neither, nor a role.
 func TestListCertificates_WarningsAndFieldPresence(t *testing.T) {
 	mockDB := NewMockStorage()
 	upstream := pki.NewRootCA(t, "Field Presence Upstream CA")
@@ -1274,10 +1264,9 @@ func relayAuthorityCert(name string) *models.StoredCertificate {
 	}
 }
 
-// restAPIConfigWithMtlsAuth builds a minimal deployed RestApi StoredConfig
-// attaching mtls-auth either at API level (apiLevel true) or operation
-// level, with an accept list naming caNames (in order) — or, when caNames is
-// empty, no accept param at all (inheriting the whole client-CA pool).
+// restAPIConfigWithMtlsAuth builds a deployed RestApi attaching mtls-auth at
+// API or operation level, accepting caNames, or inheriting the pool when
+// caNames is empty.
 func restAPIConfigWithMtlsAuth(handle string, apiLevel bool, caNames ...string) *models.StoredConfig {
 	var params map[string]interface{}
 	if len(caNames) > 0 {
@@ -1326,8 +1315,6 @@ func restAPIConfigWithMtlsAuth(handle string, apiLevel bool, caNames ...string) 
 		Configuration: cfg,
 	}
 }
-
-// ---- checkClientAuthorityDeletable: direct unit tests ----
 
 func TestCheckClientAuthorityDeletable_NamedInAcceptList_APILevel_Blocks(t *testing.T) {
 	mockDB := NewMockStorage()
@@ -1397,10 +1384,8 @@ func TestCheckClientAuthorityDeletable_LastNonRelayAuthority_Inheriting_Blocks(t
 	assert.Equal(t, "spec.policies[0]", *errs[0].Field)
 }
 
-// TestCheckClientAuthorityDeletable_ReferencedOnlyByInheritingAPIs_WithReplacement_Allowed
-// guards that once a replacement non-relay authority exists in the pool, the
-// "last authority" refusal no longer applies — even though an inheriting API
-// is still deployed and this authority is unnamed anywhere.
+// With another non-relay authority in the pool, the last-authority refusal
+// does not apply.
 func TestCheckClientAuthorityDeletable_ReferencedOnlyByInheritingAPIs_WithReplacement_Allowed(t *testing.T) {
 	mockDB := NewMockStorage()
 	target := clientAuthorityCert("ref-partner-b")
@@ -1413,8 +1398,6 @@ func TestCheckClientAuthorityDeletable_ReferencedOnlyByInheritingAPIs_WithReplac
 
 	assert.False(t, blocked, "expected removal to be allowed while a replacement non-relay authority remains")
 }
-
-// ---- Full HTTP round trip: confirms the handler wiring, not just the message ----
 
 func TestDeleteCertificate_NamedInAcceptList_Returns409(t *testing.T) {
 	mockDB := NewMockStorage()
@@ -1440,11 +1423,8 @@ func TestDeleteCertificate_NamedInAcceptList_Returns409(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestDeleteCertificate_RelayRow_DeletesEvenWhenLastAuthority guards that a
-// relay entry is never counted as a client-CA authority at all: it deletes
-// successfully even when it is the pool's only usage: client row, while a
-// deployed API attaching mtls-auth (inheriting) would otherwise refuse to
-// lose its last non-relay authority.
+// A relay entry is never counted as an authority, so it deletes even as the
+// pool's only row while an inheriting API is deployed.
 func TestDeleteCertificate_RelayRow_DeletesEvenWhenLastAuthority(t *testing.T) {
 	mockDB := NewMockStorage()
 	relay := relayAuthorityCert("ref-edge-lb")
@@ -1460,10 +1440,8 @@ func TestDeleteCertificate_RelayRow_DeletesEvenWhenLastAuthority(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 }
 
-// TestDeleteCertificate_UpstreamRow_UnaffectedByReferentialCheck guards that
-// the new referential-integrity check never even runs for a usage: upstream
-// certificate, which keeps today's unconditional-delete behaviour — even
-// while a deployed API would block losing its last CLIENT authority.
+// An unreferenced upstream certificate deletes even while a deployed API
+// would block losing the last client authority.
 func TestDeleteCertificate_UpstreamRow_UnaffectedByReferentialCheck(t *testing.T) {
 	mockDB := NewMockStorage()
 	upstream := &models.StoredCertificate{
@@ -1471,9 +1449,7 @@ func TestDeleteCertificate_UpstreamRow_UnaffectedByReferentialCheck(t *testing.T
 		NotAfter: time.Now().Add(365 * 24 * time.Hour), Certificate: []byte(validTestCert),
 	}
 	client := clientAuthorityCert("ref-only-authority")
-	// A second, untouched upstream cert keeps the cert store's reload
-	// (triggered by the delete below) from finding zero loadable sources —
-	// unrelated to the referential-integrity behaviour this test targets.
+	// A second upstream cert keeps the reload after the delete non-empty.
 	mockDB.certs = []*models.StoredCertificate{upstream, client, seedUpstreamCert(t)}
 	server := createTestAPIServerWithCertStore(t, mockDB)
 	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true)))
@@ -1486,11 +1462,8 @@ func TestDeleteCertificate_UpstreamRow_UnaffectedByReferentialCheck(t *testing.T
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 }
 
-// TestListCertificates_ReferencedByApis_CountsNamingAPIsOnly guards that
-// GET /certificates' referencedByApis counts only APIs that explicitly name
-// an authority in their accept list — an API that merely inherits the pool
-// contributes nothing to the count, even though it does depend on the
-// authority in a looser sense.
+// referencedByApis counts only APIs that name the authority, not ones that
+// inherit the pool.
 func TestListCertificates_ReferencedByApis_CountsNamingAPIsOnly(t *testing.T) {
 	mockDB := NewMockStorage()
 	named := clientAuthorityCert("ref-partner-a")
@@ -1573,11 +1546,8 @@ func TestUploadCertificate_MatchWithUsageUpstream_Rejected(t *testing.T) {
 	assert.Equal(t, "match applies only to role: relay entries", entry["message"])
 }
 
-// TestUploadCertificate_EmptyDNSSANsList_Rejected posts raw JSON (rather than
-// marshaling UploadCertificateRequest) because Match.DNSSANs carries
-// `json:"dnsSANs,omitempty"` — an empty-but-non-nil Go slice would be dropped
-// entirely by json.Marshal, silently turning this into the "omitted" case
-// instead of the "empty list" case this test targets.
+// Raw JSON, because omitempty would drop an empty dnsSANs slice and test the
+// omitted case instead.
 func TestUploadCertificate_EmptyDNSSANsList_Rejected(t *testing.T) {
 	mockDB := NewMockStorage()
 	server := createTestAPIServerWithDB(mockDB)
@@ -1610,9 +1580,7 @@ func TestUploadCertificate_DNSSANsElementEmpty_RejectedAtIndexZero(t *testing.T)
 	assert.Equal(t, "list at least one non-empty SAN", entry["message"])
 }
 
-// TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList guards that a
-// relay entry's match narrowing round-trips: present in the 201 upload
-// response AND on the listed item afterwards.
+// A relay entry's match appears in the upload response and the listing.
 func TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList(t *testing.T) {
 	mockDB := NewMockStorage()
 	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
@@ -1668,10 +1636,7 @@ func TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList(t *testing.T) 
 // Gateway identities: usage: identity certificates
 // ============================================================================
 
-// testEncryptionManager builds a real (temp-key-backed) AES-GCM provider
-// chain — usage: identity upload/update always goes through
-// s.encryptPrivateKey, so a nil encryptionManager isn't an option for these
-// tests the way it is for the rejection-only tests above.
+// testEncryptionManager builds an AES-GCM provider backed by a temporary key.
 func testEncryptionManager(t *testing.T) *encryption.ProviderManager {
 	t.Helper()
 	dir := t.TempDir()
@@ -1690,14 +1655,8 @@ func testEncryptionManager(t *testing.T) *encryption.ProviderManager {
 	return mgr
 }
 
-// createTestAPIServerWithIdentitySupport wires both the cert store (per
-// createTestAPIServerWithCertStore's doc comment — db must already contain
-// at least one certificate) and an encryption manager, needed by every
-// usage: identity upload/update path. Mirrors cmd/controller/main.go, which
-// wires the SAME provider manager to both APIServer.SetEncryptionManager
-// (encrypt-at-write, used by Upload/UpdateCertificate) and
-// CertStore.SetEncryptionManager (decrypt-at-read, used by
-// GetGatewayIdentityMaterial — the SDS secret build and the tls-test probe).
+// createTestAPIServerWithIdentitySupport wires the certificate store and one
+// encryption manager for both encrypting and decrypting identity keys.
 func createTestAPIServerWithIdentitySupport(t *testing.T, db storage.Storage) *APIServer {
 	t.Helper()
 	server := createTestAPIServerWithCertStore(t, db)
@@ -1709,9 +1668,7 @@ func createTestAPIServerWithIdentitySupport(t *testing.T, db storage.Storage) *A
 	return server
 }
 
-// gatewayIdentityLeaf builds a self-contained (own root CA) client-auth leaf
-// suitable for a usage: identity upload — an identity's trust chain is
-// irrelevant to these tests, only that the certificate+key pair matches.
+// gatewayIdentityLeaf builds a client-auth leaf under its own root CA.
 func gatewayIdentityLeaf(t *testing.T, cn string) *pki.Entity {
 	t.Helper()
 	ca := pki.NewRootCA(t, cn+" Root CA")
@@ -1737,12 +1694,8 @@ func updateCertificateBody(t *testing.T, server *APIServer, certID string, reqBo
 	return w
 }
 
-// restAPIConfigWithUpstreamTLS builds a minimal deployed RestApi StoredConfig
-// with one upstreamDefinitions entry named "partner" carrying a tls block —
-// identity and/or trustedCAs, whichever is non-empty — targeting an https://
-// backend. The gateway-identity/upstream-certificate referential-integrity
-// counterpart to restAPIConfigWithMtlsAuth (which covers mtls-auth accept
-// lists instead).
+// restAPIConfigWithUpstreamTLS builds a deployed RestApi whose "partner"
+// definition carries a tls block with the given identity and trustedCAs.
 func restAPIConfigWithUpstreamTLS(handle, identity string, trustedCAs ...string) *models.StoredConfig {
 	tls := map[string]interface{}{}
 	if identity != "" {
@@ -1795,8 +1748,6 @@ func restAPIConfigWithUpstreamTLS(handle, identity string, trustedCAs ...string)
 		Configuration: cfg,
 	}
 }
-
-// ---- Upload ----
 
 func TestUploadCertificate_UsageIdentity_Success(t *testing.T) {
 	mockDB := NewMockStorage()
@@ -1859,10 +1810,7 @@ func TestUploadCertificate_IdentityWithoutPrivateKey_Rejected(t *testing.T) {
 func TestUploadCertificate_DuplicateIdentityName_Conflict(t *testing.T) {
 	mockDB := NewMockStorage()
 	mockDB.saveErr = fmt.Errorf("%w: certificate with name 'out-identity-a' already exists", storage.ErrConflict)
-	// s.db.SaveCertificate fails (and the handler returns) before ever
-	// reaching the cert store/SDS snapshot machinery, so createTestAPIServerWithDB
-	// is enough here — only the encryption manager is needed, since
-	// encryptPrivateKey runs ahead of the save.
+	// The save fails before the cert store is reached.
 	server := createTestAPIServerWithDB(mockDB)
 	server.encryptionManager = testEncryptionManager(t)
 
@@ -1879,8 +1827,6 @@ func TestUploadCertificate_DuplicateIdentityName_Conflict(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "a gateway identity named out-identity-a already exists", resp["message"])
 }
-
-// ---- List ----
 
 func TestListCertificates_UsageIdentity_NoPrivateKeyAndReferencedByApis(t *testing.T) {
 	mockDB := NewMockStorage()
@@ -1918,8 +1864,6 @@ func TestListCertificates_UsageIdentity_NoPrivateKeyAndReferencedByApis(t *testi
 	assert.Equal(t, "ECDSA", item["keyAlgorithm"])
 }
 
-// ---- Update (rotation) ----
-
 func TestUpdateCertificate_IdentityRow_Success(t *testing.T) {
 	original := gatewayIdentityLeaf(t, "rotate-original")
 	mockDB := NewMockStorage()
@@ -1948,7 +1892,6 @@ func TestUpdateCertificate_IdentityRow_Success(t *testing.T) {
 	assert.False(t, hasPrivateKey)
 	assert.Equal(t, "out-identity-a", resp["name"], "name must stay fixed across rotation")
 
-	// The stored row itself was actually rotated to the new certificate.
 	updated, err := mockDB.GetCertificate("rotate-identity-1")
 	require.NoError(t, err)
 	assert.Equal(t, string(rotated.PEM()), string(updated.Certificate))
@@ -1971,8 +1914,6 @@ func TestUpdateCertificate_UpstreamRow_Rejected(t *testing.T) {
 	entry := firstFieldError(t, w.Body.Bytes(), "usage")
 	assert.Equal(t, "only usage: identity certificates can be updated; delete and re-upload other certificates", entry["message"])
 }
-
-// ---- Delete referential integrity ----
 
 func TestDeleteCertificate_IdentityNamedInUpstreamTLS_Returns409(t *testing.T) {
 	identity := gatewayIdentityLeaf(t, "del-identity")
@@ -2033,12 +1974,7 @@ func TestDeleteCertificate_UpstreamRowNamedInTrustedCAs_Returns409(t *testing.T)
 	assert.Equal(t, "spec.upstreamDefinitions[0].tls.trustedCAs[0]", entry["field"])
 }
 
-// TestCheckClientAuthorityDeletable_UnaffectedByIdentityRows_LastAuthorityStillBlocked
-// and TestDeleteCertificate_IdentityRow_AllowedWhenUnreferenced_DespiteMtlsAuthAPIDeployed
-// together cover "identity rows are excluded from the last-authority rule":
-// the client-CA last-authority check must not be satisfied (or disturbed) by
-// an identity row sharing the pool, and an identity's own delete path must
-// never apply that rule to itself at all.
+// An identity row never counts toward the last-authority rule.
 func TestCheckClientAuthorityDeletable_UnaffectedByIdentityRows_LastAuthorityStillBlocked(t *testing.T) {
 	mockDB := NewMockStorage()
 	onlyAuthority := clientAuthorityCert("ref-only-authority")
@@ -2068,8 +2004,6 @@ func TestDeleteCertificate_IdentityRow_AllowedWhenUnreferenced_DespiteMtlsAuthAP
 	mockDB := NewMockStorage()
 	mockDB.certs = []*models.StoredCertificate{clientAuth, target, seedUpstreamCert(t)}
 	server := createTestAPIServerWithCertStore(t, mockDB)
-	// mtls-auth is deployed and inherits the whole client-CA pool — this must
-	// have no bearing on an unreferenced identity's own deletability.
 	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true)))
 
 	handler := newDeleteCertHandler(server, target.UUID)

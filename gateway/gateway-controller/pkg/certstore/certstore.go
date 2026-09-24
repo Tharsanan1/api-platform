@@ -38,8 +38,7 @@ import (
 )
 
 // filterUpstreamCertificates returns only the certificates whose Usage is
-// upstream trust. An empty Usage is treated as upstream for backward
-// compatibility with rows written before the usage column existed.
+// upstream trust. A row with no usage stored is an upstream certificate.
 func filterUpstreamCertificates(certs []*models.StoredCertificate) []*models.StoredCertificate {
 	filtered := make([]*models.StoredCertificate, 0, len(certs))
 	for _, cert := range certs {
@@ -68,14 +67,8 @@ type CertStore struct {
 	db             storage.Storage
 	mu             sync.RWMutex // Protects combinedCerts from concurrent access
 
-	// encryptionManager decrypts a gateway identity's private key when
-	// building its SDS secret. Set post-construction via
-	// SetEncryptionManager: the CertStore is constructed deep inside
-	// NewTranslator, while the encryption provider manager is built
-	// independently in main() from the loaded provider config and wired in
-	// afterward via GetCertStore(). nil makes GetGatewayIdentityMaterial fail
-	// closed rather than serve an undecryptable (or worse, still-encrypted)
-	// key.
+	// encryptionManager decrypts gateway identity private keys. It is set
+	// after construction; while nil, GetGatewayIdentityMaterial fails.
 	encryptionManager *encryption.ProviderManager
 }
 
@@ -117,9 +110,7 @@ func (cs *CertStore) LoadCertificates() ([]byte, error) {
 	// Load custom certificates from database (primary and only source for custom certs)
 	dbCerts, count, err := cs.loadDatabaseCertificates()
 	if err != nil {
-		// The database is the source of every uploaded certificate, so a read
-		// failure here is a startup failure, not a bundle to serve with rows
-		// silently missing.
+		// A read failure must not yield a bundle with rows silently missing.
 		return nil, fmt.Errorf("loading certificates from database: %w", err)
 	}
 	if count > 0 {
@@ -166,11 +157,8 @@ func (cs *CertStore) LoadCertificates() ([]byte, error) {
 }
 
 // loadDatabaseCertificates loads all upstream-trust certificates from the
-// database. Certificates uploaded with usage: client (the client
-// certificate authority pool used for mutual TLS) are never included here —
-// the two trust purposes must never share a bundle. An empty/legacy Usage
-// value is treated as upstream, matching rows written before this column
-// existed.
+// database. usage: client rows are never included: the two trust purposes
+// must never share a bundle.
 func (cs *CertStore) loadDatabaseCertificates() ([]byte, int, error) {
 	if cs.db == nil {
 		return nil, 0, nil
@@ -350,16 +338,8 @@ func (cs *CertStore) GetCombinedCertificates() []byte {
 }
 
 // GetClientCABundle returns the concatenated PEM bundle of every usage:
-// client certificate in the pool (the client certificate authorities used to
-// validate an mTLS connection), in the order the store returns them. It
-// never includes usage: upstream rows — the two trust purposes must never
-// share a bundle (see loadDatabaseCertificates).
-//
-// Returns (nil, nil) when the pool is empty. An empty pool is not itself an
-// error here: deploy-time validation (pkg/config's MtlsAuthValidator) is
-// what prevents an API from attaching mtls-auth while the pool is empty, so
-// by the time this is called for a snapshot that actually needs the
-// downstream_client_ca secret, the pool is expected to be non-empty.
+// client certificate, in store order. It returns (nil, nil) for an empty
+// pool; deploy-time validation keeps mtls-auth off an empty pool.
 func (cs *CertStore) GetClientCABundle() ([]byte, error) {
 	certs, err := cs.db.ListCertificatesByUsage(models.CertificateUsageClient)
 	if err != nil {
@@ -376,13 +356,9 @@ func (cs *CertStore) GetClientCABundle() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// GetGatewayIdentityMaterial resolves a gateway identity by name — a
-// certificates row with usage: identity — to its PEM certificate chain
-// (leaf first) and decrypted private key PEM, for inlining into the
-// identity's own SDS TlsCertificate secret. Returns an error — never a
-// decrypted-but-still-encrypted or partial result — when the row cannot be
-// found, is not usage: identity, no encryption manager is configured, or
-// decryption fails.
+// GetGatewayIdentityMaterial resolves a usage: identity row by name to its
+// PEM certificate chain, leaf first, and decrypted private key. It never
+// returns a partial or still-encrypted result.
 func (cs *CertStore) GetGatewayIdentityMaterial(name string) (certChainPEM []byte, privateKeyPEM []byte, err error) {
 	cert, err := cs.db.GetCertificateByName(name)
 	if err != nil {
@@ -412,12 +388,8 @@ func (cs *CertStore) GetGatewayIdentityMaterial(name string) (certChainPEM []byt
 }
 
 // GetUpstreamTrustBundle concatenates the PEM certificates of the named
-// usage: upstream rows, in the given order, for a per-upstream
-// ValidationContext SDS secret. Returns an error if any named certificate
-// cannot be found — deploy-time validation (config.UpstreamTLSValidator)
-// already confirms every name exists and is usage: upstream, so a failure
-// here means the pool changed between deploy and snapshot build; fail
-// closed rather than silently build a smaller trust set than configured.
+// usage: upstream rows, in the given order. It errors if any name is missing
+// rather than build a smaller trust set than configured.
 func (cs *CertStore) GetUpstreamTrustBundle(names []string) ([]byte, error) {
 	var buf bytes.Buffer
 	for _, name := range names {
@@ -430,11 +402,8 @@ func (cs *CertStore) GetUpstreamTrustBundle(names []string) ([]byte, error) {
 			usage = models.CertificateUsageUpstream
 		}
 		if usage != models.CertificateUsageUpstream {
-			// Defense in depth: deploy-time validation already refuses a
-			// trustedCAs entry naming anything but a usage: upstream row,
-			// so this only fires if the pool changed underneath an already
-			// -deployed definition — fail closed rather than build a trust
-			// bundle out of a client authority or a gateway identity.
+			// Never build a trust bundle out of a client authority or a
+			// gateway identity.
 			return nil, fmt.Errorf("certificate %q is not usage: upstream", name)
 		}
 		buf.Write(cert.Certificate)

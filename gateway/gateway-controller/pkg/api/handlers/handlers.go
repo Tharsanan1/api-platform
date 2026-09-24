@@ -85,11 +85,8 @@ type APIServer struct {
 	// the policy engine after every certificate write that can change it.
 	clientAuthorities *utils.ClientAuthorityPublisher
 
-	// encryptionManager encrypts a gateway identity's private key at rest.
-	// Set post-construction via SetEncryptionManager, since the encryption
-	// provider manager is built from operator config that may configure no
-	// provider at all; nil means gateway-identity upload/update is refused
-	// (fail-closed — a key must never be persisted unencrypted).
+	// encryptionManager encrypts gateway identity private keys at rest.
+	// While nil, identity uploads are refused so no key is stored in clear.
 	encryptionManager *encryption.ProviderManager
 }
 

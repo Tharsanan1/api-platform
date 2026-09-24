@@ -272,25 +272,6 @@ services:
     networks:
       - it-gateway-runtime-network
 
-  # Unlike the nginx-based mtls-backend-* services above, this one actually
-  # fails the TLS handshake (RequireAndVerifyClientCert) on a client
-  # certificate outside its configured client CA — nginx always completes the
-  # handshake and answers at the HTTP layer instead, which cannot produce the
-  # gateway's BACKEND_REJECTED_IDENTITY tls-test result.
-  mtls-strict-backend:
-    container_name: it-mtls-strict-backend
-    build:
-      context: ./mock-api/mtls-strict
-      dockerfile: Dockerfile
-    environment:
-      - MTLS_STRICT_SERVER_CERT=/etc/mtls-pki/backend-server-strict.crt
-      - MTLS_STRICT_SERVER_KEY=/etc/mtls-pki/backend-server-strict.key
-      - MTLS_STRICT_CLIENT_CA=/etc/mtls-pki/ca-b.crt
-    volumes:
-      - ./resources/mtls-pki:/etc/mtls-pki:ro
-    networks:
-      - it-gateway-runtime-network
-
   # Mock Azure Content Safety for content moderation policy testing
   mock-azure-content-safety:
     container_name: it-mock-azure-content-safety

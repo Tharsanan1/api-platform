@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -1061,14 +1062,22 @@ type CELEvaluator interface {
 	EvaluateStreamingResponseCondition(expression string, ctx *policy.ResponseStreamContext) (bool, error)
 }
 
-// executionStatus returns the policy_executions_total "status" label: "denied"
-// when the action is an immediate response, "executed" otherwise. Streaming
-// actions can never short-circuit, so they always report "executed".
+// executionStatus returns the policy_executions_total "status" label:
+// "denied" when the action is an immediate response with status 401 or 403,
+// "short_circuited" for any other immediate response, and "executed"
+// otherwise. Streaming actions can never short-circuit, so they always
+// report "executed".
 func executionStatus(action any) string {
-	if _, ok := action.(policy.ImmediateResponse); ok {
-		return "denied"
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		return "executed"
 	}
-	return "executed"
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "denied"
+	default:
+		return "short_circuited"
+	}
 }
 
 // NewChainExecutor creates a new ChainExecutor execution engine

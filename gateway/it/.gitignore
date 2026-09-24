@@ -28,6 +28,3 @@ Thumbs.db
 resources/mtls-pki/*.crt
 resources/mtls-pki/*.key
 resources/mtls-pki/*.json
-
-# built locally by the mtls-strict Dockerfile / go build; never committed
-mock-api/mtls-strict/mtls-strict

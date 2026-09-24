@@ -346,62 +346,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /rest-apis/{id}/upstreams/{name}/tls-test:
-    post:
-      summary: Probe an upstream definition's TLS handshake
-      description: >
-        Dial the deployed upstream definition's first target once with the
-        identity, trust set and hostname-verification setting it is
-        configured with, complete (or fail) the TLS handshake, and report
-        the outcome. No HTTP request is made to the backend. The request
-        body is ignored.
-      operationId: testUpstreamTLS
-      x-basicauth-roles: [admin, developer]
-      tags:
-        - Rest API Management
-      parameters:
-        - name: id
-          in: path
-          required: true
-          description: Unique public identifier of the deployed API
-          schema:
-            type: string
-          example: out-tls-test-api
-        - name: name
-          in: path
-          required: true
-          description: Name of the upstream definition to probe
-          schema:
-            type: string
-          example: good
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        "200":
-          description: >
-            The probe always returns 200 — the handshake outcome is carried
-            in the `result` field, not the HTTP status.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UpstreamTLSTestResponse"
-        "404":
-          description: RestAPI or upstream definition not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
   /rest-apis/{id}/api-keys/{apiKeyName}/regenerate:
     post:
       summary: Regenerate API key for an API
@@ -5461,48 +5405,6 @@ components:
         status:
           type: string
           example: success
-
-    UpstreamTLSTestBackend:
-      type: object
-      properties:
-        subject:
-          type: string
-        issuer:
-          type: string
-        notAfter:
-          type: string
-          format: date-time
-        trustedBy:
-          type: string
-          description: The trustedCAs row name whose certificate anchored the chain, or "gateway bundle".
-          example: out-backend-ca
-        hostnameMatches:
-          type: boolean
-
-    UpstreamTLSTestResponse:
-      type: object
-      properties:
-        upstream:
-          type: string
-          description: The upstream definition name this probe was run against.
-          example: partner-a
-        target:
-          type: string
-          description: The definition's first target URL.
-          example: https://mtls-backend-a:8443
-        identityPresented:
-          type: string
-          nullable: true
-          description: The gateway identity name presented, or null if the definition names none.
-        backend:
-          $ref: "#/components/schemas/UpstreamTLSTestBackend"
-        result:
-          type: string
-          enum: [ OK, UNTRUSTED_BACKEND, HOSTNAME_MISMATCH, BACKEND_REJECTED_IDENTITY, CONNECT_FAILED ]
-        detail:
-          type: string
-          nullable: true
-          description: Raw TLS error string, or null.
 
     APIKeyListResponse:
       type: object

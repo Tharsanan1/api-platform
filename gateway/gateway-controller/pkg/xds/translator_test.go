@@ -52,6 +52,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/constants"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/testutil/pki"
 )
 
 func TestResolveUpstreamDefinition_Found(t *testing.T) {
@@ -3736,8 +3737,8 @@ func extractDownstreamTLSContext(t *testing.T, l *listener.Listener) *tlsv3.Down
 	return &tlsCtx
 }
 
-// An API with operation-level mtls-auth makes the HTTPS listener request a
-// client certificate against the client-CA pool.
+// An API with operation-level mtls-auth and a non-empty client-CA pool make
+// the HTTPS listener request a client certificate against that pool.
 func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClientCA(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -3745,7 +3746,11 @@ func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClie
 	routerCfg.HTTPSPort = 8443
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	clientCA := pki.NewRootCA(t, "Listener Client CA")
+	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
+		{UUID: "client-1", Name: "client-ca", Certificate: clientCA.PEM(), Usage: models.CertificateUsageClient},
+	}}
+	translator, err := NewTranslator(logger, routerCfg, db, cfg)
 	require.NoError(t, err)
 
 	configs := []*models.StoredConfig{makeRestAPIWithOperationLevelMTLSAuth("uuid-mtls-1", "mtls-api", "/mtls-api")}
@@ -3759,6 +3764,35 @@ func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClie
 	assert.Equal(t, SecretNameDownstreamClientCA, tlsCtx.CommonTlsContext.GetValidationContextSdsSecretConfig().GetName())
 	require.NotNil(t, tlsCtx.RequireClientCertificate)
 	assert.False(t, tlsCtx.RequireClientCertificate.GetValue())
+}
+
+// With mtls-auth attached but an empty client-CA pool, the HTTPS listener
+// names no downstream_client_ca secret, so it never waits on a secret that is
+// not served; mtls-auth then denies for lack of a certificate.
+func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_EmptyPool_NoClientCA(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.HTTPSEnabled = true
+	routerCfg.HTTPSPort = 8443
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	upstreamCA := pki.NewRootCA(t, "Listener Upstream CA")
+	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
+		{UUID: "upstream-1", Name: "upstream-ca", Certificate: upstreamCA.PEM(), Usage: models.CertificateUsageUpstream},
+	}}
+	translator, err := NewTranslator(logger, routerCfg, db, cfg)
+	require.NoError(t, err)
+
+	configs := []*models.StoredConfig{makeRestAPIWithOperationLevelMTLSAuth("uuid-mtls-1", "mtls-api", "/mtls-api")}
+	resources, err := translator.TranslateConfigs(configs, "test-correlation-id")
+	require.NoError(t, err)
+
+	httpsListener := findListenerByPort(t, resources[resource.ListenerType], routerCfg.HTTPSPort)
+	tlsCtx := extractDownstreamTLSContext(t, httpsListener)
+
+	assert.Nil(t, tlsCtx.CommonTlsContext.GetValidationContextType())
+	assert.Nil(t, tlsCtx.RequireClientCertificate)
+	assert.False(t, SnapshotReferencesSDSSecret(nil, []types.Resource{httpsListener}, SecretNameDownstreamClientCA))
 }
 
 // With no mtls-auth deployed, the HTTPS listener carries no client-CA

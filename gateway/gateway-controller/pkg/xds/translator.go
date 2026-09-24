@@ -761,8 +761,7 @@ func (t *Translator) TranslateConfigs(
 	allRoutes := make([]*route.Route, 0)
 	clusterMap := make(map[string]*cluster.Cluster)
 
-	// The HTTPS listener requests a client certificate only when some
-	// deployed API attaches mtls-auth.
+	// Whether some deployed API attaches mtls-auth; see requestClientCertificate.
 	anyMTLSAuth := false
 
 	for _, cfg := range configs {
@@ -944,11 +943,16 @@ func (t *Translator) TranslateConfigs(
 		virtualHosts = append(virtualHosts, virtualHost)
 	}
 
+	requestClientCert, err := t.requestClientCertificate(anyMTLSAuth)
+	if err != nil {
+		return nil, err
+	}
+
 	// Variable to hold the shared route configuration (created once, used by both listeners)
 	var sharedRouteConfig *route.RouteConfiguration
 
 	// Always create the HTTP listener, even with no APIs deployed
-	httpListener, routeConfig, err := t.createListener(virtualHosts, false, anyMTLSAuth)
+	httpListener, routeConfig, err := t.createListener(virtualHosts, false, requestClientCert)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP listener: %w", err)
 	}
@@ -959,8 +963,8 @@ func (t *Translator) TranslateConfigs(
 	if t.routerConfig.HTTPSEnabled {
 		log.Info("HTTPS is enabled, creating HTTPS listener",
 			slog.Int("https_port", t.routerConfig.HTTPSPort),
-			slog.Bool("requires_client_cert_validation", anyMTLSAuth))
-		httpsListener, _, err := t.createListener(virtualHosts, true, anyMTLSAuth)
+			slog.Bool("requires_client_cert_validation", requestClientCert))
+		httpsListener, _, err := t.createListener(virtualHosts, true, requestClientCert)
 		if err != nil {
 			log.Error("Failed to create HTTPS listener", slog.Any("error", err))
 			return nil, fmt.Errorf("failed to create HTTPS listener: %w", err)
@@ -2681,6 +2685,24 @@ func (t *Translator) createDownstreamTLSContext(requireDownstreamClientCA bool) 
 	}
 
 	return downstreamTLSContext, nil
+}
+
+// requestClientCertificate reports whether the HTTPS listener requests a
+// client certificate: only when some deployed API attaches mtls-auth and the
+// client-CA pool holds at least one certificate. With an empty pool the
+// listener names no downstream_client_ca secret, so it never waits on a
+// secret that is not served, and mtls-auth denies for lack of a certificate.
+// A pool that cannot be read fails the translation, as it fails the SDS
+// secrets.
+func (t *Translator) requestClientCertificate(anyMTLSAuth bool) (bool, error) {
+	if !anyMTLSAuth || t.certStore == nil {
+		return false, nil
+	}
+	bundle, err := t.certStore.GetClientCABundle()
+	if err != nil {
+		return false, fmt.Errorf("failed to load client-CA pool: %w", err)
+	}
+	return len(bundle) > 0, nil
 }
 
 // configAttachesMTLSAuth reports whether cfg's RestAPI representation

@@ -26,11 +26,9 @@ Feature: Presenting a gateway identity to backends that require a client certifi
   A gateway identity (certificate chain plus private key) is uploaded once through the certificates
   endpoint with usage "identity"; the key is encrypted at rest and never returned. An upstream definition names the identity to present and, optionally,
   the authorities to trust for that backend in place of the gateway-wide bundle. The test stack runs
-  four TLS backends: mtls-backend-a accepts client certificates from partner A's authority,
-  mtls-backend-b from partner B's, mtls-backend-wronghost serves a certificate whose name does not
-  match its host, and mtls-strict-backend closes the handshake itself when the client certificate is
-  not from partner B's authority. Each backend reports the client subject it saw in the
-  X-Client-Subject header.
+  three TLS backends: mtls-backend-a accepts client certificates from partner A's authority,
+  mtls-backend-b from partner B's, and mtls-backend-wronghost serves a certificate whose name does not
+  match its host. Each backend reports the client subject it saw in the X-Client-Subject header.
 
   Background:
     Given the gateway services are running
@@ -504,7 +502,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     Then the response status should be 400
     And the response should list a validation error for field "usage" with message "only usage: identity certificates can be updated; delete and re-upload other certificates"
 
-  # ==================== REFERENCES AND THE TLS TEST ====================
+  # ==================== REFERENCES ====================
 
   Scenario: An identity or trust certificate named by a deployed upstream cannot be removed
     Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
@@ -541,96 +539,3 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     When I delete the certificate named "out-backend-ca"
     Then the response status should be 409
     And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.trustedCAs[0]" containing "out-partner-api"
-
-  Scenario: The TLS test reports what a handshake to the upstream would do
-    Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
-    And the certificate fixture "backend-ca" is pooled as "out-backend-ca"
-    And the certificate fixture "backend-ca-b" is pooled as "out-backend-ca-b"
-    When I deploy this API configuration:
-      """
-      apiVersion: gateway.api-platform.wso2.com/v1
-      kind: RestApi
-      metadata:
-        name: out-tls-test-api
-      spec:
-        displayName: Outbound TLS Test API
-        version: v1.0
-        context: /out-tls-test/$version
-        upstreamDefinitions:
-          - name: good
-            upstreams:
-              - url: https://mtls-backend-a:8443
-            tls:
-              identity: out-identity-a
-              trustedCAs: [out-backend-ca]
-          - name: untrusted
-            upstreams:
-              - url: https://mtls-backend-a:8443
-            tls:
-              identity: out-identity-a
-              trustedCAs: [out-backend-ca-b]
-          - name: wronghost
-            upstreams:
-              - url: https://mtls-backend-wronghost:8443
-            tls:
-              identity: out-identity-a
-              trustedCAs: [out-backend-ca]
-          - name: rejected
-            upstreams:
-              - url: https://mtls-strict-backend:8443
-            tls:
-              identity: out-identity-a
-              trustedCAs: [out-backend-ca-b]
-          - name: unreachable
-            upstreams:
-              - url: https://no-such-backend.invalid:8443
-            tls:
-              identity: out-identity-a
-        upstream:
-          main:
-            ref: good
-        operations:
-          - method: GET
-            path: /anything
-      """
-    Then the response should be successful
-    When I send a POST request to the "gateway-controller" service at "/rest-apis/out-tls-test-api/upstreams/good/tls-test" with body:
-      """
-      {}
-      """
-    Then the response status should be 200
-    And the JSON response field "result" should be "OK"
-    And the JSON response field "identityPresented" should be "out-identity-a"
-    And the JSON response field "backend.trustedBy" should be "out-backend-ca"
-    And the JSON response field "backend.hostnameMatches" should be true
-    When I send a POST request to the "gateway-controller" service at "/rest-apis/out-tls-test-api/upstreams/untrusted/tls-test" with body:
-      """
-      {}
-      """
-    Then the response status should be 200
-    And the JSON response field "result" should be "UNTRUSTED_BACKEND"
-    When I send a POST request to the "gateway-controller" service at "/rest-apis/out-tls-test-api/upstreams/wronghost/tls-test" with body:
-      """
-      {}
-      """
-    Then the response status should be 200
-    And the JSON response field "result" should be "HOSTNAME_MISMATCH"
-    When I send a POST request to the "gateway-controller" service at "/rest-apis/out-tls-test-api/upstreams/rejected/tls-test" with body:
-      """
-      {}
-      """
-    Then the response status should be 200
-    And the JSON response field "result" should be "BACKEND_REJECTED_IDENTITY"
-    When I send a POST request to the "gateway-controller" service at "/rest-apis/out-tls-test-api/upstreams/unreachable/tls-test" with body:
-      """
-      {}
-      """
-    Then the response status should be 200
-    And the JSON response field "result" should be "CONNECT_FAILED"
-    Given I authenticate using basic auth as "developer"
-    When I send a POST request to the "gateway-controller" service at "/rest-apis/out-tls-test-api/upstreams/good/tls-test" with body:
-      """
-      {}
-      """
-    Then the response status should be 200
-    And the JSON response field "result" should be "OK"

@@ -340,8 +340,12 @@ func (cs *CertStore) GetCombinedCertificates() []byte {
 
 // GetClientCABundle returns the concatenated PEM bundle of every usage:
 // client certificate, in store order. It returns (nil, nil) for an empty
-// pool; deploy-time validation keeps mtls-auth off an empty pool.
+// pool or a store with no database; deploy-time validation keeps mtls-auth
+// off an empty pool.
 func (cs *CertStore) GetClientCABundle() ([]byte, error) {
+	if cs.db == nil {
+		return nil, nil
+	}
 	certs, err := cs.db.ListCertificatesByUsage(models.CertificateUsageClient)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list client-CA pool: %w", err)

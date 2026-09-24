@@ -463,12 +463,6 @@ func main() {
 		dnsSANs: []string{"not-this-host.test"},
 		ekus:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}))
-	track(issue("backend-server-strict", issueOpts{
-		subject: pkix.Name{CommonName: "backend-server-strict"},
-		parent:  backendCAB,
-		dnsSANs: []string{"mtls-strict-backend"},
-		ekus:    []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}))
 	gwIdentityA := track(issue("gw-identity-a", issueOpts{
 		subject: pkix.Name{CommonName: "gateway-a"},
 		parent:  caA,

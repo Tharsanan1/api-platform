@@ -406,11 +406,11 @@ func main() {
 		cfg.Router.HTTPSEnabled,
 	)
 	if err := sdsSecretManager.UpdateSecrets(); err != nil {
-		log.Warn("Failed to initialize SDS secrets", slog.Any("error", err))
-	} else {
-		log.Info("SDS secret manager initialized successfully")
-		snapshotManager.SetSDSSecretManager(sdsSecretManager)
+		log.Error("Refusing to start: SDS secrets could not be initialized", slog.Any("error", err))
+		os.Exit(1)
 	}
+	log.Info("SDS secret manager initialized successfully")
+	snapshotManager.SetSDSSecretManager(sdsSecretManager)
 
 	// Build transformer registry for StoredConfig → RuntimeDeployConfig conversion.
 	// This MUST happen before the initial xDS snapshot below: the Envoy translator
@@ -987,8 +987,6 @@ func generateAuthConfig(config *config.Config) (commonmodels.AuthConfig, error) 
 		"PUT /certificates/{id}":    {"admin"},
 		"DELETE /certificates/{id}": {"admin"},
 		"POST /certificates/reload": {"admin"},
-
-		"POST /rest-apis/{id}/upstreams/{name}/tls-test": {"admin", "developer"},
 
 		"GET /policies": {"admin", "developer"},
 

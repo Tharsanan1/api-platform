@@ -414,10 +414,10 @@ func main() {
 		cfg.Router.HTTPSEnabled,
 	)
 	if err := sdsSecretManager.UpdateSecrets(); err != nil {
-		log.Warn("Failed to initialize SDS secrets", slog.Any("error", err))
-	} else {
-		snapshotManager.SetSDSSecretManager(sdsSecretManager)
+		log.Error("Refusing to start: SDS secrets could not be initialized", slog.Any("error", err))
+		os.Exit(1)
 	}
+	snapshotManager.SetSDSSecretManager(sdsSecretManager)
 
 	// Build the transformer registry and wire it into the Envoy translator before
 	// the initial xDS snapshot below, so the first snapshot already uses the

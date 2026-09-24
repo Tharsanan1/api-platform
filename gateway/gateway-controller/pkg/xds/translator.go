@@ -162,27 +162,24 @@ type resolvedTimeout struct {
 // non-nil, since a disabled cert store would silently drop the upstream
 // trust bundle and the ability to present any gateway identity.
 func NewTranslator(logger *slog.Logger, routerConfig *config.RouterConfig, db storage.Storage, config *config.Config) (*Translator, error) {
-	// Initialize certificate store if custom certs path is configured
-	var cs *certstore.CertStore
-	if routerConfig.Upstream.TLS.CustomCertsPath != "" {
-		cs = certstore.NewCertStore(
-			logger,
-			db,
-			routerConfig.Upstream.TLS.CustomCertsPath,
-			routerConfig.Upstream.TLS.TrustedCertPath,
-		)
-
-		// Load certificates at initialization. A failure here is a startup
-		// failure rather than a warn-and-disable-SDS fallback: with SDS
-		// disabled, every upstream TLS context silently loses its trust
-		// bundle AND its ability to present a gateway identity, which is a
-		// silent security degradation, not a safe default.
-		if _, err := cs.LoadCertificates(); err != nil {
-			logger.Error("Failed to initialize certificate store",
-				slog.String("custom_certs_path", routerConfig.Upstream.TLS.CustomCertsPath),
-				slog.Any("error", err))
-			return nil, fmt.Errorf("failed to initialize certificate store: %w", err)
-		}
+	// The certificate store backs every SDS secret (listener certificate,
+	// client-CA bundle, upstream trust, gateway identities), so it always
+	// exists; custom_certs_path only adds file-based upstream trust on top of
+	// the database rows.
+	cs := certstore.NewCertStore(
+		logger,
+		db,
+		routerConfig.Upstream.TLS.CustomCertsPath,
+		routerConfig.Upstream.TLS.TrustedCertPath,
+	)
+	// A load failure is a startup failure rather than a warn-and-disable-SDS
+	// fallback: with SDS disabled, every upstream TLS context silently loses
+	// its trust bundle and its ability to present a gateway identity.
+	if _, err := cs.LoadCertificates(); err != nil {
+		logger.Error("Failed to initialize certificate store",
+			slog.String("custom_certs_path", routerConfig.Upstream.TLS.CustomCertsPath),
+			slog.Any("error", err))
+		return nil, fmt.Errorf("failed to initialize certificate store: %w", err)
 	}
 
 	return &Translator{
@@ -432,29 +429,17 @@ func (t *Translator) createRouteFromRDC(routeKey string, rdcRoute *models.Route,
 		r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, constants.TargetUpstreamHeader)
 	}
 
-	// Strip the forwarded client-certificate header before this route's own
-	// backend, unless this route's own policy chain contains mtls-auth. The
-	// router filter applies RequestHeadersToRemove after ext_proc, so the
-	// policy engine still evaluates the header where a chain needs it — only
-	// the header a public/unrelated backend would otherwise receive is
-	// removed, and a route with no chain at all is treated the same as one
-	// that doesn't attach mtls-auth.
-	routeHasMTLSAuth := chainAttachesMTLSAuth(rdc.PolicyChains[routeKey])
-	if !routeHasMTLSAuth {
-		r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, xfccHeaderName)
-	}
-
-	// Strip the relayed client-certificate header the same way, with one
-	// difference: when the operator has opted into forward_to_backend, a
-	// route WITH mtls-auth keeps it (the policy itself decides whether to
-	// forward what it believed) — every other route strips it unconditionally,
-	// since only a chain that evaluated the header could ever have believed
-	// it. See go-network-service-hardening.md and the mtls-header-forward
-	// feature contract.
-	if clientCertHeaderName := t.routerConfig.DownstreamTLS.ClientCertificateHeader.Name; clientCertHeaderName != "" {
-		if !routeHasMTLSAuth || !t.routerConfig.DownstreamTLS.ClientCertificateHeader.ForwardToBackend {
-			r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, strings.ToLower(clientCertHeaderName))
-		}
+	// The router filter applies RequestHeadersToRemove after ext_proc, so the
+	// policy engine still sees both certificate-bearing headers where a chain
+	// evaluates them; only what the backend would receive is decided here. A
+	// route whose chain lacks mtls-auth strips both. A route with mtls-auth
+	// keeps the forwarded-certificate header, and keeps the relayed header
+	// only when the operator opted into forward_to_backend (the policy then
+	// removes it itself unless it believed it).
+	if !chainAttachesMTLSAuth(rdc.PolicyChains[routeKey]) {
+		t.stripClientCertificateHeaders(r)
+	} else if !t.routerConfig.DownstreamTLS.ClientCertificateHeader.ForwardToBackend {
+		t.stripRelayedCertificateHeader(r)
 	}
 
 	// Build the request matchers (shared with direct-response routes so both kinds of
@@ -1427,7 +1412,7 @@ func createSterile503LocalReplyConfig() *hcm.LocalReplyConfig {
 								{
 									FilterSpecifier: &accesslog.AccessLogFilter_ResponseFlagFilter{
 										ResponseFlagFilter: &accesslog.ResponseFlagFilter{
-											Flags: []string{"UF"},
+											Flags: []string{"UF", "UC", "UR"},
 										},
 									},
 								},
@@ -1972,6 +1957,10 @@ func (t *Translator) createRoute(apiId, apiName, apiVersion, context, method, pa
 		r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, constants.TargetUpstreamHeader)
 	}
 
+	// Routes built here never carry a policy chain that evaluates the
+	// client-certificate headers, so no backend behind them may see one.
+	t.stripClientCertificateHeaders(r)
+
 	r.Match = &route.RouteMatch{
 		Headers: []*route.HeaderMatcher{{
 			Name: ":method",
@@ -2125,6 +2114,7 @@ func (t *Translator) createRoutePerTopic(apiId, apiName, apiVersion, context, me
 
 	r.GetRoute().PrefixRewrite = "/hub"
 
+	t.stripClientCertificateHeaders(r)
 	return r
 }
 
@@ -2538,9 +2528,9 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 		// Priority order for trusted CA certificates:
 		// 1. Per-upstream trust (tls.trustedCAs set) - replaces the gateway
 		//    bundle for this one definition only, via its own SDS secret.
-		// 2. A tls block with no trustedCAs and no gateway certificate
-		//    store configured has no trust source at all — this is an
-		//    error (see below), never a cluster with no validation context.
+		// 2. A tls block with no trustedCAs and an empty gateway trust
+		//    bundle has no trust source at all — this is an error (see
+		//    below), never a cluster with no validation context.
 		// 3. SDS secret reference (if cert store is available) - Uses
 		//    dynamic secret discovery. Reached both by a tls-block
 		//    definition falling back to the gateway-wide bundle and by a
@@ -2577,17 +2567,15 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 				slog.String("upstream", address),
 				slog.String("secret_name", validationSecretName))
 
-		case hasTLSBlock && t.certStore == nil:
-			// No per-upstream trustedCAs and no gateway certificate store:
+		case hasTLSBlock && (t.certStore == nil || len(t.certStore.GetCombinedCertificates()) == 0):
+			// No per-upstream trustedCAs and an empty gateway trust bundle:
 			// there is no trust source to validate this backend against.
-			// Emitting a cluster with no ValidationContextType here would
-			// silently skip both chain validation AND the SAN/hostname
-			// check below regardless of verifyHostName — a silent security
-			// downgrade. Fail this API's translation instead (the caller
-			// excludes just this API from the snapshot; see
-			// translateRuntimeConfig/TranslateConfigs).
+			// Emitting a cluster with no trusted authority would skip chain
+			// validation, and Envoy refuses a hostname check without one, so
+			// fail this API's translation instead (the caller excludes just
+			// this API from the snapshot; see translateRuntimeConfig).
 			return nil, fmt.Errorf(
-				"upstream %q: tls block requires a trust source (trustedCAs, or the gateway certificate store) but none is configured",
+				"upstream %q: tls block requires a trust source (trustedCAs, or at least one upstream certificate in the gateway bundle) but none is configured",
 				address)
 
 		case t.certStore != nil:
@@ -2898,6 +2886,22 @@ func policiesAttachMTLSAuth(policies *[]api.Policy) bool {
 // mtls-auth policy to evaluate it never receives it — regardless of what a
 // caller sent, since SANITIZE_SET already overwrites that.
 const xfccHeaderName = "x-forwarded-client-cert"
+
+// stripClientCertificateHeaders removes both certificate-bearing headers
+// before the backend of a route whose policy chain never evaluates them:
+// Envoy's forwarded-certificate header and the operator-named header a front
+// proxy relays a certificate in.
+func (t *Translator) stripClientCertificateHeaders(r *route.Route) {
+	r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, xfccHeaderName)
+	t.stripRelayedCertificateHeader(r)
+}
+
+// stripRelayedCertificateHeader removes only the relayed-certificate header.
+func (t *Translator) stripRelayedCertificateHeader(r *route.Route) {
+	if name := t.routerConfig.DownstreamTLS.ClientCertificateHeader.Name; name != "" {
+		r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, strings.ToLower(name))
+	}
+}
 
 // chainAttachesMTLSAuth reports whether a route's own resolved policy chain
 // (rdc.PolicyChains[routeKey]) contains mtls-auth. A nil chain — no chain was

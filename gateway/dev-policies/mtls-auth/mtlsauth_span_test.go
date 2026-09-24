@@ -371,11 +371,10 @@ func TestMtlsAuthPolicy_WarnsWhenAcceptAuthorityNotInPool(t *testing.T) {
 	// The pool omits rootA entirely: the accept entry still carries its own
 	// embedded certificate (per GetPolicy's doc comment), but the gateway's
 	// client-CA pool no longer has a copy of that same authority.
-	p := mustBuildPolicy(t, nil, entries)
-	leaf := newLeaf(t, rootA, "client-valid", certOpts{})
-
+	// The warning is emitted once, when the policy is bound to its chain,
+	// not on every request.
 	output := captureSlog(t, func() {
-		p.evaluate(reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true)), nil)
+		mustBuildPolicy(t, nil, entries)
 	})
 
 	if !strings.Contains(output, "auth-ca-a") {

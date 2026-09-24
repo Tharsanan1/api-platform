@@ -19,6 +19,7 @@
 package transform
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -41,6 +42,7 @@ import (
 type fakeMtlsCertStore struct {
 	byUsage map[string][]*models.StoredCertificate
 	byName  map[string]*models.StoredCertificate
+	listErr error
 }
 
 func newFakeMtlsCertStore(certs ...*models.StoredCertificate) *fakeMtlsCertStore {
@@ -68,6 +70,9 @@ func (s *fakeMtlsCertStore) GetCertificateByName(name string) (*models.StoredCer
 }
 
 func (s *fakeMtlsCertStore) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
 	return s.byUsage[usage], nil
 }
 
@@ -407,4 +412,23 @@ func TestBuildPolicyChain_MtlsAuth_NilStore_NoInjection(t *testing.T) {
 	_, hasPool := p.Params[mtlsInternalPoolParam]
 	assert.False(t, hasAccept, "no store means no internal accept param is injected")
 	assert.False(t, hasPool, "no store means no internal pool param is injected")
+}
+
+func TestBuildPolicyChain_MtlsAuth_StoreFailureFailsTheBuild(t *testing.T) {
+	rootA := clientCA(t, "ca-a")
+	store := newFakeMtlsCertStore(rootA)
+	store.listErr = errors.New("database unavailable")
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), store)
+
+	cfg := makeRestAPIStoredConfig(
+		[]api.Policy{mtlsAuthPolicy(map[string]interface{}{
+			"accept": []interface{}{map[string]interface{}{"ca": "ca-a"}},
+		})},
+		nil,
+	)
+
+	rdc, err := transformer.Transform(cfg)
+
+	require.Error(t, err, "a chain with an empty pool would deny every caller; the build must fail instead")
+	assert.Nil(t, rdc)
 }

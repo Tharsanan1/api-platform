@@ -19,12 +19,14 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -107,7 +109,8 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxCertificateUploadBytes)
 
 	var req UploadCertificateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	shapeErrors, err := decodeCertificateUpload(r.Body, &req)
+	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			// Generic message: never state the configured limit (file-access.md).
@@ -126,6 +129,9 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	validation, effectiveUsage, effectiveRole, bundle := s.validateCertificateUpload(&req)
+	for _, fe := range shapeErrors {
+		validation.addFieldError(fe.field, fe.message)
+	}
 
 	if validation.legacyUpstreamCertErr != nil && len(validation.fieldErrors) == 0 {
 		// Exactly today's response for an invalid upstream certificate: no
@@ -478,6 +484,8 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 			} else {
 				bundle = b
 			}
+		case effectiveUsage == models.CertificateUsageIdentity && certProvided && keyProvided && pemCarriesPrivateKey([]byte(req.Certificate)):
+			v.addFieldError("certificate", msgCertificateFieldCarriesKey)
 		case effectiveUsage == models.CertificateUsageIdentity && certProvided && keyProvided:
 			ib, err := gatewayidentity.Inspect([]byte(req.Certificate), []byte(req.PrivateKey), time.Now())
 			if err != nil {
@@ -579,4 +587,92 @@ func firstX509Certificate(data []byte) (*x509.Certificate, error) {
 		return x509.ParseCertificate(block.Bytes)
 	}
 	return nil, fmt.Errorf("no certificate found")
+}
+
+const msgCertificateFieldCarriesKey = "the certificate field takes certificates only; the private key belongs in privateKey"
+
+// pemCarriesPrivateKey reports whether any PEM block in data is a private
+// key of any encoding.
+func pemCarriesPrivateKey(data []byte) bool {
+	rest := data
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return false
+		}
+		if strings.Contains(block.Type, "PRIVATE KEY") {
+			return true
+		}
+	}
+}
+
+// uploadShapeError is a request-body problem found before the typed decode:
+// a field the endpoint does not define, or a narrowing given in the wrong
+// shape. Either would otherwise be dropped silently, and a dropped
+// narrowing widens what a relay entry vouches for.
+type uploadShapeError struct {
+	field, message string
+}
+
+var uploadKnownFields = map[string]bool{
+	"certificate": true, "name": true, "usage": true, "role": true, "match": true, "privateKey": true,
+}
+
+var uploadKnownMatchFields = map[string]bool{"uriSANs": true, "dnsSANs": true}
+
+// decodeCertificateUpload decodes the upload body strictly. Unknown top-level
+// fields, unknown match fields and non-list match values are reported as
+// field errors; the typed request is still populated from the well-formed
+// remainder so every problem in the body is reported at once.
+func decodeCertificateUpload(body io.Reader, req *UploadCertificateRequest) ([]uploadShapeError, error) {
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(body).Decode(&raw); err != nil {
+		return nil, err
+	}
+
+	var shape []uploadShapeError
+	for key := range raw {
+		if !uploadKnownFields[key] {
+			shape = append(shape, uploadShapeError{field: key, message: "unknown field " + key})
+			delete(raw, key)
+		}
+	}
+
+	if matchRaw, ok := raw["match"]; ok && string(bytes.TrimSpace(matchRaw)) != "null" {
+		var matchFields map[string]json.RawMessage
+		if err := json.Unmarshal(matchRaw, &matchFields); err != nil {
+			shape = append(shape, uploadShapeError{field: "match", message: "match must be an object listing uriSANs or dnsSANs"})
+			delete(raw, "match")
+		} else {
+			dropMatch := false
+			for key, value := range matchFields {
+				if !uploadKnownMatchFields[key] {
+					shape = append(shape, uploadShapeError{field: "match." + key, message: "unknown field " + key + "; match takes uriSANs and dnsSANs"})
+					dropMatch = true
+					continue
+				}
+				if trimmed := bytes.TrimSpace(value); len(trimmed) == 0 || trimmed[0] != '[' {
+					shape = append(shape, uploadShapeError{field: "match." + key, message: key + " must be a list"})
+					dropMatch = true
+				}
+			}
+			if len(matchFields) == 0 {
+				shape = append(shape, uploadShapeError{field: "match", message: "match must list uriSANs or dnsSANs, or be omitted"})
+				dropMatch = true
+			}
+			if dropMatch {
+				delete(raw, "match")
+			}
+		}
+	}
+
+	cleaned, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(cleaned, req); err != nil {
+		return nil, err
+	}
+	return shape, nil
 }

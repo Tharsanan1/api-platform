@@ -29,6 +29,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/certmetrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/httpkit/httputil"
 )
 
@@ -56,11 +57,18 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Best-effort: read the certificate's usage before it's gone, so we know
-	// afterwards whether the client-CA pool changed (and every mtls-auth
-	// deployment needs re-pushing) — a lookup failure here doesn't block the
-	// delete itself, which re-validates existence and reports 404 on its own.
-	preDeleteCert, _ := s.db.GetCertificate(id)
+	// The row's usage and role decide which referential checks apply, so a
+	// read failure here must stop the delete: skipping the checks would let a
+	// referenced authority or identity disappear on a transient store error.
+	preDeleteCert, err := s.db.GetCertificate(id)
+	if err != nil && !storage.IsNotFoundError(err) {
+		log.Error("Failed to read certificate before delete", slog.Any("error", err))
+		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"status":  "error",
+			"message": "the certificate could not be read",
+		})
+		return
+	}
 
 	// A client-CA authority (never a relay entry — header mode simply turns
 	// off when its last relay row goes away) cannot be removed while a

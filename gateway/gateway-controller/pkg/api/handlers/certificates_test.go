@@ -1936,8 +1936,6 @@ func TestUpdateCertificate_IdentityRow_Success(t *testing.T) {
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	_, hasPooled := resp["pooledConnectionsUsingPrevious"]
-	assert.True(t, hasPooled, "expected pooledConnectionsUsingPrevious on a rotation response, got %v", resp)
 	_, hasPrivateKey := resp["privateKey"]
 	assert.False(t, hasPrivateKey)
 	assert.Equal(t, "out-identity-a", resp["name"], "name must stay fixed across rotation")
@@ -2072,4 +2070,87 @@ func TestDeleteCertificate_IdentityRow_AllowedWhenUnreferenced_DespiteMtlsAuthAP
 	handler.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+}
+
+func TestUploadCertificate_UnknownAndMalformedFields_Rejected(t *testing.T) {
+	root := pki.NewRootCA(t, "Strict Upload CA")
+	certJSON, err := json.Marshal(string(root.PEM()))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name, body, field, message string
+	}{
+		{
+			name:    "unknown top-level field",
+			body:    fmt.Sprintf(`{"name":"pool-relay-bad","usage":"client","roles":"relay","certificate":%s}`, certJSON),
+			field:   "roles",
+			message: "unknown field roles",
+		},
+		{
+			name:    "unknown match field",
+			body:    fmt.Sprintf(`{"name":"pool-relay-bad","usage":"client","role":"relay","certificate":%s,"match":{"dnsSAN":["lb.example"]}}`, certJSON),
+			field:   "match.dnsSAN",
+			message: "unknown field dnsSAN; match takes uriSANs and dnsSANs",
+		},
+		{
+			name:    "empty match",
+			body:    fmt.Sprintf(`{"name":"pool-relay-bad","usage":"client","role":"relay","certificate":%s,"match":{}}`, certJSON),
+			field:   "match",
+			message: "match must list uriSANs or dnsSANs, or be omitted",
+		},
+		{
+			name:    "match list given as a scalar",
+			body:    fmt.Sprintf(`{"name":"pool-relay-bad","usage":"client","role":"relay","certificate":%s,"match":{"dnsSANs":"lb.example"}}`, certJSON),
+			field:   "match.dnsSANs",
+			message: "dnsSANs must be a list",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDB := NewMockStorage()
+			server := createTestAPIServerWithDB(mockDB)
+			w := uploadCertificateRawJSON(t, server, tt.body)
+			require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+			entry := firstFieldError(t, w.Body.Bytes(), tt.field)
+			assert.Equal(t, tt.message, entry["message"])
+			assert.Empty(t, mockDB.certs, "nothing may be stored from a rejected upload")
+		})
+	}
+}
+
+func TestUploadCertificate_IdentityWithKeyInCertificateField_Rejected(t *testing.T) {
+	mockDB := NewMockStorage()
+	server := createTestAPIServerWithDB(mockDB)
+	server.encryptionManager = testEncryptionManager(t)
+
+	identity := gatewayIdentityLeaf(t, "identity-key-in-cert")
+	w := uploadCertificateBody(t, server, UploadCertificateRequest{
+		Name:        "out-identity-key-in-cert",
+		Usage:       models.CertificateUsageIdentity,
+		Certificate: string(identity.PEM()) + "\n" + string(identity.KeyPEM()),
+		PrivateKey:  string(identity.KeyPEM()),
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	entry := firstFieldError(t, w.Body.Bytes(), "certificate")
+	assert.Equal(t, msgCertificateFieldCarriesKey, entry["message"])
+	assert.NotContains(t, w.Body.String(), "PRIVATE KEY")
+	assert.Empty(t, mockDB.certs)
+}
+
+func TestDeleteCertificate_StoreReadFailure_Refuses(t *testing.T) {
+	mockDB := NewMockStorage()
+	authority := clientAuthorityCert("ref-partner-a")
+	mockDB.certs = []*models.StoredCertificate{authority, seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+	mockDB.getErr = errors.New("database unavailable")
+
+	handler := newDeleteCertHandler(server, authority.UUID)
+	req := httptest.NewRequest(http.MethodDelete, "/certificates/"+authority.UUID, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+	assert.NotContains(t, w.Body.String(), "database unavailable")
+	assert.Len(t, mockDB.certs, 2, "a delete must not proceed when the row could not be read")
 }

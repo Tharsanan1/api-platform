@@ -159,6 +159,23 @@ Feature: Client certificate authority pool
     When I send a GET request to the "gateway-controller" service at "/certificates"
     Then the certificate list should not contain "pool-leaky-ca"
 
+  Scenario Outline: A relay upload with a narrowing the gateway does not understand is rejected
+    When I upload to the certificates endpoint the body:
+      """
+      <body>
+      """
+    Then the response status should be 400
+    And the response should list a validation error for field "<field>" with message "<message>"
+    When I send a GET request to the "gateway-controller" service at "/certificates"
+    Then the certificate list should not contain "pool-relay-bad"
+
+    Examples:
+      | body                                                                                                                | field         | message                                                          |
+      | {"name":"pool-relay-bad","usage":"client","role":"relay","certificate":"{{pem "edge-lb-ca"}}","match":{"dnsSAN":["lb.example"]}} | match.dnsSAN  | unknown field dnsSAN; match takes uriSANs and dnsSANs            |
+      | {"name":"pool-relay-bad","usage":"client","role":"relay","certificate":"{{pem "edge-lb-ca"}}","match":{}}                        | match         | match must list uriSANs or dnsSANs, or be omitted                |
+      | {"name":"pool-relay-bad","usage":"client","role":"relay","certificate":"{{pem "edge-lb-ca"}}","match":{"dnsSANs":"lb.example"}}  | match.dnsSANs | dnsSANs must be a list                                           |
+      | {"name":"pool-relay-bad","usage":"client","roles":"relay","certificate":"{{pem "edge-lb-ca"}}"}                                  | roles         | unknown field roles                                              |
+
   Scenario: A value that is not a PEM certificate is rejected
     When I upload to the certificates endpoint the body:
       """

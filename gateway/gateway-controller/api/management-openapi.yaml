@@ -5403,10 +5403,6 @@ components:
           type: integer
           description: Only present for usage identity. Number of certificates in the uploaded chain.
           example: 1
-        pooledConnectionsUsingPrevious:
-          type: integer
-          description: Only present on a PUT (rotation) response. Number of already-pooled upstream connections still presenting the previous identity (0 when not observable).
-          example: 0
         warnings:
           type: array
           description: Non-fatal findings about the upload (e.g. leaf certificate, not yet valid). Omitted when there are none.

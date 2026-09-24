@@ -94,6 +94,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
       | {"name":"out-bad","usage":"identity","privateKey":"{{key "gw-identity-a"}}"}                                                                            | certificate | both certificate and privateKey are required for usage: identity                                                            |
       | {"name":"out bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{key "gw-identity-a"}}"}                                    | name        | name may contain only letters, digits, ., _ and -                                                                           |
       | {"name":"out-bad","usage":"identity","certificate":"not a certificate","privateKey":"{{key "gw-identity-a"}}"}                                          | certificate | the value is not a PEM-encoded certificate                                                                                  |
+      | {"name":"out-bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}\\n{{key "gw-identity-a"}}","privateKey":"{{key "gw-identity-a"}}"} | certificate | the certificate field takes certificates only; the private key belongs in privateKey |
 
   Scenario: An expired identity certificate is refused
     When I upload to the certificates endpoint the identity body:
@@ -498,7 +499,6 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     When I update the gateway identity "out-identity-a" with the fixture "gw-identity-via-intermediate" and its chain
     Then the response status should be 200
     And the JSON response field "chainLength" should be 2
-    And the JSON response should have field "pooledConnectionsUsingPrevious"
     And the response body should not contain "PRIVATE KEY"
     When I update the certificate "out-backend-ca" with the identity fixture "gw-identity-a"
     Then the response status should be 400

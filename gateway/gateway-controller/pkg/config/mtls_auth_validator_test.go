@@ -20,6 +20,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
@@ -222,6 +223,50 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptListRejections(t *testing.T) {
 			}},
 			field:   "spec.policies[0].params.accept[0].thumbprint",
 			message: "unknown parameter thumbprint; the field is thumbprints",
+		},
+		{
+			name:    "accept given as an object",
+			params:  map[string]interface{}{"accept": map[string]interface{}{"ca": "listener-partner-a"}},
+			field:   "spec.policies[0].params.accept",
+			message: "accept must be a list of entries; omit it to inherit every pooled authority",
+		},
+		{
+			name:    "accept entry given as a bare string",
+			params:  map[string]interface{}{"accept": []interface{}{"listener-partner-a"}},
+			field:   "spec.policies[0].params.accept[0]",
+			message: "each accept entry must be an object naming ca",
+		},
+		{
+			name: "thumbprints given as a scalar",
+			params: map[string]interface{}{"accept": []interface{}{
+				map[string]interface{}{"ca": "listener-partner-a", "thumbprints": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"},
+			}},
+			field:   "spec.policies[0].params.accept[0].thumbprints",
+			message: "thumbprints must be a list",
+		},
+		{
+			name: "uriSANs given as a scalar",
+			params: map[string]interface{}{"accept": []interface{}{
+				map[string]interface{}{"ca": "listener-partner-a", "match": map[string]interface{}{"uriSANs": "urn:x"}},
+			}},
+			field:   "spec.policies[0].params.accept[0].match.uriSANs",
+			message: "uriSANs must be a list",
+		},
+		{
+			name: "empty match object",
+			params: map[string]interface{}{"accept": []interface{}{
+				map[string]interface{}{"ca": "listener-partner-a", "match": map[string]interface{}{}},
+			}},
+			field:   "spec.policies[0].params.accept[0].match",
+			message: "match must list uriSANs or dnsSANs; remove it to accept any certificate from this authority",
+		},
+		{
+			name: "match given as a scalar",
+			params: map[string]interface{}{"accept": []interface{}{
+				map[string]interface{}{"ca": "listener-partner-a", "match": "urn:x"},
+			}},
+			field:   "spec.policies[0].params.accept[0].match",
+			message: "match must be an object listing uriSANs or dnsSANs",
 		},
 		{
 			name:    "unknown top-level param mode",
@@ -591,5 +636,42 @@ func TestValidateMTLSStartupInvariant_HTTPSDisabled_HeaderTrustAnyFalse_Errors(t
 
 	if err := ValidateMTLSStartupInvariant(configs, false, false); err == nil {
 		t.Fatal("expected an error when https is disabled and trust_any is false")
+	}
+}
+
+func TestMtlsAuthValidator_ExecutionConditionRefused(t *testing.T) {
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")), true, false)
+	cond := `request.Method == "POST"`
+	params := map[string]interface{}{"accept": []interface{}{map[string]interface{}{"ca": "listener-partner-a"}}}
+	apiCfg := restAPIWithAPILevelPolicies(api.Policy{Name: MtlsAuthPolicyName, Version: "v1", Params: &params, ExecutionCondition: &cond})
+
+	errs := v.ValidateRestAPI(apiCfg)
+
+	if len(errs) != 1 {
+		t.Fatalf("expected exactly one error, got %v", errs)
+	}
+	if errs[0].Field != "spec.policies[0].executionCondition" {
+		t.Errorf("field: got %q", errs[0].Field)
+	}
+	if errs[0].Message != "mtls-auth runs on every request and cannot carry an executionCondition" {
+		t.Errorf("message: got %q", errs[0].Message)
+	}
+}
+
+func TestMtlsAuthValidator_PoolOfRelaysOnlyCountsAsEmpty(t *testing.T) {
+	relayOnly := newFakeMtlsCertStore(relayCA("listener-edge-lb"))
+	v := NewMtlsAuthValidator(relayOnly, true, false)
+	apiCfg := restAPIWithAPILevelPolicies(api.Policy{Name: MtlsAuthPolicyName, Version: "v1"})
+
+	errs := v.ValidateRestAPI(apiCfg)
+
+	if len(errs) != 1 {
+		t.Fatalf("expected exactly one error, got %v", errs)
+	}
+	if errs[0].Field != "spec.policies[0]" {
+		t.Errorf("field: got %q", errs[0].Field)
+	}
+	if !strings.Contains(errs[0].Message, "requires at least one client authority") {
+		t.Errorf("message: got %q", errs[0].Message)
 	}
 }

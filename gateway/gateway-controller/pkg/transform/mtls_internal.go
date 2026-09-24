@@ -20,6 +20,7 @@ package transform
 
 import (
 	"encoding/pem"
+	"fmt"
 	"strings"
 
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
@@ -67,9 +68,9 @@ const (
 // (not yet wired, e.g. in a test transformer) or a chain with no mtls-auth
 // instance is a no-op. Certificate PEM material is never logged by any of
 // the helpers this function calls.
-func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store config.MtlsAuthCertificateStore, headerConfig config.ClientCertificateHeader) {
+func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store config.MtlsAuthCertificateStore, headerConfig config.ClientCertificateHeader) error {
 	if store == nil {
-		return
+		return nil
 	}
 
 	hasMtlsAuth := false
@@ -80,12 +81,15 @@ func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store confi
 		}
 	}
 	if !hasMtlsAuth {
-		return
+		return nil
 	}
 
 	clientCerts, err := store.ListCertificatesByUsage(models.CertificateUsageClient)
 	if err != nil {
-		clientCerts = nil
+		// Pushing a chain with an empty pool would deny every caller of this
+		// API on a transient store error; refusing to build it keeps the
+		// previous chain in place instead.
+		return fmt.Errorf("listing client authorities for mtls-auth: %w", err)
 	}
 
 	pool := make([]interface{}, 0, len(clientCerts))
@@ -114,6 +118,7 @@ func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store confi
 		chain[i].Parameters[mtlsInternalRelaysParam] = relays
 		chain[i].Parameters[mtlsInternalHeaderParam] = header
 	}
+	return nil
 }
 
 // buildMtlsRelaysMaterial builds the __wso2_internal_mtls_relays material:

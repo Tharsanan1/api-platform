@@ -229,7 +229,7 @@ func (s *RestAPIService) ResolveMtlsAuthForResponse(cfg api.RestAPI) (api.RestAP
 // successful deploy response. Callers must only invoke this after the
 // configuration has already passed deploy-time validation.
 func (s *RestAPIService) ResolveUpstreamTLSWarnings(cfg api.RestAPI) []clientca.Warning {
-	v := config.NewUpstreamTLSValidator(s.db)
+	v := config.NewUpstreamTLSValidator(s.db, s.systemConfig.Router.Upstream.TLS.DisableSslVerification)
 	return v.ResolveWarnings(cfg)
 }
 

@@ -66,23 +66,22 @@ type UploadCertificateRequest struct {
 
 // CertificateResponse represents a certificate information response
 type CertificateResponse struct {
-	ID                             string                   `json:"id"`
-	Name                           string                   `json:"name"`
-	Subject                        string                   `json:"subject,omitempty"`
-	Issuer                         string                   `json:"issuer,omitempty"`
-	NotAfter                       string                   `json:"notAfter,omitempty"`
-	Count                          int                      `json:"count"` // Number of certs in file
-	Usage                          string                   `json:"usage"`
-	Role                           string                   `json:"role,omitempty"`
-	Match                          *models.CertificateMatch `json:"match,omitempty"`
-	IsLeaf                         bool                     `json:"isLeaf"`
-	KeyAlgorithm                   string                   `json:"keyAlgorithm,omitempty"`                   // Only present for usage: identity
-	ChainLength                    int                      `json:"chainLength,omitempty"`                    // Only present for usage: identity
-	PooledConnectionsUsingPrevious *int                     `json:"pooledConnectionsUsingPrevious,omitempty"` // Only present on PUT (rotation) responses
-	Warnings                       []clientca.Warning       `json:"warnings,omitempty"`
-	ReferencedByApis               *int                     `json:"referencedByApis,omitempty"`
-	Message                        string                   `json:"message,omitempty"`
-	Status                         string                   `json:"status"` // success, error
+	ID               string                   `json:"id"`
+	Name             string                   `json:"name"`
+	Subject          string                   `json:"subject,omitempty"`
+	Issuer           string                   `json:"issuer,omitempty"`
+	NotAfter         string                   `json:"notAfter,omitempty"`
+	Count            int                      `json:"count"` // Number of certs in file
+	Usage            string                   `json:"usage"`
+	Role             string                   `json:"role,omitempty"`
+	Match            *models.CertificateMatch `json:"match,omitempty"`
+	IsLeaf           bool                     `json:"isLeaf"`
+	KeyAlgorithm     string                   `json:"keyAlgorithm,omitempty"` // Only present for usage: identity
+	ChainLength      int                      `json:"chainLength,omitempty"`  // Only present for usage: identity
+	Warnings         []clientca.Warning       `json:"warnings,omitempty"`
+	ReferencedByApis *int                     `json:"referencedByApis,omitempty"`
+	Message          string                   `json:"message,omitempty"`
+	Status           string                   `json:"status"` // success, error
 }
 
 // ListCertificatesResponse represents the response for listing certificates

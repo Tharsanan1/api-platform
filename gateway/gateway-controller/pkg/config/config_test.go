@@ -2438,3 +2438,10 @@ func TestValidate_CustomTextAccessLogWithoutTagIsNotFatal(t *testing.T) {
 	assert.False(t, textAccessLogStartsWithComponentTag(cfg.Router.AccessLogs.TextFormat))
 	assert.NoError(t, cfg.Validate())
 }
+
+func TestConfig_Validate_EmptyClientCertificateHeaderNameBecomesDefault(t *testing.T) {
+	cfg := validConfig()
+	cfg.Router.DownstreamTLS.ClientCertificateHeader.Name = ""
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, DefaultClientCertificateHeaderName, cfg.Router.DownstreamTLS.ClientCertificateHeader.Name)
+}

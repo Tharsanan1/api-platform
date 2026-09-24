@@ -117,9 +117,12 @@ func (cs *CertStore) LoadCertificates() ([]byte, error) {
 	// Load custom certificates from database (primary and only source for custom certs)
 	dbCerts, count, err := cs.loadDatabaseCertificates()
 	if err != nil {
-		cs.logger.Warn("Failed to load certificates from database",
-			slog.Any("error", err))
-	} else if count > 0 {
+		// The database is the source of every uploaded certificate, so a read
+		// failure here is a startup failure, not a bundle to serve with rows
+		// silently missing.
+		return nil, fmt.Errorf("loading certificates from database: %w", err)
+	}
+	if count > 0 {
 		certBuffer.Write(dbCerts)
 		loadedCount += count
 		cs.logger.Info("Loaded custom certificates from database",
@@ -133,10 +136,6 @@ func (cs *CertStore) LoadCertificates() ([]byte, error) {
 			cs.logger.Warn("Failed to load system certificates",
 				slog.String("path", cs.systemCertPath),
 				slog.Any("error", err))
-			// If we have custom certs, we can continue without system certs
-			if loadedCount == 0 {
-				return nil, fmt.Errorf("failed to load both custom and system certificates")
-			}
 		} else {
 			// Add system certificates to the buffer
 			certBuffer.Write(systemCerts)
@@ -145,9 +144,14 @@ func (cs *CertStore) LoadCertificates() ([]byte, error) {
 		}
 	}
 
-	// If no certificates were loaded, return an error
+	// An empty bundle is a valid state: the store still serves the listener
+	// certificate, client-CA pool and gateway identities over SDS, and an
+	// upstream definition that needs trust is refused at translation until
+	// a certificate exists. It is loud, because backends are unverified.
 	if certBuffer.Len() == 0 {
-		return nil, fmt.Errorf("no certificates loaded from custom or system sources")
+		cs.logger.Warn("No upstream trust certificates loaded; backends are not verified until an upstream certificate is added",
+			slog.String("custom_certs_path", cs.certsDir),
+			slog.String("system_cert_path", cs.systemCertPath))
 	}
 
 	cs.mu.Lock()
@@ -168,6 +172,9 @@ func (cs *CertStore) LoadCertificates() ([]byte, error) {
 // value is treated as upstream, matching rows written before this column
 // existed.
 func (cs *CertStore) loadDatabaseCertificates() ([]byte, int, error) {
+	if cs.db == nil {
+		return nil, 0, nil
+	}
 	certs, err := cs.db.ListCertificates()
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list certificates: %w", err)

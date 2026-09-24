@@ -75,7 +75,12 @@ func (pv *PolicyValidator) ValidateMCPProxyPolicies(mcpConfig *api.MCPProxyConfi
 	}
 
 	for i, policy := range *mcpConfig.Spec.Policies {
-		errs := pv.validatePolicy(policy, fmt.Sprintf("spec.policies[%d]", i))
+		fieldPath := fmt.Sprintf("spec.policies[%d]", i)
+		if err, refused := refuseMtlsAuthOutsideRestAPI(policy.Name, fieldPath); refused {
+			errors = append(errors, err)
+			continue
+		}
+		errs := pv.validatePolicy(policy, fieldPath)
 		errors = append(errors, errs...)
 	}
 
@@ -139,13 +144,22 @@ func (pv *PolicyValidator) validateLLMPolicyRefs(globalPolicies *[]api.Policy, o
 	// Global (api-level) policies carry params, so reuse validatePolicy to also validate them.
 	if globalPolicies != nil {
 		for i, policy := range *globalPolicies {
-			errors = append(errors, pv.validatePolicy(policy, fmt.Sprintf("spec.globalPolicies[%d]", i))...)
+			fieldPath := fmt.Sprintf("spec.globalPolicies[%d]", i)
+			if err, refused := refuseMtlsAuthOutsideRestAPI(policy.Name, fieldPath); refused {
+				errors = append(errors, err)
+				continue
+			}
+			errors = append(errors, pv.validatePolicy(policy, fieldPath)...)
 		}
 	}
 
 	// Operation-level policies: validate name + version existence.
 	if operationPolicies != nil {
 		for i, policy := range *operationPolicies {
+			if err, refused := refuseMtlsAuthOutsideRestAPI(policy.Name, fmt.Sprintf("spec.operationPolicies[%d]", i)); refused {
+				errors = append(errors, err)
+				continue
+			}
 			_, errs := pv.validatePolicyRef(policy.Name, policy.Version, fmt.Sprintf("spec.operationPolicies[%d]", i))
 			errors = append(errors, errs...)
 		}
@@ -154,6 +168,10 @@ func (pv *PolicyValidator) validateLLMPolicyRefs(globalPolicies *[]api.Policy, o
 	// Deprecated policies list (still honoured): validate name + version existence.
 	if legacyPolicies != nil {
 		for i, policy := range *legacyPolicies {
+			if err, refused := refuseMtlsAuthOutsideRestAPI(policy.Name, fmt.Sprintf("spec.policies[%d]", i)); refused {
+				errors = append(errors, err)
+				continue
+			}
 			_, errs := pv.validatePolicyRef(policy.Name, policy.Version, fmt.Sprintf("spec.policies[%d]", i))
 			errors = append(errors, errs...)
 		}
@@ -495,4 +513,18 @@ func (pv *PolicyValidator) validatePolicyParams(params map[string]interface{}, s
 	}
 
 	return errors
+}
+
+// refuseMtlsAuthOutsideRestAPI reports the validation error for an mtls-auth
+// reference on a kind the listener, the pool material injection and the
+// reference tracking do not cover. Only RestApi carries client-certificate
+// authentication.
+func refuseMtlsAuthOutsideRestAPI(policyName, fieldPath string) (ValidationError, bool) {
+	if policyName != MtlsAuthPolicyName {
+		return ValidationError{}, false
+	}
+	return ValidationError{
+		Field:   fieldPath,
+		Message: "mtls-auth is supported on RestApi only",
+	}, true
 }

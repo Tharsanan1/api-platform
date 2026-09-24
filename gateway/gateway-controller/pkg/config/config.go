@@ -729,14 +729,16 @@ type ClientCertificateHeader struct {
 // "!#$%&'*+-.^_`|~" — no spaces, no separators, no control characters.
 var httpHeaderTokenPattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
 
+// DefaultClientCertificateHeaderName is the header a front proxy relays a
+// client certificate in when the operator names none. The mtls-auth policy
+// falls back to the same name.
+const DefaultClientCertificateHeaderName = "X-WSO2-CLIENT-CERTIFICATE"
+
 // ValidateClientCertificateHeaderName reports whether name is a valid HTTP
-// header token (RFC 7230 tchar). An empty name is not validated here — same
-// convention as router.downstream_tls.ciphers/ecdh_curves in this file — but
-// the shipped default config always populates it (defaultConfig), so this
-// only ever accepts a genuinely blank override, never silently drops
-// enforcement for a normally-configured gateway. Exported so callers outside
-// this package (deploy-time/response-warning wiring) can reuse the exact
-// same check without re-implementing it.
+// header token (RFC 7230 tchar). Config.Validate replaces an empty name with
+// DefaultClientCertificateHeaderName before calling this, so an empty value
+// here is accepted as "not set". Exported so deploy-time and
+// response-warning wiring reuse the same check.
 func ValidateClientCertificateHeaderName(name string) error {
 	if name == "" {
 		return nil
@@ -1342,7 +1344,7 @@ func defaultConfig() *Config {
 				Ciphers:                "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
 				EcdhCurves:             "X25519,P-256",
 				ClientCertificateHeader: ClientCertificateHeader{
-					Name:             "X-WSO2-CLIENT-CERTIFICATE",
+					Name:             DefaultClientCertificateHeaderName,
 					TrustAny:         false,
 					ForwardToBackend: false,
 				},
@@ -1822,6 +1824,12 @@ func (c *Config) Validate() error {
 	// Validate the relayed client-certificate header's name unconditionally —
 	// a header-relay/bypass deployment is valid regardless of https_enabled
 	// (trust_any lets the header arrive over plaintext, per go-network-service-hardening.md).
+	// An empty header name means "the default": the router strips this header
+	// on every route that does not evaluate it and the policy reads it by this
+	// exact name, so a blank value would leave the two disagreeing.
+	if c.Router.DownstreamTLS.ClientCertificateHeader.Name == "" {
+		c.Router.DownstreamTLS.ClientCertificateHeader.Name = DefaultClientCertificateHeaderName
+	}
 	if err := ValidateClientCertificateHeaderName(c.Router.DownstreamTLS.ClientCertificateHeader.Name); err != nil {
 		return err
 	}

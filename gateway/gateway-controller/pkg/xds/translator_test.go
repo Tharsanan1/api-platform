@@ -23,6 +23,7 @@ import (
 	"math"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1249,7 +1250,7 @@ func TestConvertToInterface(t *testing.T) {
 	}
 }
 
-func TestNewTranslator_WithoutCerts(t *testing.T) {
+func TestNewTranslator_WithoutCerts_StoreExistsWithEmptyBundle(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
@@ -1257,7 +1258,8 @@ func TestNewTranslator_WithoutCerts(t *testing.T) {
 	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
 	require.NoError(t, err)
 	assert.NotNil(t, translator)
-	assert.Nil(t, translator.GetCertStore())
+	require.NotNil(t, translator.GetCertStore(), "the certificate store backs SDS and must exist without a custom certs path")
+	assert.Empty(t, translator.GetCertStore().GetCombinedCertificates())
 }
 
 func TestTranslator_ExtractTemplateHandle_NilSourceConfig(t *testing.T) {
@@ -2015,14 +2017,14 @@ func TestTranslator_GetVHostDomains(t *testing.T) {
 	})
 }
 
-func TestTranslator_GetCertStore_Nil(t *testing.T) {
+func TestTranslator_GetCertStore_AlwaysPresent(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
 	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
 	require.NoError(t, err)
 
-	assert.Nil(t, translator.GetCertStore())
+	assert.NotNil(t, translator.GetCertStore())
 }
 
 func TestTranslator_ExtractTemplateHandle_InvalidKind(t *testing.T) {
@@ -2762,8 +2764,8 @@ func TestTranslator_CreateUpstreamTLSContextWithMTLS_IPAddressTarget_UsesIPMatch
 	// mirroring TestTranslator_CreateUpstreamTLSContext_SDSViaADS.
 	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
 
-	tlsOpts := &models.UpstreamTLS{HasTLSBlock: true, VerifyHostName: true}
-	tlsCtx, err := translator.createUpstreamTLSContext(nil, "10.0.0.5", tlsOpts, "")
+	tlsOpts := &models.UpstreamTLS{HasTLSBlock: true, VerifyHostName: true, TrustedCANames: []string{"partner-ca"}}
+	tlsCtx, err := translator.createUpstreamTLSContext(nil, "10.0.0.5", tlsOpts, "upstream_ca:test:partner")
 	require.NoError(t, err)
 
 	assert.Empty(t, tlsCtx.Sni, "SNI is not meaningful for an IP-literal target")
@@ -3033,7 +3035,7 @@ func TestTranslator_CreateListener_LocalReplyConfig_SterileUF503Body(t *testing.
 		require.Len(t, andFilter.Filters, 2, "isHTTPS=%v", isHTTPS)
 		var hasUFFlag, hasStatus503 bool
 		for _, f := range andFilter.Filters {
-			if rf := f.GetResponseFlagFilter(); rf != nil && len(rf.Flags) == 1 && rf.Flags[0] == "UF" {
+			if rf := f.GetResponseFlagFilter(); rf != nil && slices.Contains(rf.Flags, "UF") {
 				hasUFFlag = true
 			}
 			if sf := f.GetStatusCodeFilter(); sf != nil && sf.GetComparison().GetValue().GetDefaultValue() == 503 {
@@ -4073,4 +4075,26 @@ func TestTranslator_CreateRouteFromRDC_StripsClientCertificateHeader_UnlessBelie
 		assert.NotContains(t, plainRoute.RequestHeadersToRemove, "X-Amzn-Mtls-Clientcert",
 			"the configured header name must be lower-cased, not added as-authored")
 	})
+}
+
+// Routes that never carry a policy chain evaluating the client-certificate
+// headers (the WebSub per-topic route and the legacy route builder) must
+// strip both headers before their backend.
+func TestTranslator_RoutesWithoutPolicyChain_StripClientCertificateHeaders(t *testing.T) {
+	translator := createTestTranslator()
+	translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{Name: "X-WSO2-CLIENT-CERTIFICATE"}
+
+	topicRoute := translator.createRoutePerTopic("api-123", "Test API", "v1.0.0", "/test", "POST", "/channel1", "test-cluster", "localhost", "WebSubApi", "project-123")
+	legacyRoute := translator.createRoute(
+		"test-id", "TestAPI", "v1.0", "/weather/v1.0",
+		"GET", "/forecast", "test-cluster", "/",
+		"localhost", "http/rest", "", "", nil, "", nil,
+		false, nil,
+	)
+
+	for name, r := range map[string]*route.Route{"websub topic route": topicRoute, "legacy route": legacyRoute} {
+		require.NotNil(t, r, name)
+		assert.Contains(t, r.RequestHeadersToRemove, xfccHeaderName, "%s must strip the forwarded-certificate header", name)
+		assert.Contains(t, r.RequestHeadersToRemove, "x-wso2-client-certificate", "%s must strip the relayed-certificate header", name)
+	}
 }

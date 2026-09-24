@@ -275,6 +275,66 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
       | accept: [{ ca: listener-partner-a, thumbprints: ["zz"] }]           | spec.policies[0].params.accept[0].thumbprints[0]     | a thumbprint is the SHA-256 of the certificate as 64 hex characters (colons and a sha256: prefix are accepted)  |
       | accept: [{ ca: listener-partner-a, thumbprint: "9f86d081" }]        | spec.policies[0].params.accept[0].thumbprint         | unknown parameter thumbprint; the field is thumbprints                                                            |
       | mode: strict                                                        | spec.policies[0].params.mode                         | unknown parameter mode                                                                                            |
+      | accept: { ca: listener-partner-a }                                  | spec.policies[0].params.accept                       | accept must be a list of entries; omit it to inherit every pooled authority                      |
+      | accept: [listener-partner-a]                                        | spec.policies[0].params.accept[0]                    | each accept entry must be an object naming ca                                                    |
+      | accept: [{ ca: listener-partner-a, thumbprints: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" }] | spec.policies[0].params.accept[0].thumbprints | thumbprints must be a list                                                              |
+      | accept: [{ ca: listener-partner-a, match: { uriSANs: "urn:x" } }]   | spec.policies[0].params.accept[0].match.uriSANs      | uriSANs must be a list                                                                           |
+      | accept: [{ ca: listener-partner-a, match: {} }]                     | spec.policies[0].params.accept[0].match              | match must list uriSANs or dnsSANs; remove it to accept any certificate from this authority       |
+      | accept: [{ ca: listener-partner-a, match: "urn:x" }]                | spec.policies[0].params.accept[0].match              | match must be an object listing uriSANs or dnsSANs                                               |
+
+  Scenario: mtls-auth cannot be made conditional
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: mtls-refused-api
+      spec:
+        displayName: mTLS Refused API
+        version: v1.0
+        context: /mtls-refused/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        policies:
+          - name: mtls-auth
+            version: v1
+            executionCondition: 'request.Method == "POST"'
+            params:
+              accept:
+                - ca: listener-partner-a
+        operations:
+          - method: GET
+            path: /health
+      """
+    Then the response status should be 400
+    And the response should list a validation error for field "spec.policies[0].executionCondition" with message "mtls-auth runs on every request and cannot carry an executionCondition"
+
+  Scenario: Attaching mtls-auth while the pool holds only relay entries is refused
+    Given I upload the certificate fixture "edge-lb-ca" as "listener-edge-lb" with usage "client" and role "relay"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: mtls-refused-api
+      spec:
+        displayName: mTLS Refused API
+        version: v1.0
+        context: /mtls-refused/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        policies:
+          - name: mtls-auth
+            version: v1
+        operations:
+          - method: GET
+            path: /health
+      """
+    Then the response status should be 400
+    And the response should list a validation error for field "spec.policies[0]" containing "requires at least one client authority"
 
   Scenario: mtls-auth may appear once per scope
     Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"

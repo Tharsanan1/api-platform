@@ -97,7 +97,7 @@ func TestUpstreamTLSValidator_ValidateRestAPI_RefusalOutline(t *testing.T) {
 		gatewayIdentityCert("out-identity-a"),
 		upstreamCA("out-backend-ca"),
 	)
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	tests := []struct {
 		name    string
@@ -149,7 +149,7 @@ func TestUpstreamTLSValidator_ValidateRestAPI_RefusalOutline(t *testing.T) {
 
 func TestUpstreamTLSValidator_ValidateRestAPI_InlineUpstreamTLSRejected(t *testing.T) {
 	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	errs := validator.ValidateRestAPI(restAPIWithInlineUpstreamTLS(map[string]interface{}{"identity": "out-identity-a"}))
 	want := "tls is not supported on an inline upstream; move it to upstreamDefinitions and reference it"
@@ -162,7 +162,7 @@ func TestUpstreamTLSValidator_ValidateRestAPI_InlineUpstreamTLSRejected(t *testi
 
 func TestUpstreamTLSValidator_ValidateRestAPI_TlsEmptyBlock_Valid(t *testing.T) {
 	store := newFakeMtlsCertStore()
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(
 		tlsUpstreamDef(map[string]interface{}{}, "https://mtls-backend-a:8443"),
@@ -174,7 +174,7 @@ func TestUpstreamTLSValidator_ValidateRestAPI_TlsEmptyBlock_Valid(t *testing.T) 
 
 func TestUpstreamTLSValidator_ValidateRestAPI_IdentityNamingAClientRow_Rejected(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("out-client-authority"), gatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
 		"identity":   "out-client-authority",
@@ -193,7 +193,7 @@ func TestUpstreamTLSValidator_ValidateRestAPI_IdentityNamingAClientRow_Rejected(
 
 func TestUpstreamTLSValidator_ValidateRestAPI_TrustedCAsNamingAClientRow_Rejected(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("out-client-authority"), gatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
 		"identity":   "out-identity-a",
@@ -208,7 +208,7 @@ func TestUpstreamTLSValidator_ValidateRestAPI_TrustedCAsNamingAClientRow_Rejecte
 
 func TestUpstreamTLSValidator_ValidateRestAPI_MixedHttpHttpsTargets_NamesTheHttpOne(t *testing.T) {
 	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	def := tlsUpstreamDef(map[string]interface{}{"identity": "out-identity-a"},
 		"https://mtls-backend-a:8443", "http://echo-backend:80")
@@ -230,7 +230,7 @@ func TestUpstreamTLSValidator_ValidateRestAPI_MixedHttpHttpsTargets_NamesTheHttp
 
 func TestUpstreamTLSValidator_ResolveWarnings_VerifyHostNameDisabled(t *testing.T) {
 	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"), upstreamCA("out-backend-ca"))
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	cfg := restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
 		"identity":       "out-identity-a",
@@ -247,7 +247,7 @@ func TestUpstreamTLSValidator_ResolveWarnings_VerifyHostNameDisabled(t *testing.
 
 func TestUpstreamTLSValidator_ResolveWarnings_VerifyHostNameDefaultTrue_NoWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	cfg := restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
 		"identity": "out-identity-a",
@@ -261,7 +261,7 @@ func TestUpstreamTLSValidator_ResolveWarnings_VerifyHostNameDefaultTrue_NoWarnin
 
 func TestUpstreamTLSValidator_ResolveWarnings_IdentityExpiredSinceUpload(t *testing.T) {
 	store := newFakeMtlsCertStore(expiredGatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	cfg := restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
 		"identity": "out-identity-a",
@@ -276,7 +276,7 @@ func TestUpstreamTLSValidator_ResolveWarnings_IdentityExpiredSinceUpload(t *test
 
 func TestUpstreamTLSValidator_ResolveWarnings_IdentityNotExpired_NoWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store)
+	validator := NewUpstreamTLSValidator(store, false)
 
 	cfg := restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
 		"identity": "out-identity-a",
@@ -285,5 +285,34 @@ func TestUpstreamTLSValidator_ResolveWarnings_IdentityNotExpired_NoWarning(t *te
 	warnings := validator.ResolveWarnings(*cfg)
 	if hasWarning(warnings, WarningCodeTLSIdentityExpired, "spec.upstreamDefinitions[0].tls.identity") {
 		t.Fatalf("did not expect an identity-expired warning for a not-yet-expired identity, got %+v", warnings)
+	}
+}
+
+func TestUpstreamTLSValidator_TrustRefusedWhileVerificationDisabled(t *testing.T) {
+	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"), upstreamCA("out-backend-ca"))
+	validator := NewUpstreamTLSValidator(store, true)
+
+	for _, tls := range []map[string]interface{}{
+		{"trustedCAs": []interface{}{"out-backend-ca"}},
+		{"verifyHostName": false},
+	} {
+		errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(tlsUpstreamDef(tls, "https://mtls-backend-a:8443")))
+		if len(errs) == 0 {
+			t.Fatalf("expected a refusal for %v while verification is disabled", tls)
+		}
+		found := false
+		for _, e := range errs {
+			if e.Field == "spec.upstreamDefinitions[0].tls" && e.Message == "per-upstream trust cannot be enforced while router.upstream.tls.disable_ssl_verification is on" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected the verification-disabled refusal, got %v", errs)
+		}
+	}
+
+	// An identity alone asks for nothing Envoy cannot honour with verification off.
+	if errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{"identity": "out-identity-a"}, "https://mtls-backend-a:8443"))); len(errs) != 0 {
+		t.Errorf("an identity alone must deploy while verification is disabled, got %v", errs)
 	}
 }

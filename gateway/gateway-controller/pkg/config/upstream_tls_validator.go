@@ -61,12 +61,16 @@ type UpstreamTLSCertificateStore interface {
 // on a successful deploy response.
 type UpstreamTLSValidator struct {
 	store UpstreamTLSCertificateStore
+	// sslVerificationDisabled mirrors router.upstream.tls.disable_ssl_verification:
+	// while it is on, Envoy verifies no backend at all, so a tls block asking
+	// for per-upstream trust or hostname verification could never be honoured.
+	sslVerificationDisabled bool
 }
 
 // NewUpstreamTLSValidator creates a validator bound to the gateway's
-// certificate/gateway-identity store.
-func NewUpstreamTLSValidator(store UpstreamTLSCertificateStore) *UpstreamTLSValidator {
-	return &UpstreamTLSValidator{store: store}
+// certificate/gateway-identity store and the router's verification posture.
+func NewUpstreamTLSValidator(store UpstreamTLSCertificateStore, sslVerificationDisabled bool) *UpstreamTLSValidator {
+	return &UpstreamTLSValidator{store: store, sslVerificationDisabled: sslVerificationDisabled}
 }
 
 // resolvedUpstreamTLS is the parsed, effective view of one tls block.
@@ -144,6 +148,17 @@ func (v *UpstreamTLSValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validat
 		fieldPath := fmt.Sprintf("spec.upstreamDefinitions[%d].tls", d)
 		resolved, paramErrs := parseUpstreamTLSParams(fieldPath, *def.Tls)
 		errs = append(errs, paramErrs...)
+
+		if v.sslVerificationDisabled {
+			_, wantsTrust := (*def.Tls)["trustedCAs"]
+			_, wantsHostname := (*def.Tls)["verifyHostName"]
+			if wantsTrust || wantsHostname {
+				errs = append(errs, ValidationError{
+					Field:   fieldPath,
+					Message: "per-upstream trust cannot be enforced while router.upstream.tls.disable_ssl_verification is on",
+				})
+			}
+		}
 
 		if resolved.identity != "" {
 			cert, err := v.store.GetCertificateByName(resolved.identity)

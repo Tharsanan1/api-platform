@@ -67,7 +67,8 @@ func recordDeployedAPIName(state *TestState, body string) {
 
 // deployAPIConfiguration POSTs a RestApi configuration to the gateway
 // controller, records its name for end-of-scenario cleanup, and waits out
-// policy propagation. Shared by every "deploy" step pattern registered below
+// policy propagation when the controller accepted it; a rejected
+// configuration changed nothing, so there is nothing to wait for. Shared by every "deploy" step pattern registered below
 // and by the fixture-values deploy step in steps_mtls.go, so a single
 // implementation is what actually talks to the controller.
 func deployAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, body string) error {
@@ -76,8 +77,18 @@ func deployAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, body s
 	if err := httpSteps.SendPOSTToService("gateway-controller", "/rest-apis", &godog.DocString{Content: body}); err != nil {
 		return err
 	}
-	time.Sleep(policyPropagationDelay)
+	waitForPropagationIfAccepted(httpSteps)
 	return nil
+}
+
+// waitForPropagationIfAccepted sleeps out policy propagation only after a
+// mutation the controller accepted (2xx). A refused mutation leaves the
+// gateway untouched, so waiting would only slow the suite down.
+func waitForPropagationIfAccepted(httpSteps *steps.HTTPSteps) {
+	if resp := httpSteps.LastResponse(); resp != nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		return
+	}
+	time.Sleep(policyPropagationDelay)
 }
 
 // updateAPIConfiguration PUTs a RestApi configuration to the gateway
@@ -90,7 +101,7 @@ func updateAPIConfiguration(httpSteps *steps.HTTPSteps, apiName, body string) er
 	if err := httpSteps.SendPUTToService("gateway-controller", "/rest-apis/"+apiName, &godog.DocString{Content: body}); err != nil {
 		return err
 	}
-	time.Sleep(policyPropagationDelay)
+	waitForPropagationIfAccepted(httpSteps)
 	return nil
 }
 
@@ -135,7 +146,7 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
+		waitForPropagationIfAccepted(httpSteps)
 		return nil
 	}
 
@@ -160,15 +171,28 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 		return httpSteps.SendGETToService("gateway-controller", "/rest-apis/"+name)
 	})
 
-	// After-scenario cleanup: delete every API this scenario deployed (via
-	// deployAPIConfiguration, above), as admin, before any feature-specific
-	// After hook (e.g. mtlsSteps' certificate-pool cleanup) runs — this
-	// function is registered ahead of RegisterMTLSSteps in suite_test.go, and
-	// godog runs After hooks in registration order. Applies to every feature,
-	// not only mtls ones; existing scenarios that already delete their own
-	// API explicitly just see a silent no-op (404) here.
+	// After-scenario cleanup for the mTLS features only: every API such a
+	// scenario deployed is deleted as admin, before the certificate cleanup
+	// hook runs (this function is registered ahead of RegisterMTLSSteps in
+	// suite_test.go, and godog runs After hooks in registration order), so
+	// an API can never hold a reference to a pool entry being removed. Other
+	// features manage their own APIs and may share one across scenarios, so
+	// they are left alone.
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
-		cleanupDeployedAPIs(state, httpSteps)
+		if scenarioHasTag(sc, "@mtls") {
+			cleanupDeployedAPIs(state, httpSteps)
+		}
 		return c, nil
 	})
+}
+
+// scenarioHasTag reports whether the scenario, or the feature it belongs to,
+// carries the given tag (godog copies feature-level tags onto each scenario).
+func scenarioHasTag(sc *godog.Scenario, tag string) bool {
+	for _, t := range sc.Tags {
+		if t.Name == tag {
+			return true
+		}
+	}
+	return false
 }

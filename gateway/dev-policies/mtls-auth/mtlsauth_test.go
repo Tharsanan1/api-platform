@@ -1164,3 +1164,26 @@ func TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend(t *testing.T) {
 		}
 	})
 }
+
+func TestGetPolicy_MalformedNarrowingFailsClosed(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
+
+	for name, mutate := range map[string]func(entry map[string]interface{}){
+		"thumbprints as a scalar": func(e map[string]interface{}) { e["thumbprints"] = "9f86d081" },
+		"uriSANs as a scalar":     func(e map[string]interface{}) { e["match"] = map[string]interface{}{"uriSANs": "urn:x"} },
+		"dnsSANs with a non-string": func(e map[string]interface{}) {
+			e["match"] = map[string]interface{}{"dnsSANs": []interface{}{"a", 7}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			params := buildParams([]*testEntity{rootA}, entries)
+			entry := params[internalAcceptParam].([]interface{})[0].(map[string]interface{})
+			mutate(entry)
+			_, err := GetPolicy(policy.PolicyMetadata{}, params)
+			if err == nil {
+				t.Fatalf("expected GetPolicy to refuse a malformed narrowing, got nil error")
+			}
+		})
+	}
+}

@@ -116,14 +116,19 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 		return c, nil
 	})
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
-		// A pooled certificate cannot be removed while a deployed API still
-		// references it (or while it is the last authority an mtls-auth API
-		// depends on), so the APIs this scenario deployed must be gone first.
-		// Delete them here explicitly instead of relying on the order godog
-		// runs After hooks in; a second deletion by the API steps' own hook
-		// is a harmless 404. Gateway identities are deleted next — after APIs
-		// (which may reference them) but before certificates (which are
-		// independent of identities).
+		// Only the mTLS features hand their APIs and certificates to this
+		// hook; other features manage their own APIs and may share one
+		// across scenarios. A pooled certificate cannot be removed while a
+		// deployed API still references it (or while it is the last
+		// authority an mtls-auth API depends on), so the APIs this scenario
+		// deployed are deleted first, explicitly, rather than relying on the
+		// order godog runs After hooks in; a second deletion by the API
+		// steps' own hook is a harmless 404. Gateway identities go next —
+		// after APIs (which may reference them) but before certificates
+		// (which are independent of identities).
+		if !scenarioHasTag(sc, "@mtls") {
+			return c, nil
+		}
 		cleanupDeployedAPIs(m.state, m.httpSteps)
 		m.cleanupTrackedCertificates()
 		return c, nil

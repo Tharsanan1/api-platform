@@ -41,7 +41,7 @@ import (
 // removed) is treated as done.
 const (
 	cleanupDeleteRetryBudget   = 5 * time.Second
-	cleanupDeleteRetryInterval = 250 * time.Millisecond
+	cleanupDeleteRetryInterval = 25 * time.Millisecond
 )
 
 // deleteRetryingConflict deletes the /certificates/{id} row (a plain

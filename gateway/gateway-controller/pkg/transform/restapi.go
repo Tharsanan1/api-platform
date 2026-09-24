@@ -243,7 +243,10 @@ func (t *RestAPITransformer) Transform(cfg *models.StoredConfig) (*models.Runtim
 			rdc.Routes[routeKey] = rdcRoute
 
 			// Build policy chain: API-level + operation-level + system policies
-			chain := t.buildPolicyChain(apiPolicies, op.Policies)
+			chain, err := t.buildPolicyChain(apiPolicies, op.Policies)
+			if err != nil {
+				return nil, err
+			}
 			injected := utils.InjectSystemPolicies(chain, t.systemConfig, nil)
 			rdc.PolicyChains[routeKey] = sdkChainToModel(injected)
 		}
@@ -435,7 +438,7 @@ func (t *RestAPITransformer) collectAPIPolicies(policies *[]api.Policy) []policy
 func (t *RestAPITransformer) buildPolicyChain(
 	apiPolicies []policyenginev1.PolicyInstance,
 	opPolicies *[]api.Policy,
-) []policyenginev1.PolicyInstance {
+) ([]policyenginev1.PolicyInstance, error) {
 	var result []policyenginev1.PolicyInstance
 
 	// API-level policies (already resolved, in spec order, evaluated before operation-level).
@@ -461,9 +464,11 @@ func (t *RestAPITransformer) buildPolicyChain(
 	if t.routerConfig != nil {
 		headerConfig = t.routerConfig.DownstreamTLS.ClientCertificateHeader
 	}
-	injectMtlsInternalParams(result, t.mtlsCertStore, headerConfig)
+	if err := injectMtlsInternalParams(result, t.mtlsCertStore, headerConfig); err != nil {
+		return nil, err
+	}
 
-	return result
+	return result, nil
 }
 
 // upstreamClusterResult holds the result of resolving and registering an upstream cluster.

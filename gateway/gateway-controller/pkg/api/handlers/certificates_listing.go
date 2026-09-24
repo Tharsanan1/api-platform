@@ -151,6 +151,9 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 		} else {
 			if firstCert, err := firstX509Certificate(cert.Certificate); err == nil {
 				item.IsLeaf = !firstCert.IsCA
+				if warning := clientca.ExpiryWarning(firstCert.NotAfter, now); warning != nil {
+					item.Warnings = []clientca.Warning{*warning}
+				}
 			} else {
 				log.Warn("Failed to parse stored certificate",
 					slog.String("name", cert.Name), slog.Any("error", err))

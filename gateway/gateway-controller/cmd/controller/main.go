@@ -581,7 +581,7 @@ func main() {
 		cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny)
 	policyValidator := config.NewPolicyValidator(policyDefinitions, mtlsAuthValidator)
 	validator.SetPolicyValidator(policyValidator)
-	validator.SetUpstreamTLSValidator(config.NewUpstreamTLSValidator(db))
+	validator.SetUpstreamTLSValidator(config.NewUpstreamTLSValidator(db, cfg.Router.Upstream.TLS.DisableSslVerification))
 
 	// Build the single shared outbound *http.Client used by every control-plane /
 	// platform-API / on-prem-APIM call this process makes. Built once, here, and injected

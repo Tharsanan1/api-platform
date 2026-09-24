@@ -29,6 +29,7 @@ import (
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/metrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/service/restapi"
@@ -206,6 +207,7 @@ func (h *RestAPIHandler) buildDeployResponse(sourceConfig any, stored *models.St
 	case api.RestAPI:
 		resolved, warnings := h.service.ResolveMtlsAuthForResponse(cfg)
 		warnings = append(warnings, h.service.ResolveUpstreamTLSWarnings(resolved)...)
+		h.logDeployWarnings(stored, warnings)
 		return buildRestAPIResourceResponseWithWarnings(resolved, stored, warnings)
 	case *api.RestAPI:
 		if cfg == nil {
@@ -213,6 +215,7 @@ func (h *RestAPIHandler) buildDeployResponse(sourceConfig any, stored *models.St
 		}
 		resolved, warnings := h.service.ResolveMtlsAuthForResponse(*cfg)
 		warnings = append(warnings, h.service.ResolveUpstreamTLSWarnings(resolved)...)
+		h.logDeployWarnings(stored, warnings)
 		return buildRestAPIResourceResponseWithWarnings(resolved, stored, warnings)
 	default:
 		return buildResourceResponseFromStored(sourceConfig, stored)
@@ -405,4 +408,20 @@ func isRestAPICreateBadRequest(err error) bool {
 		strings.Contains(message, "resource kind is required") ||
 		strings.Contains(message, "unsupported resource kind") ||
 		strings.Contains(message, "invalid or missing origin")
+}
+
+// logDeployWarnings records every deploy-time warning at WARN, so a
+// condition the response body reports to the caller is also visible to the
+// operator reading the controller log.
+func (h *RestAPIHandler) logDeployWarnings(stored *models.StoredConfig, warnings []clientca.Warning) {
+	if h.logger == nil {
+		return
+	}
+	for _, w := range warnings {
+		attrs := []any{slog.String("code", w.Code), slog.String("field", w.Field), slog.String("message", w.Message)}
+		if stored != nil {
+			attrs = append(attrs, slog.String("api", stored.UUID))
+		}
+		h.logger.Warn("Deployment warning", attrs...)
+	}
 }

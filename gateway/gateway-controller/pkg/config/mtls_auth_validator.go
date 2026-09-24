@@ -120,10 +120,15 @@ func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled, headerTr
 // mtlsOccurrence is one place mtls-auth is attached in a RestAPI: either the
 // API-level policies list or a single operation's policies list.
 type mtlsOccurrence struct {
-	fieldPath string
-	params    map[string]interface{}
-	scopeKey  string // "api" or "op:<index>" — occurrences sharing a scopeKey are in the same chain
-	apiLevel  bool
+	fieldPath   string
+	params      map[string]interface{}
+	scopeKey    string // "api" or "op:<index>" — occurrences sharing a scopeKey are in the same chain
+	apiLevel    bool
+	conditional bool // an executionCondition is set, so the engine could skip the policy
+}
+
+func hasExecutionCondition(cond *string) bool {
+	return cond != nil && strings.TrimSpace(*cond) != ""
 }
 
 func paramsOrEmpty(p *map[string]interface{}) map[string]interface{} {
@@ -143,10 +148,11 @@ func collectMTLSAuthOccurrences(apiConfig *api.RestAPI) []mtlsOccurrence {
 		for i, p := range *apiConfig.Spec.Policies {
 			if p.Name == MtlsAuthPolicyName {
 				occs = append(occs, mtlsOccurrence{
-					fieldPath: fmt.Sprintf("spec.policies[%d]", i),
-					params:    paramsOrEmpty(p.Params),
-					scopeKey:  "api",
-					apiLevel:  true,
+					fieldPath:   fmt.Sprintf("spec.policies[%d]", i),
+					params:      paramsOrEmpty(p.Params),
+					conditional: hasExecutionCondition(p.ExecutionCondition),
+					scopeKey:    "api",
+					apiLevel:    true,
 				})
 			}
 		}
@@ -159,10 +165,11 @@ func collectMTLSAuthOccurrences(apiConfig *api.RestAPI) []mtlsOccurrence {
 		for pIdx, p := range *op.Policies {
 			if p.Name == MtlsAuthPolicyName {
 				occs = append(occs, mtlsOccurrence{
-					fieldPath: fmt.Sprintf("spec.operations[%d].policies[%d]", opIdx, pIdx),
-					params:    paramsOrEmpty(p.Params),
-					scopeKey:  fmt.Sprintf("op:%d", opIdx),
-					apiLevel:  false,
+					fieldPath:   fmt.Sprintf("spec.operations[%d].policies[%d]", opIdx, pIdx),
+					params:      paramsOrEmpty(p.Params),
+					conditional: hasExecutionCondition(p.ExecutionCondition),
+					scopeKey:    fmt.Sprintf("op:%d", opIdx),
+					apiLevel:    false,
 				})
 			}
 		}
@@ -276,6 +283,13 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 	}
 
 	for _, occ := range occs {
+		if occ.conditional {
+			errs = append(errs, ValidationError{
+				Field:   occ.fieldPath + ".executionCondition",
+				Message: "mtls-auth runs on every request and cannot carry an executionCondition",
+			})
+		}
+
 		if !v.httpsEnabled && !v.headerTrustAny {
 			errs = append(errs, ValidationError{
 				Field:   occ.fieldPath,
@@ -284,7 +298,7 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 		}
 
 		clientAuthorities, err := v.store.ListCertificatesByUsage(models.CertificateUsageClient)
-		if err != nil || len(clientAuthorities) == 0 {
+		if err != nil || countClientAuthorities(clientAuthorities) == 0 {
 			errs = append(errs, ValidationError{
 				Field:   occ.fieldPath,
 				Message: "mtls-auth requires at least one client authority; add one with POST /certificates and usage: client",
@@ -315,11 +329,15 @@ func (v *MtlsAuthValidator) validateParams(fieldPath string, params map[string]i
 	if !hasAccept {
 		return errs
 	}
+	acceptPath := paramsPath + ".accept"
 	acceptSlice, ok := acceptRaw.([]interface{})
 	if !ok {
+		errs = append(errs, ValidationError{
+			Field:   acceptPath,
+			Message: "accept must be a list of entries; omit it to inherit every pooled authority",
+		})
 		return errs
 	}
-	acceptPath := paramsPath + ".accept"
 	if len(acceptSlice) == 0 {
 		errs = append(errs, ValidationError{
 			Field:   acceptPath,
@@ -329,11 +347,16 @@ func (v *MtlsAuthValidator) validateParams(fieldPath string, params map[string]i
 	}
 
 	for j, entryRaw := range acceptSlice {
+		entryPath := fmt.Sprintf("%s[%d]", acceptPath, j)
 		entryMap, ok := entryRaw.(map[string]interface{})
 		if !ok {
+			errs = append(errs, ValidationError{
+				Field:   entryPath,
+				Message: "each accept entry must be an object naming ca",
+			})
 			continue
 		}
-		errs = append(errs, v.validateAcceptEntry(fmt.Sprintf("%s[%d]", acceptPath, j), entryMap)...)
+		errs = append(errs, v.validateAcceptEntry(entryPath, entryMap)...)
 	}
 
 	return errs
@@ -412,13 +435,16 @@ func validateAcceptEntryMatch(entryPath string, entry map[string]interface{}) []
 	if !hasMatch || matchRaw == nil {
 		return nil
 	}
+	matchPath := entryPath + ".match"
 	matchMap, ok := matchRaw.(map[string]interface{})
 	if !ok {
-		return nil
+		return []ValidationError{{
+			Field:   matchPath,
+			Message: "match must be an object listing uriSANs or dnsSANs",
+		}}
 	}
 
 	var errs []ValidationError
-	matchPath := entryPath + ".match"
 
 	for key := range matchMap {
 		if !mtlsAuthAllowedMatchParams[key] {
@@ -426,16 +452,27 @@ func validateAcceptEntryMatch(entryPath string, entry map[string]interface{}) []
 		}
 	}
 
+	_, hasURI := matchMap["uriSANs"]
+	_, hasDNS := matchMap["dnsSANs"]
+	if !hasURI && !hasDNS {
+		errs = append(errs, ValidationError{
+			Field:   matchPath,
+			Message: "match must list uriSANs or dnsSANs; remove it to accept any certificate from this authority",
+		})
+		return errs
+	}
+
 	for _, sanField := range []string{"uriSANs", "dnsSANs"} {
 		sanRaw, ok := matchMap[sanField]
 		if !ok {
 			continue
 		}
+		sanPath := matchPath + "." + sanField
 		sanSlice, ok := sanRaw.([]interface{})
 		if !ok {
+			errs = append(errs, ValidationError{Field: sanPath, Message: sanField + " must be a list"})
 			continue
 		}
-		sanPath := matchPath + "." + sanField
 		const sanEmptyMessage = "list at least one non-empty SAN, or remove match to accept any certificate from this authority"
 		if len(sanSlice) == 0 {
 			errs = append(errs, ValidationError{Field: sanPath, Message: sanEmptyMessage})
@@ -460,13 +497,13 @@ func validateAcceptEntryThumbprints(entryPath string, entry map[string]interface
 	if !hasTP {
 		return nil
 	}
+	tpPath := entryPath + ".thumbprints"
 	tpSlice, ok := tpRaw.([]interface{})
 	if !ok {
-		return nil
+		return []ValidationError{{Field: tpPath, Message: "thumbprints must be a list"}}
 	}
 
 	var errs []ValidationError
-	tpPath := entryPath + ".thumbprints"
 	if len(tpSlice) == 0 {
 		errs = append(errs, ValidationError{
 			Field:   tpPath,
@@ -755,4 +792,17 @@ func ValidateMTLSStartupInvariant(configs []*models.StoredConfig, httpsEnabled, 
 		}
 	}
 	return nil
+}
+
+// countClientAuthorities counts the pool rows that can vouch for a client
+// directly. Relay rows only vouch for a certificate carried in a header, so
+// a pool holding nothing but relays cannot authenticate anyone.
+func countClientAuthorities(rows []*models.StoredCertificate) int {
+	n := 0
+	for _, row := range rows {
+		if row.Role != models.CertificateRoleRelay {
+			n++
+		}
+	}
+	return n
 }

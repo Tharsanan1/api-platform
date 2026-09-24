@@ -179,27 +179,25 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 		log.Warn("Failed to refresh certificate metrics after update", slog.Any("error", err))
 	}
 
-	zero := 0
 	var warnings []clientca.Warning
 	for _, warn := range ib.Warnings {
 		warnings = append(warnings, clientca.Warning{Code: warn.Code, Field: warn.Field, Message: warn.Message})
 	}
 
 	resp := CertificateResponse{
-		ID:                             updated.UUID,
-		Name:                           updated.Name,
-		Subject:                        updated.Subject,
-		Issuer:                         updated.Issuer,
-		NotAfter:                       updated.NotAfter.Format("2006-01-02 15:04:05"),
-		Count:                          updated.CertCount,
-		Usage:                          models.CertificateUsageIdentity,
-		IsLeaf:                         !ib.Leaf.IsCA,
-		KeyAlgorithm:                   updated.KeyAlgorithm,
-		ChainLength:                    updated.CertCount,
-		PooledConnectionsUsingPrevious: &zero,
-		Warnings:                       warnings,
-		Message:                        "Certificate updated and SDS updated successfully",
-		Status:                         "success",
+		ID:           updated.UUID,
+		Name:         updated.Name,
+		Subject:      updated.Subject,
+		Issuer:       updated.Issuer,
+		NotAfter:     updated.NotAfter.Format("2006-01-02 15:04:05"),
+		Count:        updated.CertCount,
+		Usage:        models.CertificateUsageIdentity,
+		IsLeaf:       !ib.Leaf.IsCA,
+		KeyAlgorithm: updated.KeyAlgorithm,
+		ChainLength:  updated.CertCount,
+		Warnings:     warnings,
+		Message:      "Certificate updated and SDS updated successfully",
+		Status:       "success",
 	}
 	httputil.WriteJSON(w, http.StatusOK, resp)
 }

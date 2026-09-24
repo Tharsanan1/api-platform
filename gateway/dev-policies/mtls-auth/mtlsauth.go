@@ -67,6 +67,7 @@ package mtlsauth
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -75,7 +76,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -275,7 +275,9 @@ func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (p
 		return nil, fmt.Errorf("mtls-auth: parsing relay list: %w", err)
 	}
 	header := parseHeaderParam(params[internalHeaderParam])
-	return &MtlsAuthPolicy{accept: accept, pool: pool, relays: relays, header: header}, nil
+	p := &MtlsAuthPolicy{accept: accept, pool: pool, relays: relays, header: header}
+	p.warnUnpooledAcceptAuthorities()
+	return p, nil
 }
 
 // headerModeOn reports whether a client-certificate header can ever be
@@ -320,8 +322,6 @@ func (p *MtlsAuthPolicy) Mode() policy.ProcessingMode {
 //     through the SAME accept-list evaluation as the connection path.
 func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[string]interface{}) evaluationResult {
 	now := time.Now()
-
-	p.warnUnpooledAcceptAuthorities()
 
 	if p.headerModeOn() {
 		if headerValue, present := p.headerRawValue(reqCtx); present {
@@ -516,7 +516,7 @@ func (p *MtlsAuthPolicy) evaluateAcceptList(leaf *x509.Certificate, intermediate
 		}
 
 		if len(entry.thumbprints) > 0 {
-			if !slices.Contains(entry.thumbprints, canonicalThumbprint) {
+			if !containsConstantTime(entry.thumbprints, canonicalThumbprint) {
 				upgrade(reasonThumbprintMismatch)
 				continue
 			}
@@ -594,13 +594,13 @@ func (p *MtlsAuthPolicy) logIgnoredHeader(tls *policy.DownstreamTLS) {
 	)
 }
 
-// warnUnpooledAcceptAuthorities logs a WARN for every accept entry whose
-// named authority is not found among this policy instance's own client-CA
-// pool material — a sign the pool has drifted since this policy was bound
-// (e.g. the authority was removed from the pool but this API's accept list
-// still carries its own embedded copy). Logging on every request is
-// deliberate — this kind of drift should be visible immediately rather than
-// smoothed over by a throttle.
+// warnUnpooledAcceptAuthorities logs a WARN, once per policy binding, for
+// every accept entry whose named authority is not found among this
+// instance's own client-CA pool material — a sign the pool has drifted
+// since the chain was built (the authority was removed from the pool but
+// this API's accept list still carries its own embedded copy). Deploy-time
+// validation makes this unreachable in the normal flow, so it is not
+// throttled beyond binding.
 func (p *MtlsAuthPolicy) warnUnpooledAcceptAuthorities() {
 	for _, entry := range p.accept {
 		if authorityInPool(entry.roots, p.pool) {
@@ -788,6 +788,9 @@ func (p *MtlsAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Re
 	if !result.authenticated {
 		slog.Debug("mtls-auth: rejecting request",
 			slog.String("reason", result.reason),
+			slog.String("subject", result.subjectDN),
+			slog.String("source", result.source),
+			slog.String("api", reqCtx.APIName),
 			slog.String("path", reqCtx.Path),
 		)
 		return p.handleAuthFailure(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage)
@@ -1011,14 +1014,22 @@ func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 			if !ok {
 				return nil, fmt.Errorf("%s[%d].match must be an object", internalAcceptParam, i)
 			}
-			entry.uriSANs = toStringSliceOrNil(matchObj["uriSANs"])
-			entry.dnsSANs = toStringSliceOrNil(matchObj["dnsSANs"])
+			matchPath := fmt.Sprintf("%s[%d].match", internalAcceptParam, i)
+			var err error
+			if entry.uriSANs, err = stringListParam(matchObj, "uriSANs", matchPath); err != nil {
+				return nil, err
+			}
+			if entry.dnsSANs, err = stringListParam(matchObj, "dnsSANs", matchPath); err != nil {
+				return nil, err
+			}
 		}
 
-		if thumbsRaw, ok := obj["thumbprints"]; ok && thumbsRaw != nil {
-			for _, t := range toStringSliceOrNil(thumbsRaw) {
-				entry.thumbprints = append(entry.thumbprints, normalizeThumbprint(t))
-			}
+		thumbs, err := stringListParam(obj, "thumbprints", fmt.Sprintf("%s[%d]", internalAcceptParam, i))
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range thumbs {
+			entry.thumbprints = append(entry.thumbprints, normalizeThumbprint(t))
 		}
 
 		entries = append(entries, entry)
@@ -1074,8 +1085,14 @@ func parseRelaysParam(raw interface{}) ([]relayEntry, error) {
 			if !ok {
 				return nil, fmt.Errorf("%s[%d].match must be an object", internalRelaysParam, i)
 			}
-			entry.uriSANs = toStringSliceOrNil(matchObj["uriSANs"])
-			entry.dnsSANs = toStringSliceOrNil(matchObj["dnsSANs"])
+			matchPath := fmt.Sprintf("%s[%d].match", internalRelaysParam, i)
+			var err error
+			if entry.uriSANs, err = stringListParam(matchObj, "uriSANs", matchPath); err != nil {
+				return nil, err
+			}
+			if entry.dnsSANs, err = stringListParam(matchObj, "dnsSANs", matchPath); err != nil {
+				return nil, err
+			}
 		}
 
 		entries = append(entries, entry)
@@ -1107,21 +1124,31 @@ func parseHeaderParam(raw interface{}) headerConfig {
 	return cfg
 }
 
-func toStringSliceOrNil(raw interface{}) []string {
+// stringListParam reads an optional list-of-strings parameter. An absent or
+// nil key yields nil; a present key that is not a list of strings is an
+// error, never silently "no narrowing" — a malformed narrowing must fail
+// closed at bind time, not widen what the entry accepts.
+func stringListParam(obj map[string]interface{}, key, path string) ([]string, error) {
+	raw, ok := obj[key]
+	if !ok || raw == nil {
+		return nil, nil
+	}
 	items, ok := raw.([]interface{})
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("%s.%s must be a list of strings", path, key)
 	}
 	out := make([]string, 0, len(items))
-	for _, item := range items {
-		if s, ok := item.(string); ok {
-			out = append(out, s)
+	for j, item := range items {
+		str, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s.%s[%d] must be a string", path, key, j)
 		}
+		out = append(out, str)
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, nil
 }
 
 // normalizeThumbprint mirrors policy-definition.yaml's documented
@@ -1411,16 +1438,23 @@ func firstMatchingSAN(candidates []string, accepted []string) string {
 	if len(candidates) == 0 || len(accepted) == 0 {
 		return ""
 	}
-	present := make(map[string]struct{}, len(candidates))
-	for _, c := range candidates {
-		present[c] = struct{}{}
-	}
 	for _, want := range accepted {
-		if _, ok := present[want]; ok {
+		if containsConstantTime(candidates, want) {
 			return want
 		}
 	}
 	return ""
+}
+
+// containsConstantTime reports whether want is in values, comparing every
+// element in constant time so a match position or a shared prefix is not
+// observable through timing.
+func containsConstantTime(values []string, want string) bool {
+	found := 0
+	for _, v := range values {
+		found |= subtle.ConstantTimeCompare([]byte(v), []byte(want))
+	}
+	return found == 1
 }
 
 func firstOf(values []string) string {

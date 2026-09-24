@@ -244,3 +244,39 @@ Decisions taken while writing slice 2 tests: unknown-parameter message is `unkno
   every policy, not only mtls-auth.
 - The warning `code` fields in the OpenAPI document are closed enums; a unit test checks every code
   the controller can emit is listed.
+
+## Hardening — fail-closed gaps found in review (§3.1, §5.2, §8.11, §8.12, §8.13, S16, S20, S21)
+
+| Case | Test |
+|---|---|
+| `accept` given as an object, a bare-string entry, scalar `thumbprints` or `uriSANs`, `match: {}`, scalar `match` are refused with the offending path | IT mtls-listener refusal outline (six new rows); UT validator table |
+| `executionCondition` on mtls-auth is refused | IT: *mtls-auth cannot be made conditional*; UT |
+| a pool holding only relay entries counts as empty | IT: *Attaching mtls-auth while the pool holds only relay entries is refused*; UT |
+| relay upload: unknown body field, unknown `match` field, `match: {}`, scalar SAN list are refused and nothing is stored | IT mtls-client-ca-pool: *A relay upload with a narrowing the gateway does not understand is rejected*; UT handler |
+| identity upload with a private key in the certificate field is refused | IT mtls-outbound refusal row; UT handler |
+| mtls-auth on LLM and MCP kinds is refused | UT policy validator |
+| a `tls` block asking for trust or hostname verification while `router.upstream.tls.disable_ssl_verification` is on is refused | UT upstream TLS validator |
+| certificate delete refuses on a store read failure; chain build fails on a store read failure instead of pushing an empty pool | UT handler; UT transform |
+| WebSub and legacy-path routes strip both certificate headers | UT translator |
+| the policy refuses a present-but-malformed narrowing at bind | UT policy |
+| SDS runs without `custom_certs_path`; a `tls` block against an empty trust bundle is refused at translation | UT translator |
+| an empty relay header name in config becomes the default | UT config |
+
+### Decisions taken during hardening
+
+- The certificate store always exists: it backs the listener certificate, client-CA pool and
+  identities over SDS, so it no longer depends on `custom_certs_path`. An empty upstream trust bundle
+  is a loud WARN, not a startup failure; a database read failure at load is a startup failure.
+- The sterile 503 body also covers Envoy's `UC` and `UR` flags, so a backend that accepts the
+  connection and then resets it gets the same body as a failed connection.
+- `pooledConnectionsUsingPrevious` is removed from the rotation response: the controller cannot
+  observe it, and a fabricated zero is worse than no field.
+- Expiry warnings are listed for every usage, not only client and identity rows.
+- Deploy-time warnings are logged at WARN by the REST API handler.
+- SAN and thumbprint comparisons are constant-time.
+- The integration client presents its certificate unconditionally; the after-scenario cleanup of
+  APIs and certificates applies only to scenarios tagged `@mtls`, because other features share an API
+  across scenarios. A rejected mutation no longer pays the propagation wait.
+- Not changed here, awaiting product decisions: relay connection with no header; forwarded
+  certificate header on a relayed identity; who may name a gateway identity; a revocation denylist;
+  pool material per route; certificate events across controller replicas.

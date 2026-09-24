@@ -572,7 +572,7 @@ func main() {
 	// Create validator with policy validation support
 	validator := config.NewAPIValidator()
 	mtlsAuthValidator := config.NewMtlsAuthValidator(db, cfg.Router.HTTPSEnabled,
-		cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny)
+		cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny, config.MtlsAuthParameterSchema(policyDefinitions))
 	policyValidator := config.NewPolicyValidator(policyDefinitions, mtlsAuthValidator)
 	validator.SetPolicyValidator(policyValidator)
 	validator.SetUpstreamTLSValidator(config.NewUpstreamTLSValidator(db, cfg.Router.Upstream.TLS.DisableSslVerification))
@@ -673,6 +673,7 @@ func main() {
 		subscriptionSnapshotManager,
 		apiKeyXDSManager,
 		lazyResourceXDSManager,
+		clientAuthorities,
 		policyManager,
 		&cfg.Router,
 		log,

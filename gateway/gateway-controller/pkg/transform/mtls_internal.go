@@ -19,28 +19,19 @@
 package transform
 
 import (
-	"strings"
-
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	policyenginev1 "github.com/wso2/api-platform/sdk/core/policyengine"
 )
 
-// Parameters injected into every mtls-auth instance at chain-build time. The
-// policy engine reads the client authority pool from shared lazy resources,
-// so a chain carries only the author's accept list and the router's
-// client-certificate header settings. Authors can never supply these keys.
-const (
-	// mtlsInternalAcceptParam is the policy's accept list with thumbprints
-	// normalised. Absent when accept was omitted, so the whole pool applies.
-	mtlsInternalAcceptParam = "__wso2_internal_mtls_accept"
+// mtlsInternalHeaderParam is injected into every mtls-auth instance at
+// chain-build time. It mirrors client_certificate_header, which the policy
+// cannot read from the controller's config. The policy engine reads the
+// client authority pool from shared lazy resources and the author's own
+// accept list from the instance, so this is the only injected key.
+const mtlsInternalHeaderParam = "__wso2_internal_mtls_header"
 
-	// mtlsInternalHeaderParam mirrors client_certificate_header, which the
-	// policy cannot read from the controller's config.
-	mtlsInternalHeaderParam = "__wso2_internal_mtls_header"
-)
-
-// injectMtlsInternalParams adds the __wso2_internal_mtls_* parameters to every
-// mtls-auth instance in chain, in place.
+// injectMtlsInternalParams adds the __wso2_internal_mtls_header parameter to
+// every mtls-auth instance in chain, in place.
 func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, headerConfig config.ClientCertificateHeader) {
 	header := map[string]interface{}{
 		"name":             headerConfig.Name,
@@ -55,58 +46,6 @@ func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, headerConfi
 		if chain[i].Parameters == nil {
 			chain[i].Parameters = map[string]interface{}{}
 		}
-		if accept, ok := engineAcceptEntries(chain[i].Parameters); ok {
-			chain[i].Parameters[mtlsInternalAcceptParam] = accept
-		}
 		chain[i].Parameters[mtlsInternalHeaderParam] = header
 	}
-}
-
-// engineAcceptEntries converts an instance's accept param into the entries
-// the policy engine evaluates, normalising thumbprints. ok is false when
-// accept is absent or not an array.
-func engineAcceptEntries(params map[string]interface{}) ([]interface{}, bool) {
-	acceptSlice, ok := params["accept"].([]interface{})
-	if !ok {
-		return nil, false
-	}
-
-	result := make([]interface{}, 0, len(acceptSlice))
-	for _, entryRaw := range acceptSlice {
-		entryMap, ok := entryRaw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		caName, _ := entryMap["ca"].(string)
-		entry := map[string]interface{}{"ca": strings.TrimSpace(caName)}
-		if matchRaw, hasMatch := entryMap["match"]; hasMatch {
-			entry["match"] = matchRaw
-		}
-		if tpRaw, hasThumbprints := entryMap["thumbprints"]; hasThumbprints {
-			entry["thumbprints"] = normalizeThumbprintsForEngine(tpRaw)
-		}
-		result = append(result, entry)
-	}
-	return result, true
-}
-
-// normalizeThumbprintsForEngine canonicalises a thumbprints array with the
-// same normaliser as the deploy response. An entry that fails to normalise
-// passes through unchanged rather than being dropped.
-func normalizeThumbprintsForEngine(raw interface{}) interface{} {
-	tpSlice, ok := raw.([]interface{})
-	if !ok {
-		return raw
-	}
-	out := make([]interface{}, len(tpSlice))
-	for i, tv := range tpSlice {
-		s, _ := tv.(string)
-		canonical, _, valid := config.NormalizeThumbprint(s)
-		if !valid {
-			out[i] = tv
-			continue
-		}
-		out[i] = canonical
-	}
-	return out
 }

@@ -102,7 +102,7 @@ func internalParamKeys(p *models.Policy) []string {
 
 // ============ API-level and operation-level injection ============
 
-func TestBuildPolicyChain_MtlsAuth_InjectsAcceptNamesAndHeader(t *testing.T) {
+func TestBuildPolicyChain_MtlsAuth_InjectsOnlyTheHeaderParam(t *testing.T) {
 	for _, operationLevel := range []bool{false, true} {
 		name := "API level"
 		if operationLevel {
@@ -113,21 +113,17 @@ func TestBuildPolicyChain_MtlsAuth_InjectsAcceptNamesAndHeader(t *testing.T) {
 				"accept": []interface{}{map[string]interface{}{"ca": " auth-ca-a "}},
 			}, operationLevel)
 
-			assert.ElementsMatch(t, []string{mtlsInternalAcceptParam, mtlsInternalHeaderParam}, internalParamKeys(p))
-			accept := asInterfaceSlice(t, p.Params[mtlsInternalAcceptParam])
-			require.Len(t, accept, 1)
-			assert.Equal(t, map[string]interface{}{"ca": "auth-ca-a"}, accept[0],
-				"an entry carries only the trimmed authority name when the author wrote no narrowing")
+			assert.ElementsMatch(t, []string{mtlsInternalHeaderParam}, internalParamKeys(p))
+			assert.Equal(t, []interface{}{map[string]interface{}{"ca": " auth-ca-a "}}, p.Params["accept"],
+				"the author's accept reaches the engine as authored")
 		})
 	}
 }
 
-// ============ Omitted accept injects nothing for accept ============
-
-func TestBuildPolicyChain_MtlsAuth_OmittedAccept_InjectsNoAccept(t *testing.T) {
+func TestBuildPolicyChain_MtlsAuth_OmittedAccept_StaysOmitted(t *testing.T) {
 	p := transformMtlsAuth(t, testRouterCfg(), nil, false)
 
-	_, hasAccept := p.Params[mtlsInternalAcceptParam]
+	_, hasAccept := p.Params["accept"]
 	assert.False(t, hasAccept, "an omitted accept must reach the engine as omitted, so the policy resolves the pool itself")
 	assert.ElementsMatch(t, []string{mtlsInternalHeaderParam}, internalParamKeys(p))
 }
@@ -154,10 +150,10 @@ func TestBuildPolicyChain_MtlsAuth_ChainCarriesNoCertificateMaterial(t *testing.
 	}
 }
 
-// ============ match copied, thumbprints normalised, author's accept untouched ============
+// ============ The author's accept is passed through unchanged ============
 
-func TestBuildPolicyChain_MtlsAuth_CopiesMatchNormalisesThumbprints_LeavesAuthoredAcceptUntouched(t *testing.T) {
-	authoredThumbprint := "SHA256:AA:BB:" + strings.Repeat("0", 60) // mixed-case + colons + prefix, 64 hex chars once normalised
+func TestBuildPolicyChain_MtlsAuth_LeavesAuthoredAcceptUntouched(t *testing.T) {
+	authoredThumbprint := "SHA256:AA:BB:" + strings.Repeat("0", 60)
 	authoredMatch := map[string]interface{}{"uriSANs": []interface{}{"urn:partner-a:payments"}}
 	authoredAccept := []interface{}{
 		map[string]interface{}{
@@ -168,25 +164,11 @@ func TestBuildPolicyChain_MtlsAuth_CopiesMatchNormalisesThumbprints_LeavesAuthor
 	}
 	p := transformMtlsAuth(t, testRouterCfg(), map[string]interface{}{"accept": authoredAccept}, false)
 
-	// The author's accept is not normalised.
-	assert.Equal(t, authoredMatch, p.Params["accept"].([]interface{})[0].(map[string]interface{})["match"],
-		"author's accept.match must be passed through as the same value, never rewritten")
-	gotAuthoredThumbprints := p.Params["accept"].([]interface{})[0].(map[string]interface{})["thumbprints"].([]interface{})
-	require.Len(t, gotAuthoredThumbprints, 1)
-	assert.Equal(t, authoredThumbprint, gotAuthoredThumbprints[0], "the author-facing accept must keep the as-authored thumbprint form")
-
-	// The engine-facing list carries the match and a normalised thumbprint.
-	internalAccept := asInterfaceSlice(t, p.Params[mtlsInternalAcceptParam])
-	require.Len(t, internalAccept, 1)
-	internalEntry, ok := internalAccept[0].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, "auth-ca-a", internalEntry["ca"])
-	assert.Equal(t, authoredMatch, internalEntry["match"], "match must be copied through to the internal accept entry")
-
-	wantNormalised := "aabb" + strings.Repeat("0", 60)
-	gotThumbprints := asInterfaceSlice(t, internalEntry["thumbprints"])
+	entry := asInterfaceSlice(t, p.Params["accept"])[0].(map[string]interface{})
+	assert.Equal(t, authoredMatch, entry["match"], "accept.match must be passed through as the same value, never rewritten")
+	gotThumbprints := asInterfaceSlice(t, entry["thumbprints"])
 	require.Len(t, gotThumbprints, 1)
-	assert.Equal(t, wantNormalised, gotThumbprints[0])
+	assert.Equal(t, authoredThumbprint, gotThumbprints[0], "accept keeps the as-authored thumbprint form; the policy normalises it")
 }
 
 // ============ No injection for other policies ============

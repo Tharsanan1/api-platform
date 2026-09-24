@@ -33,6 +33,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wso2/api-platform/common/eventhub"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/handlers/handlerkit"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/certmetrics"
@@ -275,6 +277,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		slog.String("id", certID),
 		slog.String("name", req.Name),
 		slog.Int("cert_count", count))
+	s.publishCertificateEvent("CREATE", certID, correlationID, log)
 
 	// Get cert store from snapshot manager
 	translator := s.snapshotManager.GetTranslator()
@@ -561,6 +564,7 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 	}
 
 	log.Info("Certificate deleted from database", slog.String("id", id))
+	s.publishCertificateEvent("DELETE", id, correlationID, log)
 
 	certStore := translator.GetCertStore()
 
@@ -647,6 +651,7 @@ func (s *APIServer) ReloadCertificates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info("Certificates reloaded and SDS snapshot updated")
+	s.publishCertificateEvent("RELOAD", "", correlationID, log)
 
 	if err := s.publishClientAuthorities(correlationID); err != nil {
 		log.Error("Failed to publish client certificate authorities", slog.Any("error", err))
@@ -740,9 +745,17 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 
 	existing, err := s.db.GetCertificate(id)
 	if err != nil {
-		httputil.WriteJSON(w, http.StatusNotFound, map[string]any{
+		if storage.IsNotFoundError(err) {
+			httputil.WriteJSON(w, http.StatusNotFound, map[string]any{
+				"status":  "error",
+				"message": "certificate not found",
+			})
+			return
+		}
+		log.Error("Failed to read certificate before update", slog.String("id", id), slog.Any("error", err))
+		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
 			"status":  "error",
-			"message": "certificate not found",
+			"message": "the certificate could not be read",
 		})
 		return
 	}
@@ -763,7 +776,8 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 	r.Body = http.MaxBytesReader(w, r.Body, s.systemConfig.Controller.Server.MaxCertificateUploadBytes)
 
 	var req UploadCertificateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	shapeErrors, err := decodeCertificateUpload(r.Body, &req)
+	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			httputil.WriteJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
@@ -786,6 +800,9 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 	req.Match = nil
 
 	validation, _, _, _ := s.validateCertificateUpload(&req)
+	for _, fe := range shapeErrors {
+		validation.addFieldError(fe.field, fe.message)
+	}
 	if validation.hasProblems() {
 		fieldErrors := validation.fieldErrors
 		httputil.WriteJSON(w, http.StatusBadRequest, api.ErrorResponse{
@@ -838,6 +855,7 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 		})
 		return
 	}
+	s.publishCertificateEvent("UPDATE", updated.UUID, correlationID, log)
 
 	// The SDS update rebuilds this identity's gateway_identity:<name> secret.
 	// Reload does nothing for identity rows but keeps parity with upload.
@@ -864,6 +882,9 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 	for _, warn := range ib.Warnings {
 		warnings = append(warnings, clientca.Warning{Code: warn.Code, Field: warn.Field, Message: warn.Message})
 	}
+	if warning := clientca.ExpiryWarning(updated.NotAfter, time.Now()); warning != nil {
+		warnings = append(warnings, *warning)
+	}
 
 	resp := CertificateResponse{
 		ID:           updated.UUID,
@@ -881,6 +902,18 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 		Status:       "success",
 	}
 	httputil.WriteJSON(w, http.StatusOK, resp)
+}
+
+// publishCertificateEvent tells every replica sharing the event hub that the
+// certificate rows changed, so each rebuilds its certificate store, client
+// authority pool and xDS snapshot from the database. It runs once the write
+// has committed; the event carries the row id, never certificate material.
+func (s *APIServer) publishCertificateEvent(action, certID, correlationID string, log *slog.Logger) {
+	if s.eventHub == nil {
+		return
+	}
+	(&handlerkit.EventPublisher{EventHub: s.eventHub, GatewayID: s.gatewayID}).
+		PublishEvent(eventhub.EventTypeCertificate, action, certID, correlationID, log)
 }
 
 // encryptPrivateKey encrypts a usage: identity PEM private key and marshals

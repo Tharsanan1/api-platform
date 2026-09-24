@@ -285,7 +285,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptListRejections(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := NewMtlsAuthValidator(pool(), true, false)
+			v := NewMtlsAuthValidator(pool(), true, false, mtlsAuthTestSchema())
 			apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(tt.params))
 
 			errs := v.ValidateRestAPI(apiConfig)
@@ -298,7 +298,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptListRejections(t *testing.T) {
 }
 
 func TestMtlsAuthValidator_ValidateRestAPI_EmptyPool(t *testing.T) {
-	v := NewMtlsAuthValidator(newFakeMtlsCertStore(), true, false)
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(), true, false, mtlsAuthTestSchema())
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	errs := v.ValidateRestAPI(apiConfig)
@@ -311,7 +311,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_EmptyPool(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_HTTPSDisabled(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, false, false)
+	v := NewMtlsAuthValidator(store, false, false, mtlsAuthTestSchema())
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	errs := v.ValidateRestAPI(apiConfig)
@@ -327,7 +327,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_HTTPSDisabled(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_DuplicateInOneScope(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-a"},
@@ -347,7 +347,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_DuplicateInOneScope(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_APIAndOperationLevel(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	cfg := createValidRestAPIConfig()
 	cfg.Spec.Policies = &[]api.Policy{mtlsPolicy(nil)}
@@ -366,7 +366,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_APIAndOperationLevel(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_ValidAPI_NoErrors(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-a"},
@@ -382,7 +382,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_ValidAPI_NoErrors(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_OperationLevelFieldPath(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-b"}, // not in the pool
@@ -406,7 +406,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_AcceptOmitted_TwoAuthoriti
 		relayCA("listener-edge-lb"),
 		upstreamCA("listener-backend-trust"),
 	)
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	original := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 	resolved, warnings := v.ResolveMtlsAuthForResponse(*original)
@@ -442,7 +442,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_AcceptOmitted_TwoAuthoriti
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_SingleAuthority_NoWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 	resolved, warnings := v.ResolveMtlsAuthForResponse(*apiConfig)
@@ -459,7 +459,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_SingleAuthority_NoWarning(
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_UnnarrowedEntry_Warning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"), clientCA("listener-partner-b"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-a"},
@@ -474,7 +474,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_UnnarrowedEntry_Warning(t 
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_PrecedingAuthPolicy_Warning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{
@@ -492,7 +492,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_PrecedingAuthPolicy_Warnin
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_ThumbprintNormalised(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	raw := "sha256:9F:86:D0:81:88:4C:7D:65:9A:2F:EA:A0:C5:5A:D0:15:A3:BF:4F:1B:2B:0B:82:2C:D1:5D:6C:15:B0:F0:0A:08"
 	acceptParams := map[string]interface{}{"accept": []interface{}{
@@ -516,7 +516,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_ThumbprintNormalised(t *te
 
 func TestMtlsAuthValidator_ValidateRestAPI_ForwardCertificateBoolean_NoErrors(t *testing.T) {
 	for _, forward := range []bool{true, false} {
-		v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")), true, false)
+		v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")), true, false, mtlsAuthTestSchema())
 		params := map[string]interface{}{
 			"accept":             []interface{}{map[string]interface{}{"ca": "listener-partner-a"}},
 			"forwardCertificate": forward,
@@ -528,7 +528,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_ForwardCertificateBoolean_NoErrors(t 
 }
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_UnnarrowedEntry_SingleAuthorityPool_Warning(t *testing.T) {
-	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")), true, false)
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")), true, false, mtlsAuthTestSchema())
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-a"},
@@ -544,7 +544,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_UnnarrowedEntry_SingleAuth
 }
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_NarrowedEntry_NoUnnarrowedWarning(t *testing.T) {
-	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a"), clientCA("listener-partner-b")), true, false)
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a"), clientCA("listener-partner-b")), true, false, mtlsAuthTestSchema())
 
 	acceptParams := map[string]interface{}{"accept": []interface{}{
 		map[string]interface{}{"ca": "listener-partner-a", "match": map[string]interface{}{"uriSANs": []interface{}{"urn:x"}}},
@@ -616,7 +616,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_AcceptNamesRelayAuthority(
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := NewMtlsAuthValidator(newFakeMtlsCertStore(tt.pool...), true, false)
+			v := NewMtlsAuthValidator(newFakeMtlsCertStore(tt.pool...), true, false, mtlsAuthTestSchema())
 			_, warnings := v.ResolveMtlsAuthForResponse(*acceptOf(tt.acceptCA))
 			if got := hasWarning(warnings, WarningCodeMTLSAcceptNamesRelayAuthority, field); got != tt.wantWarning {
 				t.Fatalf("MTLS_ACCEPT_NAMES_RELAY_AUTHORITY at %s present = %v, want %v; warnings %+v", field, got, tt.wantWarning, warnings)
@@ -681,7 +681,7 @@ func TestValidateMTLSStartupInvariant_NoMTLSConfigs_NoError(t *testing.T) {
 // since a relayed header can arrive over plaintext.
 func TestMtlsAuthValidator_ValidateRestAPI_HeaderTrustAny_RelaxesHTTPSRequirement(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, false, true)
+	v := NewMtlsAuthValidator(store, false, true, mtlsAuthTestSchema())
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	errs := v.ValidateRestAPI(apiConfig)
@@ -694,7 +694,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_HeaderTrustAny_RelaxesHTTPSRequiremen
 
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_EmitsBypassWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, true)
+	v := NewMtlsAuthValidator(store, true, true, mtlsAuthTestSchema())
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	_, warnings := v.ResolveMtlsAuthForResponse(*apiConfig)
@@ -707,7 +707,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_EmitsBypass
 // headerTrustAny false never emits HEADER_CERT_BYPASS_ACTIVE.
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypassWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 	apiConfig := restAPIWithAPILevelPolicies(mtlsPolicy(nil))
 
 	_, warnings := v.ResolveMtlsAuthForResponse(*apiConfig)
@@ -721,7 +721,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAnyFalse_NoBypa
 // with trust_any true.
 func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HeaderTrustAny_NoMTLSAuth_NoBypassWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, true)
+	v := NewMtlsAuthValidator(store, true, true, mtlsAuthTestSchema())
 	plainConfig := createValidRestAPIConfig()
 
 	_, warnings := v.ResolveMtlsAuthForResponse(*plainConfig)
@@ -752,7 +752,7 @@ func TestValidateMTLSStartupInvariant_HTTPSDisabled_HeaderTrustAnyFalse_Errors(t
 }
 
 func TestMtlsAuthValidator_ExecutionConditionRefused(t *testing.T) {
-	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")), true, false)
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")), true, false, mtlsAuthTestSchema())
 	cond := `request.Method == "POST"`
 	params := map[string]interface{}{"accept": []interface{}{map[string]interface{}{"ca": "listener-partner-a"}}}
 	apiCfg := restAPIWithAPILevelPolicies(api.Policy{Name: MtlsAuthPolicyName, Version: "v1", Params: &params, ExecutionCondition: &cond})
@@ -772,7 +772,7 @@ func TestMtlsAuthValidator_ExecutionConditionRefused(t *testing.T) {
 
 func TestMtlsAuthValidator_PoolOfRelaysOnlyCountsAsEmpty(t *testing.T) {
 	relayOnly := newFakeMtlsCertStore(relayCA("listener-edge-lb"))
-	v := NewMtlsAuthValidator(relayOnly, true, false)
+	v := NewMtlsAuthValidator(relayOnly, true, false, mtlsAuthTestSchema())
 	apiCfg := restAPIWithAPILevelPolicies(api.Policy{Name: MtlsAuthPolicyName, Version: "v1"})
 
 	errs := v.ValidateRestAPI(apiCfg)
@@ -790,7 +790,7 @@ func TestMtlsAuthValidator_PoolOfRelaysOnlyCountsAsEmpty(t *testing.T) {
 
 func TestMtlsAuthValidator_ValidateRestAPI_PoolListedOncePerAPI(t *testing.T) {
 	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 	cfg := restAPIWithAPILevelPolicies(mtlsPolicy(nil), mtlsPolicy(nil))
 
 	v.ValidateRestAPI(cfg)
@@ -801,7 +801,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_PoolListedOncePerAPI(t *testing.T) {
 }
 
 func TestMtlsAuthValidator_ValidateRestAPI_EmptyPool_ParamsStillValidated(t *testing.T) {
-	v := NewMtlsAuthValidator(newFakeMtlsCertStore(), true, false)
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(), true, false, mtlsAuthTestSchema())
 	cfg := restAPIWithAPILevelPolicies(mtlsPolicy(map[string]interface{}{"acept": []interface{}{}}))
 
 	errs := v.ValidateRestAPI(cfg)
@@ -821,7 +821,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptNamesNonClientUsage(t *testing.
 		&models.StoredCertificate{Name: "out-identity-a", Usage: models.CertificateUsageIdentity},
 		&models.StoredCertificate{Name: "listener-odd", Usage: "archive"},
 	)
-	v := NewMtlsAuthValidator(store, true, false)
+	v := NewMtlsAuthValidator(store, true, false, mtlsAuthTestSchema())
 
 	tests := []struct {
 		ca      string

@@ -216,7 +216,7 @@ func (s *RestAPIService) Create(params CreateParams) (*CreateResult, error) {
 // echo of a successful deploy without changing what is persisted.
 func (s *RestAPIService) ResolveMtlsAuthForResponse(cfg api.RestAPI) (api.RestAPI, []clientca.Warning) {
 	v := config.NewMtlsAuthValidator(s.db, s.routerConfig.HTTPSEnabled,
-		s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny)
+		s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny, nil)
 	return v.ResolveMtlsAuthForResponse(cfg)
 }
 

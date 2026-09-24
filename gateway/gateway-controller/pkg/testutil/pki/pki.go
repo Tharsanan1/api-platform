@@ -25,9 +25,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/hex"
 	"encoding/pem"
 	"math/big"
@@ -53,10 +55,62 @@ func (e *Entity) PEM() []byte {
 func (e *Entity) KeyPEM() []byte {
 	der, err := x509.MarshalPKCS8PrivateKey(e.Key)
 	if err != nil {
-		// Only an unsupported key type fails, and this package makes ECDSA keys.
+		// Only an unsupported key type fails, and this package makes RSA and
+		// ECDSA keys.
 		panic("pki: failed to marshal private key: " + err.Error())
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+}
+
+// ECKeyPEMWithParameters returns an ECDSA key the way `openssl ecparam
+// -genkey` writes it: an EC PARAMETERS block naming the curve, followed by
+// the SEC1 EC PRIVATE KEY block. It panics for a non-ECDSA key.
+func (e *Entity) ECKeyPEMWithParameters() []byte {
+	key, ok := e.Key.(*ecdsa.PrivateKey)
+	if !ok {
+		panic("pki: ECKeyPEMWithParameters needs an ECDSA key")
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		panic("pki: failed to marshal EC private key: " + err.Error())
+	}
+	oid, ok := namedCurveOIDs[key.Curve]
+	if !ok {
+		panic("pki: no OID for curve " + key.Curve.Params().Name)
+	}
+	params, err := asn1.Marshal(oid)
+	if err != nil {
+		panic("pki: failed to marshal EC parameters: " + err.Error())
+	}
+	out := pem.EncodeToMemory(&pem.Block{Type: "EC PARAMETERS", Bytes: params})
+	return append(out, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})...)
+}
+
+var namedCurveOIDs = map[elliptic.Curve]asn1.ObjectIdentifier{
+	elliptic.P224(): {1, 3, 132, 0, 33},
+	elliptic.P256(): {1, 2, 840, 10045, 3, 1, 7},
+	elliptic.P384(): {1, 3, 132, 0, 34},
+	elliptic.P521(): {1, 3, 132, 0, 35},
+}
+
+// NewECKey generates an ECDSA key on curve, for use with NewLeafWithKey.
+func NewECKey(t testing.TB, curve elliptic.Curve) crypto.Signer {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		t.Fatalf("pki: failed to generate %s key: %v", curve.Params().Name, err)
+	}
+	return key
+}
+
+// NewRSAKey generates an RSA key of bits, for use with NewLeafWithKey.
+func NewRSAKey(t testing.TB, bits int) crypto.Signer {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, bits)
+	if err != nil {
+		t.Fatalf("pki: failed to generate RSA-%d key: %v", bits, err)
+	}
+	return key
 }
 
 // Thumbprint returns the lowercase-hex SHA-256 digest of the certificate DER.
@@ -143,11 +197,11 @@ func defaultValidity() (time.Time, time.Time) {
 	return now.Add(-1 * time.Hour), now.Add(10 * 365 * 24 * time.Hour)
 }
 
-// build creates a certificate signed by parent (self-signed when parent is nil).
-func build(t testing.TB, subject pkix.Name, isCA bool, parent *Entity, opts []LeafOption) *Entity {
+// build creates a certificate for key signed by parent (self-signed when
+// parent is nil).
+func build(t testing.TB, subject pkix.Name, isCA bool, parent *Entity, key crypto.Signer, opts []LeafOption) *Entity {
 	t.Helper()
 
-	key := generateKey(t)
 	notBefore, notAfter := defaultValidity()
 
 	tmpl := &x509.Certificate{
@@ -194,23 +248,29 @@ func build(t testing.TB, subject pkix.Name, isCA bool, parent *Entity, opts []Le
 // NewRootCA creates a self-signed CA certificate.
 func NewRootCA(t testing.TB, cn string, opts ...LeafOption) *Entity {
 	t.Helper()
-	return build(t, pkix.Name{CommonName: cn}, true, nil, opts)
+	return build(t, pkix.Name{CommonName: cn}, true, nil, generateKey(t), opts)
 }
 
 // NewIntermediate creates a CA certificate issued by parent.
 func NewIntermediate(t testing.TB, parent *Entity, cn string, opts ...LeafOption) *Entity {
 	t.Helper()
-	return build(t, pkix.Name{CommonName: cn}, true, parent, opts)
+	return build(t, pkix.Name{CommonName: cn}, true, parent, generateKey(t), opts)
 }
 
 // NewLeaf creates a non-CA (clientAuth by default) certificate issued by parent.
 func NewLeaf(t testing.TB, parent *Entity, cn string, opts ...LeafOption) *Entity {
 	t.Helper()
-	return build(t, pkix.Name{CommonName: cn}, false, parent, opts)
+	return build(t, pkix.Name{CommonName: cn}, false, parent, generateKey(t), opts)
+}
+
+// NewLeafWithKey is NewLeaf for a caller-supplied key.
+func NewLeafWithKey(t testing.TB, parent *Entity, cn string, key crypto.Signer, opts ...LeafOption) *Entity {
+	t.Helper()
+	return build(t, pkix.Name{CommonName: cn}, false, parent, key, opts)
 }
 
 // NewSelfSignedLeaf creates a non-CA certificate that signs itself.
 func NewSelfSignedLeaf(t testing.TB, cn string, opts ...LeafOption) *Entity {
 	t.Helper()
-	return build(t, pkix.Name{CommonName: cn}, false, nil, opts)
+	return build(t, pkix.Name{CommonName: cn}, false, nil, generateKey(t), opts)
 }

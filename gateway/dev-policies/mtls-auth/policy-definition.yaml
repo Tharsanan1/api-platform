@@ -68,11 +68,14 @@ parameters:
     onFailureStatusCode:
       type: integer
       description: HTTP status code to return on authentication failure (401 for Unauthorized, 403 for Forbidden).
+      minimum: 400
+      maximum: 599
       default: 401
 
     errorMessageFormat:
       type: string
       description: Format of error response on mTLS validation failure. Supported values are "json" (structured error), "plain" (plain text), or "minimal" (minimal response).
+      enum: [json, plain, minimal]
       default: json
 
     errorMessage:

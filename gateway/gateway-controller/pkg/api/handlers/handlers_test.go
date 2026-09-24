@@ -746,7 +746,7 @@ func (m *MockStorage) GetCertificate(id string) (*models.StoredCertificate, erro
 			return cert, nil
 		}
 	}
-	return nil, errors.New("certificate not found")
+	return nil, storage.ErrNotFound
 }
 
 func (m *MockStorage) GetCertificateByName(name string) (*models.StoredCertificate, error) {

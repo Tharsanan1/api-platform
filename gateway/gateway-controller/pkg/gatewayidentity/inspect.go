@@ -25,6 +25,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -42,7 +43,12 @@ const (
 	msgKeyMismatch   = "the private key does not match the certificate"
 	msgPassphraseKey = "passphrase-protected private keys are not supported; " +
 		"upload an unencrypted key (it is encrypted at rest by the gateway)"
-	msgNotPEMKey = "the value is not a PEM-encoded private key"
+	msgNotPEMKey       = "the value is not a PEM-encoded private key"
+	msgSeveralKeys     = "the value holds more than one private key; upload exactly one"
+	msgWeakKey         = "the private key must be RSA 2048 bits or larger, or an ECDSA P-256, P-384 or P-521 key"
+	msgChainOutOfOrder = "certificate chain must be ordered leaf first, each issuer following the certificate it signed"
+
+	minRSAKeyBits = 2048
 
 	// CodeNoClientAuthEKU is attached when the leaf certificate carries an
 	// ExtKeyUsage extension that does not include clientAuth (or "any").
@@ -108,8 +114,9 @@ func ParseChain(pemData []byte) ([]*x509.Certificate, error) {
 }
 
 // InspectCertificateChain parses and validates an uploaded PEM certificate
-// chain, leaf first, evaluating expiry at now. Errors are a *FieldError for
-// "certificate".
+// chain, leaf first, evaluating expiry at now. Every certificate after the
+// leaf must have signed the one before it, and none may have expired. Errors
+// are a *FieldError for "certificate".
 func InspectCertificateChain(pemData []byte, now time.Time) ([]*x509.Certificate, error) {
 	chain, err := ParseChain(pemData)
 	if err != nil {
@@ -124,17 +131,32 @@ func InspectCertificateChain(pemData []byte, now time.Time) ([]*x509.Certificate
 		}
 	}
 
+	for i := 1; i < len(chain); i++ {
+		if err := chain[i-1].CheckSignatureFrom(chain[i]); err != nil {
+			return nil, &FieldError{Field: fieldCertificate, Message: msgChainOutOfOrder}
+		}
+		if now.After(chain[i].NotAfter) {
+			return nil, &FieldError{
+				Field:   fieldCertificate,
+				Message: fmt.Sprintf("an issuing certificate in the chain expired on %s", chain[i].NotAfter.Format(time.RFC3339)),
+			}
+		}
+	}
+
 	return chain, nil
 }
 
 // InspectPrivateKey parses an uploaded RSA, ECDSA or Ed25519 PEM private key
-// in PKCS#8, PKCS#1 or SEC1 form. Passphrase-protected keys are rejected,
-// since the gateway never stores a passphrase. Errors are a *FieldError for
-// "privateKey".
+// in PKCS#8, PKCS#1 or SEC1 form. The value must hold exactly one private key
+// block; other blocks, such as the EC PARAMETERS block OpenSSL writes ahead
+// of an EC key, are skipped. Passphrase-protected keys are rejected, since the
+// gateway never stores a passphrase, and so are RSA keys under 2048 bits and
+// ECDSA keys on curves other than P-256, P-384 and P-521. Errors are a
+// *FieldError for "privateKey".
 func InspectPrivateKey(pemData []byte) (crypto.Signer, string, error) {
-	block, _ := pem.Decode(pemData)
-	if block == nil {
-		return nil, "", &FieldError{Field: fieldPrivateKey, Message: msgNotPEMKey}
+	block, err := singlePrivateKeyBlock(pemData)
+	if err != nil {
+		return nil, "", err
 	}
 
 	if block.Type == "ENCRYPTED PRIVATE KEY" {
@@ -177,7 +199,54 @@ func InspectPrivateKey(pemData []byte) (crypto.Signer, string, error) {
 		return nil, "", &FieldError{Field: fieldPrivateKey, Message: msgNotPEMKey}
 	}
 
+	if !strongEnough(key) {
+		return nil, "", &FieldError{Field: fieldPrivateKey, Message: msgWeakKey}
+	}
 	return key, alg, nil
+}
+
+// singlePrivateKeyBlock returns the one PEM block in pemData whose type names
+// a private key, skipping every other block.
+func singlePrivateKeyBlock(pemData []byte) (*pem.Block, error) {
+	var found *pem.Block
+	rest := pemData
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if !strings.HasSuffix(block.Type, "PRIVATE KEY") {
+			continue
+		}
+		if found != nil {
+			return nil, &FieldError{Field: fieldPrivateKey, Message: msgSeveralKeys}
+		}
+		found = block
+	}
+	if found == nil {
+		return nil, &FieldError{Field: fieldPrivateKey, Message: msgNotPEMKey}
+	}
+	return found, nil
+}
+
+// strongEnough reports whether key meets the minimum identity key strength:
+// RSA of at least 2048 bits, ECDSA on P-256, P-384 or P-521, or Ed25519.
+func strongEnough(key crypto.Signer) bool {
+	switch k := key.(type) {
+	case *rsa.PrivateKey:
+		return k.N.BitLen() >= minRSAKeyBits
+	case *ecdsa.PrivateKey:
+		switch k.Curve {
+		case elliptic.P256(), elliptic.P384(), elliptic.P521():
+			return true
+		}
+		return false
+	case ed25519.PrivateKey:
+		return true
+	default:
+		return false
+	}
 }
 
 // signerAndAlgorithm classifies a value returned by x509.ParsePKCS8PrivateKey.

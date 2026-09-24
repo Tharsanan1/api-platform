@@ -461,7 +461,7 @@ func buildParams(entries []entrySpec) map[string]interface{} {
 		}
 		acceptList = append(acceptList, obj)
 	}
-	return map[string]interface{}{internalAcceptParam: acceptList}
+	return map[string]interface{}{acceptParam: acceptList}
 }
 
 // buildParamsWithHeader is buildParams plus the header param; a nil header
@@ -826,6 +826,32 @@ func TestMtlsAuthPolicy_Evaluate_ThumbprintNarrowing(t *testing.T) {
 	})
 }
 
+// TestMtlsAuthPolicy_Evaluate_AuthoredAcceptForm guards that the accept list
+// is read as the author wrote it: a padded ca name and a prefixed, uppercase,
+// colon-separated thumbprint still match.
+func TestMtlsAuthPolicy_Evaluate_AuthoredAcceptForm(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	leaf := newLeaf(t, rootA, "client-valid", certOpts{})
+	publishAuthorities(t, authoritySpec{name: "auth-ca-a", role: roleClient, certs: []*testEntity{rootA}})
+
+	hexPrint := strings.ToUpper(leaf.thumbprint())
+	var pairs []string
+	for i := 0; i < len(hexPrint); i += 2 {
+		pairs = append(pairs, hexPrint[i:i+2])
+	}
+	p := mustPolicy(t, map[string]interface{}{
+		acceptParam: []interface{}{map[string]interface{}{
+			"ca":          "  auth-ca-a ",
+			"thumbprints": []interface{}{"SHA256:" + strings.Join(pairs, ":")},
+		}},
+	})
+
+	result := assertAuthenticated(t, p, reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true)), 0)
+	if result.issuerCA != "auth-ca-a" {
+		t.Errorf("issuerCA = %q, want the trimmed name auth-ca-a", result.issuerCA)
+	}
+}
+
 // TestMtlsAuthPolicy_Evaluate_MultipleEntries_SecondMatches guards that
 // matchedEntry is the index that verified, not always 0.
 func TestMtlsAuthPolicy_Evaluate_MultipleEntries_SecondMatches(t *testing.T) {
@@ -1101,7 +1127,7 @@ func TestGetPolicy_MalformedNarrowingFailsClosed(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			params := buildParams(entries)
-			entry := params[internalAcceptParam].([]interface{})[0].(map[string]interface{})
+			entry := params[acceptParam].([]interface{})[0].(map[string]interface{})
 			mutate(entry)
 			_, err := GetPolicy(policy.PolicyMetadata{}, params)
 			if err == nil {

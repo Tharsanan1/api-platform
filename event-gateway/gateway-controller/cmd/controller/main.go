@@ -587,7 +587,7 @@ func main() {
 	// Event listener — multi-replica sync, with this binary's own webhook-secret handler wired in.
 	evtListener := coreeventlistener.NewEventListener(
 		eventHubInstance, configStore, db, snapshotManager, subscriptionSnapshotManager,
-		apiKeyXDSManager, lazyResourceXDSManager, policyManager, &cfg.Router, log, cfg,
+		apiKeyXDSManager, lazyResourceXDSManager, clientAuthorities, policyManager, &cfg.Router, log, cfg,
 		policyDefinitions, secretsService, policyVersionResolver,
 	)
 	if webhookSecretService != nil {

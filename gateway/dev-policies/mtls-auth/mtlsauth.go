@@ -59,12 +59,12 @@ const (
 	defaultErrorMessageFormat  = "json"
 	defaultErrorMessage        = "Authentication failed"
 
-	// internalAcceptParam carries the accept list as an ordered array of
-	// {"ca", "match": {"uriSANs", "dnsSANs"}, "thumbprints"}; absent means every
-	// client entry in the pool, unnarrowed. internalHeaderParam carries {"name",
-	// "trustAny", "forwardToBackend"}. The controller injects both, and neither
-	// is part of the author-facing schema.
-	internalAcceptParam = "__wso2_internal_mtls_accept"
+	// acceptParam is the author's ordered accept list of {"ca", "match":
+	// {"uriSANs", "dnsSANs"}, "thumbprints"}; absent means every client entry
+	// in the pool, unnarrowed. internalHeaderParam carries {"name", "trustAny",
+	// "forwardToBackend"}; the controller injects it and it is not part of the
+	// author-facing schema.
+	acceptParam         = "accept"
 	internalHeaderParam = "__wso2_internal_mtls_header"
 
 	defaultHeaderName = "X-WSO2-CLIENT-CERTIFICATE"
@@ -167,7 +167,7 @@ type MtlsAuthPolicy struct {
 // GetPolicy is the v1alpha2 factory entry point. A malformed accept list or
 // forwardCertificate value refuses to bind the instance rather than guessing.
 func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
-	accept, err := parseAcceptParam(params[internalAcceptParam])
+	accept, err := parseAcceptParam(params[acceptParam])
 	if err != nil {
 		return nil, fmt.Errorf("mtls-auth: parsing accept list: %w", err)
 	}
@@ -181,7 +181,7 @@ func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (p
 	}
 	return &MtlsAuthPolicy{
 		accept:             accept,
-		inheritAccept:      params[internalAcceptParam] == nil,
+		inheritAccept:      params[acceptParam] == nil,
 		acceptNames:        strings.Join(names, ","),
 		header:             parseHeaderParam(params[internalHeaderParam]),
 		forwardCertificate: forwardCertificate,
@@ -765,34 +765,34 @@ func (p *MtlsAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusC
 	}
 }
 
-// parseAcceptParam parses the internal accept param; absent yields nil. A
-// malformed entry fails binding, so a bad narrowing can never widen what an
-// entry accepts.
+// parseAcceptParam parses the accept param, trimming each ca name and
+// normalising thumbprints; absent yields nil. A malformed entry fails
+// binding, so a bad narrowing can never widen what an entry accepts.
 func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 	if raw == nil {
 		return nil, nil
 	}
 	items, ok := raw.([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("%s must be an array", internalAcceptParam)
+		return nil, fmt.Errorf("%s must be an array", acceptParam)
 	}
 
 	entries := make([]acceptEntry, 0, len(items))
 	for i, item := range items {
 		obj, ok := item.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("%s[%d] must be an object", internalAcceptParam, i)
+			return nil, fmt.Errorf("%s[%d] must be an object", acceptParam, i)
 		}
 
 		ca, _ := obj["ca"].(string)
-		entry := acceptEntry{ca: ca}
+		entry := acceptEntry{ca: strings.TrimSpace(ca)}
 
 		if matchRaw, ok := obj["match"]; ok && matchRaw != nil {
 			matchObj, ok := matchRaw.(map[string]interface{})
 			if !ok {
-				return nil, fmt.Errorf("%s[%d].match must be an object", internalAcceptParam, i)
+				return nil, fmt.Errorf("%s[%d].match must be an object", acceptParam, i)
 			}
-			matchPath := fmt.Sprintf("%s[%d].match", internalAcceptParam, i)
+			matchPath := fmt.Sprintf("%s[%d].match", acceptParam, i)
 			var err error
 			if entry.uriSANs, err = stringListParam(matchObj, "uriSANs", matchPath); err != nil {
 				return nil, err
@@ -802,7 +802,7 @@ func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 			}
 		}
 
-		thumbs, err := stringListParam(obj, "thumbprints", fmt.Sprintf("%s[%d]", internalAcceptParam, i))
+		thumbs, err := stringListParam(obj, "thumbprints", fmt.Sprintf("%s[%d]", acceptParam, i))
 		if err != nil {
 			return nil, err
 		}

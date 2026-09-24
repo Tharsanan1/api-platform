@@ -50,28 +50,6 @@ const (
 	WarningCodeHeaderCertBypassActive = "HEADER_CERT_BYPASS_ACTIVE"
 )
 
-// mtlsAuthAllowedParams is the set of top-level parameter names mtls-auth
-// accepts. Generic schema validation is skipped for mtls-auth, so this is
-// the only source of unknown-parameter errors.
-var mtlsAuthAllowedParams = map[string]bool{
-	"accept":              true,
-	"onFailureStatusCode": true,
-	"errorMessageFormat":  true,
-	"errorMessage":        true,
-	"forwardCertificate":  true,
-}
-
-var mtlsAuthAllowedAcceptEntryParams = map[string]bool{
-	"ca":          true,
-	"match":       true,
-	"thumbprints": true,
-}
-
-var mtlsAuthAllowedMatchParams = map[string]bool{
-	"uriSANs": true,
-	"dnsSANs": true,
-}
-
 // mtlsAuthPrecedingAuthPolicies lists other authentication-policy names
 // that, when they appear earlier than mtls-auth in the same policy chain,
 // trigger the MTLS_AUTH_NOT_FIRST warning.
@@ -101,14 +79,91 @@ type MtlsAuthValidator struct {
 	store          MtlsAuthCertificateStore
 	httpsEnabled   bool
 	headerTrustAny bool
+	keys           mtlsAuthParamKeys
 }
 
 // NewMtlsAuthValidator creates a validator bound to the certificate store.
 // httpsEnabled is router.https_enabled. headerTrustAny is
 // client_certificate_header.trust_any; when true the HTTPS-listener
 // requirement is relaxed, since a relayed header can arrive over plaintext.
-func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled, headerTrustAny bool) *MtlsAuthValidator {
-	return &MtlsAuthValidator{store: store, httpsEnabled: httpsEnabled, headerTrustAny: headerTrustAny}
+// paramSchema is the mtls-auth definition's parameter schema, the source of
+// the parameter names it accepts; nil reports no unknown parameters.
+func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled, headerTrustAny bool, paramSchema map[string]interface{}) *MtlsAuthValidator {
+	return &MtlsAuthValidator{
+		store:          store,
+		httpsEnabled:   httpsEnabled,
+		headerTrustAny: headerTrustAny,
+		keys:           mtlsAuthParamKeysFromSchema(paramSchema),
+	}
+}
+
+// MtlsAuthParameterSchema returns the parameter schema of the latest loaded
+// mtls-auth definition, or nil when none is loaded.
+func MtlsAuthParameterSchema(definitions map[string]models.PolicyDefinition) map[string]interface{} {
+	version, err := ResolvePolicyVersion(definitions, nil, MtlsAuthPolicyName, "")
+	if err != nil {
+		return nil
+	}
+	def, ok := definitions[MtlsAuthPolicyName+"|"+version]
+	if !ok || def.Parameters == nil {
+		return nil
+	}
+	return *def.Parameters
+}
+
+// mtlsAuthParamKeys holds the parameter names the mtls-auth schema declares
+// at each level an author writes keys. A nil set means the schema was not
+// available, and that level reports no unknown parameters.
+type mtlsAuthParamKeys struct {
+	top         map[string]bool
+	acceptEntry map[string]bool
+	match       map[string]bool
+}
+
+func mtlsAuthParamKeysFromSchema(schema map[string]interface{}) mtlsAuthParamKeys {
+	top := schemaProperties(schema)
+	entry := schemaProperties(asSchema(asSchema(top["accept"])["items"]))
+	return mtlsAuthParamKeys{
+		top:         propertyNames(top),
+		acceptEntry: propertyNames(entry),
+		match:       propertyNames(schemaProperties(asSchema(entry["match"]))),
+	}
+}
+
+func asSchema(v interface{}) map[string]interface{} {
+	m, _ := v.(map[string]interface{})
+	return m
+}
+
+func schemaProperties(schema map[string]interface{}) map[string]interface{} {
+	props, _ := schema["properties"].(map[string]interface{})
+	return props
+}
+
+func propertyNames(props map[string]interface{}) map[string]bool {
+	if props == nil {
+		return nil
+	}
+	names := make(map[string]bool, len(props))
+	for name := range props {
+		names[name] = true
+	}
+	return names
+}
+
+// unknownKeys reports every key of params absent from known, in no
+// particular order. A nil known reports none.
+func unknownKeys(params map[string]interface{}, known map[string]bool) []string {
+	if known == nil {
+		return nil
+	}
+	var unknown []string
+	for key := range params {
+		if !known[key] {
+			unknown = append(unknown, key)
+		}
+	}
+	return unknown
 }
 
 // mtlsOccurrence is one place mtls-auth is attached in a RestAPI: either the
@@ -282,16 +337,16 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 	return errs
 }
 
-// validateParams validates one occurrence's params: unknown keys and the
-// accept list's structure.
+// validateParams validates what the parameter schema cannot say as well:
+// unknown keys, the accept list's authorities and narrowing, and the shape
+// of accept and forwardCertificate in the author's terms. A schema error at
+// a field this reports on is dropped in its favour.
 func (v *MtlsAuthValidator) validateParams(fieldPath string, params map[string]interface{}) []ValidationError {
 	var errs []ValidationError
 	paramsPath := fieldPath + ".params"
 
-	for key := range params {
-		if !mtlsAuthAllowedParams[key] {
-			errs = append(errs, unknownParamError(paramsPath, key))
-		}
+	for _, key := range unknownKeys(params, v.keys.top) {
+		errs = append(errs, unknownParamError(paramsPath, key))
 	}
 
 	if forward, present := params["forwardCertificate"]; present {
@@ -343,10 +398,7 @@ func (v *MtlsAuthValidator) validateParams(fieldPath string, params map[string]i
 func (v *MtlsAuthValidator) validateAcceptEntry(entryPath string, entry map[string]interface{}) []ValidationError {
 	var errs []ValidationError
 
-	for key := range entry {
-		if mtlsAuthAllowedAcceptEntryParams[key] {
-			continue
-		}
+	for _, key := range unknownKeys(entry, v.keys.acceptEntry) {
 		if key == "thumbprint" {
 			errs = append(errs, ValidationError{
 				Field:   entryPath + ".thumbprint",
@@ -358,7 +410,7 @@ func (v *MtlsAuthValidator) validateAcceptEntry(entryPath string, entry map[stri
 	}
 
 	errs = append(errs, v.validateAcceptEntryCA(entryPath, entry)...)
-	errs = append(errs, validateAcceptEntryMatch(entryPath, entry)...)
+	errs = append(errs, v.validateAcceptEntryMatch(entryPath, entry)...)
 	errs = append(errs, validateAcceptEntryThumbprints(entryPath, entry)...)
 
 	return errs
@@ -413,7 +465,7 @@ func (v *MtlsAuthValidator) validateAcceptEntryCA(entryPath string, entry map[st
 	return nil
 }
 
-func validateAcceptEntryMatch(entryPath string, entry map[string]interface{}) []ValidationError {
+func (v *MtlsAuthValidator) validateAcceptEntryMatch(entryPath string, entry map[string]interface{}) []ValidationError {
 	matchRaw, hasMatch := entry["match"]
 	if !hasMatch || matchRaw == nil {
 		return nil
@@ -429,10 +481,8 @@ func validateAcceptEntryMatch(entryPath string, entry map[string]interface{}) []
 
 	var errs []ValidationError
 
-	for key := range matchMap {
-		if !mtlsAuthAllowedMatchParams[key] {
-			errs = append(errs, unknownParamError(matchPath, key))
-		}
+	for _, key := range unknownKeys(matchMap, v.keys.match) {
+		errs = append(errs, unknownParamError(matchPath, key))
 	}
 
 	_, hasURI := matchMap["uriSANs"]
@@ -519,12 +569,6 @@ func normalizeThumbprint(raw string) (normalized string, changed bool, valid boo
 		return "", false, false
 	}
 	return s, s != raw, true
-}
-
-// NormalizeThumbprint is the exported form of normalizeThumbprint, so the
-// policy engine and the deploy response see the same canonical thumbprints.
-func NormalizeThumbprint(raw string) (normalized string, changed bool, valid bool) {
-	return normalizeThumbprint(raw)
 }
 
 func unknownParamError(basePath, key string) ValidationError {

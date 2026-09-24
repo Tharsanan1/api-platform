@@ -39,6 +39,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wso2/api-platform/common/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
@@ -1918,6 +1919,94 @@ func TestUpdateCertificate_UpstreamRow_Rejected(t *testing.T) {
 	assert.Equal(t, "only usage: identity certificates can be updated; delete and re-upload other certificates", entry["message"])
 }
 
+func identityRowForUpdate(t *testing.T, id string) *models.StoredCertificate {
+	t.Helper()
+	original := gatewayIdentityLeaf(t, "rotate-original")
+	return &models.StoredCertificate{
+		UUID: id, Name: "out-identity-a", Certificate: original.PEM(),
+		Usage: models.CertificateUsageIdentity, KeyAlgorithm: "ECDSA",
+		NotAfter: time.Now().Add(365 * 24 * time.Hour),
+	}
+}
+
+func TestUpdateCertificate_UnknownField_Rejected(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t), identityRowForUpdate(t, "rotate-identity-1")}
+	server := createTestAPIServerWithIdentitySupport(t, mockDB)
+
+	rotated := gatewayIdentityLeaf(t, "rotate-new")
+	body, err := json.Marshal(map[string]any{
+		"certificate": string(rotated.PEM()),
+		"privateKey":  string(rotated.KeyPEM()),
+		"passphrase":  "secret",
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut, "/certificates/rotate-identity-1", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	newUpdateCertHandler(server, "rotate-identity-1").ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	entry := firstFieldError(t, w.Body.Bytes(), "passphrase")
+	assert.Equal(t, "unknown field passphrase", entry["message"])
+
+	stored, err := mockDB.GetCertificate("rotate-identity-1")
+	require.NoError(t, err)
+	assert.NotEqual(t, string(rotated.PEM()), string(stored.Certificate), "a refused update must not reach the database")
+}
+
+func TestUpdateCertificate_MissingRow_Returns404(t *testing.T) {
+	mockDB := NewMockStorage()
+	server := createTestAPIServerWithIdentitySupport(t, mockDB)
+
+	rotated := gatewayIdentityLeaf(t, "rotate-new")
+	w := updateCertificateBody(t, server, "no-such-id", UploadCertificateRequest{
+		Certificate: string(rotated.PEM()),
+		PrivateKey:  string(rotated.KeyPEM()),
+	})
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+}
+
+func TestUpdateCertificate_StoreReadFailure_Returns500(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{identityRowForUpdate(t, "rotate-identity-1")}
+	server := createTestAPIServerWithIdentitySupport(t, mockDB)
+	mockDB.getErr = errors.New("connection reset")
+
+	rotated := gatewayIdentityLeaf(t, "rotate-new")
+	w := updateCertificateBody(t, server, "rotate-identity-1", UploadCertificateRequest{
+		Certificate: string(rotated.PEM()),
+		PrivateKey:  string(rotated.KeyPEM()),
+	})
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+	assert.NotContains(t, w.Body.String(), "connection reset")
+}
+
+func TestUpdateCertificate_ExpiringIdentity_WarnsExpiresSoon(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t), identityRowForUpdate(t, "rotate-identity-1")}
+	server := createTestAPIServerWithIdentitySupport(t, mockDB)
+
+	ca := pki.NewRootCA(t, "rotate-soon Root CA")
+	rotated := pki.NewLeaf(t, ca, "rotate-soon", pki.WithValidity(time.Now().Add(-time.Hour), time.Now().Add(5*24*time.Hour)))
+	w := updateCertificateBody(t, server, "rotate-identity-1", UploadCertificateRequest{
+		Certificate: string(rotated.PEM()),
+		PrivateKey:  string(rotated.KeyPEM()),
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	warnings, ok := resp["warnings"].([]any)
+	require.True(t, ok, "expected a warnings array, got %v", resp["warnings"])
+	var codes []any
+	for _, raw := range warnings {
+		codes = append(codes, raw.(map[string]any)["code"])
+	}
+	assert.Contains(t, codes, "CERT_EXPIRES_SOON")
+}
+
 func TestDeleteCertificate_IdentityNamedInUpstreamTLS_Returns409(t *testing.T) {
 	identity := gatewayIdentityLeaf(t, "del-identity")
 	target := &models.StoredCertificate{
@@ -2214,4 +2303,116 @@ type failingCertificateList struct {
 
 func (f *failingCertificateList) ListCertificatesByUsage(string) ([]*models.StoredCertificate, error) {
 	return nil, storage.ErrDatabaseUnavailable
+}
+
+// ============ Replica propagation ============
+
+// certificateEvents returns the certificate events server published.
+func certificateEvents(t *testing.T, server *APIServer) []eventhub.Event {
+	t.Helper()
+	hub, ok := server.eventHub.(*mockEventHub)
+	require.True(t, ok, "expected the test server to carry a mockEventHub, got %T", server.eventHub)
+	var out []eventhub.Event
+	for _, published := range hub.publishedEvents {
+		if published.event.EventType == eventhub.EventTypeCertificate {
+			out = append(out, published.event)
+		}
+	}
+	return out
+}
+
+func requireOneCertificateEvent(t *testing.T, server *APIServer, action, entityID string) {
+	t.Helper()
+	events := certificateEvents(t, server)
+	require.Len(t, events, 1, "expected exactly one certificate event, got %v", events)
+	assert.Equal(t, action, events[0].Action)
+	assert.Equal(t, entityID, events[0].EntityID)
+	assert.Equal(t, "test-gateway", events[0].GatewayID)
+	assert.Equal(t, eventhub.EmptyEventData, events[0].EventData, "the event must carry no certificate material")
+	assert.NotEmpty(t, events[0].EventID, "the event carries the request's correlation id")
+}
+
+func TestUploadCertificate_PublishesCertificateCreateEvent(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+
+	body, err := json.Marshal(UploadCertificateRequest{
+		Name: "pool-partner", Usage: models.CertificateUsageClient,
+		Certificate: string(pki.NewRootCA(t, "Replica Partner CA").PEM()),
+	})
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	newUploadCertHandler(server).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/certificates", bytes.NewReader(body)))
+	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	requireOneCertificateEvent(t, server, "CREATE", resp["id"].(string))
+}
+
+func TestUploadCertificate_RefusedUploadPublishesNothing(t *testing.T) {
+	mockDB := NewMockStorage()
+	server := createTestAPIServerWithCertStore(t, mockDB)
+
+	body, err := json.Marshal(UploadCertificateRequest{Name: "bad name", Certificate: "not a certificate"})
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	newUploadCertHandler(server).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/certificates", bytes.NewReader(body)))
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	assert.Empty(t, certificateEvents(t, server))
+}
+
+func TestUpdateCertificate_PublishesCertificateUpdateEvent(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t), identityRowForUpdate(t, "rotate-identity-1")}
+	server := createTestAPIServerWithIdentitySupport(t, mockDB)
+
+	rotated := gatewayIdentityLeaf(t, "rotate-new")
+	w := updateCertificateBody(t, server, "rotate-identity-1", UploadCertificateRequest{
+		Certificate: string(rotated.PEM()),
+		PrivateKey:  string(rotated.KeyPEM()),
+	})
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	requireOneCertificateEvent(t, server, "UPDATE", "rotate-identity-1")
+}
+
+func TestDeleteCertificate_PublishesCertificateDeleteEvent(t *testing.T) {
+	target := &models.StoredCertificate{
+		UUID: "del-unreferenced-1", Name: "unreferenced-backend-ca", Usage: models.CertificateUsageUpstream,
+		Certificate: pki.NewRootCA(t, "Unreferenced CA").PEM(), NotAfter: time.Now().Add(365 * 24 * time.Hour),
+	}
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{target, seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+
+	w := httptest.NewRecorder()
+	newDeleteCertHandler(server, target.UUID).ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/certificates/"+target.UUID, nil))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	requireOneCertificateEvent(t, server, "DELETE", target.UUID)
+}
+
+func TestReloadCertificates_PublishesCertificateReloadEvent(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+
+	w := httptest.NewRecorder()
+	middleware.CorrelationIDMiddleware(server.logger)(http.HandlerFunc(server.ReloadCertificates)).
+		ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/certificates/reload", nil))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	requireOneCertificateEvent(t, server, "RELOAD", "")
+}
+
+func TestPublishCertificateEvent_NoEventHub_NoOp(t *testing.T) {
+	server := createTestAPIServerWithDB(NewMockStorage())
+	server.eventHub = nil
+
+	assert.NotPanics(t, func() {
+		server.publishCertificateEvent("CREATE", "cert-1", "corr-1", server.logger)
+	})
 }

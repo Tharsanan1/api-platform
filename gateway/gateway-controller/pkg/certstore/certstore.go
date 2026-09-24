@@ -42,7 +42,7 @@ import (
 func filterUpstreamCertificates(certs []*models.StoredCertificate) []*models.StoredCertificate {
 	filtered := make([]*models.StoredCertificate, 0, len(certs))
 	for _, cert := range certs {
-		if cert.Usage == "" || cert.Usage == models.CertificateUsageUpstream {
+		if cert.EffectiveUsage() == models.CertificateUsageUpstream {
 			filtered = append(filtered, cert)
 		}
 	}
@@ -397,10 +397,7 @@ func (cs *CertStore) GetUpstreamTrustBundle(names []string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("certificate %q not found: %w", name, err)
 		}
-		usage := cert.Usage
-		if usage == "" {
-			usage = models.CertificateUsageUpstream
-		}
+		usage := cert.EffectiveUsage()
 		if usage != models.CertificateUsageUpstream {
 			// Never build a trust bundle out of a client authority or a
 			// gateway identity.

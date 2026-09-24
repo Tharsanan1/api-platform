@@ -126,6 +126,9 @@ func NewAPIServer(
 	if systemConfig == nil {
 		panic("APIServer requires non-nil system config")
 	}
+	if clientAuthorities == nil {
+		panic("APIServer requires a non-nil client authority publisher")
+	}
 	gatewayID := strings.TrimSpace(systemConfig.Controller.Server.GatewayID)
 	if gatewayID == "" {
 		panic("APIServer requires non-empty gateway ID")

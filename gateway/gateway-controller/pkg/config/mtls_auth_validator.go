@@ -382,10 +382,7 @@ func (v *MtlsAuthValidator) validateAcceptEntryCA(entryPath string, entry map[st
 		}}
 	}
 
-	usage := cert.Usage
-	if usage == "" {
-		usage = models.CertificateUsageUpstream
-	}
+	usage := cert.EffectiveUsage()
 	if usage != models.CertificateUsageClient {
 		return []ValidationError{{
 			Field:   caPath,
@@ -393,10 +390,7 @@ func (v *MtlsAuthValidator) validateAcceptEntryCA(entryPath string, entry map[st
 		}}
 	}
 
-	role := cert.Role
-	if role == "" {
-		role = models.CertificateRoleClient
-	}
+	role := cert.EffectiveRole()
 	if role == models.CertificateRoleRelay {
 		return []ValidationError{{
 			Field:   caPath,

@@ -22,9 +22,9 @@ Feature: Client certificate authority pool
   I want to curate the set of authorities whose client certificates the gateway trusts
   So that API developers can select from them when protecting an API with mutual TLS
 
-  The pool reuses the existing /certificates endpoint. A certificate uploaded with
+  The pool is managed through the /certificates endpoint. A certificate uploaded with
   usage "client" is a client authority; one uploaded without usage (or with usage
-  "upstream") is backend trust exactly as before. Certificate fixtures are generated
+  "upstream") is backend trust. Certificate fixtures are generated
   into resources/mtls-pki before the suite runs.
 
   Background:
@@ -54,19 +54,19 @@ Feature: Client certificate authority pool
     When I send a GET request to the "gateway-controller" service at "/certificates?usage=upstream"
     Then the certificate list should not contain "pool-partner-a"
 
-  Scenario: A certificate uploaded without usage is backend trust, exactly as before
-    When I upload the certificate fixture "ca-a" as "pool-legacy-backend-ca"
+  Scenario: A certificate uploaded without usage is backend trust
+    When I upload the certificate fixture "ca-a" as "pool-backend-ca"
     Then the response status should be 201
     And the JSON response field "usage" should be "upstream"
     And the JSON response field "role" should not exist
     And the JSON response field "count" should be 1
     When I send a GET request to the "gateway-controller" service at "/certificates?usage=upstream"
-    Then the listed certificate "pool-legacy-backend-ca" should have "usage" equal to "upstream"
-    And the listed certificate "pool-legacy-backend-ca" should not have field "referencedByApis"
+    Then the listed certificate "pool-backend-ca" should have "usage" equal to "upstream"
+    And the listed certificate "pool-backend-ca" should not have field "referencedByApis"
     When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
-    Then the certificate list should not contain "pool-legacy-backend-ca"
+    Then the certificate list should not contain "pool-backend-ca"
     When I send a GET request to the "gateway-controller" service at "/certificates"
-    Then the certificate list should contain "pool-legacy-backend-ca"
+    Then the certificate list should contain "pool-backend-ca"
 
   Scenario: A client authority can be marked as a relay for certificates carried in a header
     When I upload the certificate fixture "ca-a" as "pool-edge-lb-ca" with usage "client" and role "relay"

@@ -1949,14 +1949,8 @@ const certificateCommonColumns = `uuid, name, certificate, subject, issuer,
 
 // SaveCertificate persists a certificate to the database
 func (s *sqlStore) SaveCertificate(cert *models.StoredCertificate) error {
-	usage := cert.Usage
-	if usage == "" {
-		usage = models.CertificateUsageUpstream
-	}
-	role := cert.Role
-	if role == "" {
-		role = models.CertificateRoleClient
-	}
+	usage := cert.EffectiveUsage()
+	role := cert.EffectiveRole()
 	matchJSON, err := certificateMatchToJSON(cert.Match)
 	if err != nil {
 		return err

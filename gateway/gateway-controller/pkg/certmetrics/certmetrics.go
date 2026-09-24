@@ -51,10 +51,7 @@ func Refresh(store Store) ([]*models.StoredCertificate, error) {
 
 	counts := make(map[string]int)
 	for _, cert := range certs {
-		usage := cert.Usage
-		if usage == "" {
-			usage = models.CertificateUsageUpstream
-		}
+		usage := cert.EffectiveUsage()
 		counts[usage]++
 		metrics.CertificateExpirySeconds.WithLabelValues(cert.UUID, cert.Name).Set(float64(cert.NotAfter.Unix()))
 	}
@@ -96,10 +93,7 @@ func runSweep(store Store, log *slog.Logger) {
 		if warning == nil {
 			continue
 		}
-		usage := cert.Usage
-		if usage == "" {
-			usage = models.CertificateUsageUpstream
-		}
+		usage := cert.EffectiveUsage()
 		log.Warn("Certificate expiry warning",
 			slog.String("code", warning.Code),
 			slog.String("name", cert.Name),

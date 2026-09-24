@@ -225,7 +225,7 @@ func TestBuildPolicyChain_MtlsAuth_HeaderParam_CarriesRouterConfig(t *testing.T)
 	assert.Equal(t, true, header["forwardToBackend"])
 }
 
-func TestBuildPolicyChain_MtlsAuth_ForwardCertificate_PassesThroughUnchanged(t *testing.T) {
+func TestBuildPolicyChain_MtlsAuth_ForwardCertificate_PassesThrough(t *testing.T) {
 	p := transformMtlsAuth(t, testRouterCfg(), map[string]interface{}{
 		"accept":             []interface{}{map[string]interface{}{"ca": "auth-ca-a"}},
 		"forwardCertificate": false,

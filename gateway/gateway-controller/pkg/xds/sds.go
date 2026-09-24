@@ -177,101 +177,97 @@ func (sm *SDSSecretManager) GetSecrets(upstreamTLSRefs []UpstreamTLSSecretRef) (
 		secrets = append(secrets, upstreamSecret)
 	}
 
-	if sm.certStore != nil {
-		clientCABundle, err := sm.certStore.GetClientCABundle()
-		if err != nil {
-			// Omitting the secret would leave the listener waiting on it
-			// forever with nothing surfacing the failure.
-			sm.logger.Error("Failed to load client-CA pool for downstream_client_ca secret", slog.Any("error", err))
-			return nil, fmt.Errorf("failed to load client-CA pool: %w", err)
-		}
-		if len(clientCABundle) > 0 {
-			secrets = append(secrets, &tlsv3.Secret{
-				Name: SecretNameDownstreamClientCA,
-				Type: &tlsv3.Secret_ValidationContext{
-					ValidationContext: &tlsv3.CertificateValidationContext{
-						TrustedCa: &core.DataSource{
-							Specifier: &core.DataSource_InlineBytes{
-								InlineBytes: clientCABundle,
-							},
+	clientCABundle, err := sm.certStore.GetClientCABundle()
+	if err != nil {
+		// Omitting the secret would leave the listener waiting on it
+		// forever with nothing surfacing the failure.
+		sm.logger.Error("Failed to load client-CA pool for downstream_client_ca secret", slog.Any("error", err))
+		return nil, fmt.Errorf("failed to load client-CA pool: %w", err)
+	}
+	if len(clientCABundle) > 0 {
+		secrets = append(secrets, &tlsv3.Secret{
+			Name: SecretNameDownstreamClientCA,
+			Type: &tlsv3.Secret_ValidationContext{
+				ValidationContext: &tlsv3.CertificateValidationContext{
+					TrustedCa: &core.DataSource{
+						Specifier: &core.DataSource_InlineBytes{
+							InlineBytes: clientCABundle,
 						},
-						// Envoy still verifies the chain and reports the
-						// result as connection.peer_certificate_valid;
-						// ACCEPT_UNTRUSTED only keeps a failed handshake from
-						// closing the connection, so mtls-auth can return a
-						// 401. mtls-auth must deny on a false verdict.
-						TrustChainVerification: tlsv3.CertificateValidationContext_ACCEPT_UNTRUSTED,
 					},
+					// Envoy still verifies the chain and reports the
+					// result as connection.peer_certificate_valid;
+					// ACCEPT_UNTRUSTED only keeps a failed handshake from
+					// closing the connection, so mtls-auth can return a
+					// 401. mtls-auth must deny on a false verdict.
+					TrustChainVerification: tlsv3.CertificateValidationContext_ACCEPT_UNTRUSTED,
 				},
-			})
-		}
+			},
+		})
 	}
 
 	// One secret per distinct gateway identity. A failed lookup skips only
 	// that secret: its cluster still names it, so its connections fail
 	// rather than fall back to presenting no identity.
-	if sm.certStore != nil {
-		seenIdentities := make(map[string]bool, len(upstreamTLSRefs))
-		for _, ref := range upstreamTLSRefs {
-			if ref.IdentityName == "" || seenIdentities[ref.IdentityName] {
-				continue
-			}
-			seenIdentities[ref.IdentityName] = true
+	seenIdentities := make(map[string]bool, len(upstreamTLSRefs))
+	for _, ref := range upstreamTLSRefs {
+		if ref.IdentityName == "" || seenIdentities[ref.IdentityName] {
+			continue
+		}
+		seenIdentities[ref.IdentityName] = true
 
-			certChain, privateKey, err := sm.certStore.GetGatewayIdentityMaterial(ref.IdentityName)
-			if err != nil {
-				sm.logger.Error("Failed to load gateway identity material for SDS secret; skipping this secret only",
-					slog.String("identity", ref.IdentityName), slog.Any("error", err))
-				continue
-			}
-			secrets = append(secrets, &tlsv3.Secret{
-				Name: GatewayIdentitySecretName(ref.IdentityName),
-				Type: &tlsv3.Secret_TlsCertificate{
-					TlsCertificate: &tlsv3.TlsCertificate{
-						CertificateChain: &core.DataSource{
-							Specifier: &core.DataSource_InlineBytes{InlineBytes: certChain},
-						},
-						PrivateKey: &core.DataSource{
-							Specifier: &core.DataSource_InlineBytes{InlineBytes: privateKey},
-						},
+		certChain, privateKey, err := sm.certStore.GetGatewayIdentityMaterial(ref.IdentityName)
+		if err != nil {
+			sm.logger.Error("Failed to load gateway identity material for SDS secret; skipping this secret only",
+				slog.String("identity", ref.IdentityName), slog.Any("error", err))
+			continue
+		}
+		secrets = append(secrets, &tlsv3.Secret{
+			Name: GatewayIdentitySecretName(ref.IdentityName),
+			Type: &tlsv3.Secret_TlsCertificate{
+				TlsCertificate: &tlsv3.TlsCertificate{
+					CertificateChain: &core.DataSource{
+						Specifier: &core.DataSource_InlineBytes{InlineBytes: certChain},
+					},
+					PrivateKey: &core.DataSource{
+						Specifier: &core.DataSource_InlineBytes{InlineBytes: privateKey},
 					},
 				},
-			})
+			},
+		})
+	}
+
+	// One secret per definition that sets trustedCAs, deduped by name
+	// because a definition can back more than one cluster. A failed
+	// lookup skips only that secret.
+	seenValidationContexts := make(map[string]bool, len(upstreamTLSRefs))
+	for _, ref := range upstreamTLSRefs {
+		if len(ref.TrustedCANames) == 0 {
+			continue
 		}
+		secretName := UpstreamCAValidationContextSecretName(ref.APIHandle, ref.DefinitionName)
+		if seenValidationContexts[secretName] {
+			continue
+		}
+		seenValidationContexts[secretName] = true
 
-		// One secret per definition that sets trustedCAs, deduped by name
-		// because a definition can back more than one cluster. A failed
-		// lookup skips only that secret.
-		seenValidationContexts := make(map[string]bool, len(upstreamTLSRefs))
-		for _, ref := range upstreamTLSRefs {
-			if len(ref.TrustedCANames) == 0 {
-				continue
-			}
-			secretName := UpstreamCAValidationContextSecretName(ref.APIHandle, ref.DefinitionName)
-			if seenValidationContexts[secretName] {
-				continue
-			}
-			seenValidationContexts[secretName] = true
-
-			bundle, err := sm.certStore.GetUpstreamTrustBundle(ref.TrustedCANames)
-			if err != nil {
-				sm.logger.Error("Failed to load per-upstream trust bundle for SDS secret; skipping this secret only",
-					slog.String("api_handle", ref.APIHandle),
-					slog.String("definition", ref.DefinitionName),
-					slog.Any("error", err))
-				continue
-			}
-			secrets = append(secrets, &tlsv3.Secret{
-				Name: secretName,
-				Type: &tlsv3.Secret_ValidationContext{
-					ValidationContext: &tlsv3.CertificateValidationContext{
-						TrustedCa: &core.DataSource{
-							Specifier: &core.DataSource_InlineBytes{InlineBytes: bundle},
-						},
+		bundle, err := sm.certStore.GetUpstreamTrustBundle(ref.TrustedCANames)
+		if err != nil {
+			sm.logger.Error("Failed to load per-upstream trust bundle for SDS secret; skipping this secret only",
+				slog.String("api_handle", ref.APIHandle),
+				slog.String("definition", ref.DefinitionName),
+				slog.Any("error", err))
+			continue
+		}
+		secrets = append(secrets, &tlsv3.Secret{
+			Name: secretName,
+			Type: &tlsv3.Secret_ValidationContext{
+				ValidationContext: &tlsv3.CertificateValidationContext{
+					TrustedCa: &core.DataSource{
+						Specifier: &core.DataSource_InlineBytes{InlineBytes: bundle},
 					},
 				},
-			})
-		}
+			},
+		})
 	}
 
 	if sm.httpsEnabled {

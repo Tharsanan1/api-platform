@@ -79,3 +79,20 @@ type StoredCertificate struct {
 	CreatedAt time.Time `json:"createdAt"` // When uploaded
 	UpdatedAt time.Time `json:"updatedAt"` // Last modified
 }
+
+// EffectiveUsage returns the certificate's usage, or upstream when none is
+// set.
+func (c *StoredCertificate) EffectiveUsage() string {
+	if c.Usage == "" {
+		return CertificateUsageUpstream
+	}
+	return c.Usage
+}
+
+// EffectiveRole returns the certificate's role, or client when none is set.
+func (c *StoredCertificate) EffectiveRole() string {
+	if c.Role == "" {
+		return CertificateRoleClient
+	}
+	return c.Role
+}

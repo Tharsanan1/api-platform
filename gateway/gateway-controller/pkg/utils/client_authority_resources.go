@@ -90,10 +90,7 @@ func (p *ClientAuthorityPublisher) Publish(correlationID string) error {
 // clientAuthorityResource builds the published resource for one usage:
 // client row.
 func clientAuthorityResource(row *models.StoredCertificate) *storage.LazyResource {
-	role := row.Role
-	if role == "" {
-		role = models.CertificateRoleClient
-	}
+	role := row.EffectiveRole()
 	body := map[string]interface{}{
 		"certificates": splitCertificatePEMs(row.Certificate),
 		"role":         role,

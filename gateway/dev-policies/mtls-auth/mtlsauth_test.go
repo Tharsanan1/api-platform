@@ -710,7 +710,7 @@ func TestMtlsAuthPolicy_Evaluate_AuthenticatesAndPopulatesAuthContext(t *testing
 		t.Errorf(`AuthContext.Properties["matchedEntry"] = %q, want "0"`, auth.Properties["matchedEntry"])
 	}
 	if auth.Previous != previous {
-		t.Errorf("AuthContext.Previous = %+v, want the pre-existing AuthContext to be preserved", auth.Previous)
+		t.Errorf("AuthContext.Previous = %+v, want the earlier AuthContext kept in Previous", auth.Previous)
 	}
 }
 

@@ -156,7 +156,7 @@ func (s *APIServer) TestUpstreamTLS(w http.ResponseWriter, r *http.Request, id s
 // tls.Certificate for the probe.
 func (s *APIServer) loadIdentityCertificateForProbe(identityName string) (*tls.Certificate, error) {
 	translator := s.snapshotManager.GetTranslator()
-	if translator == nil || translator.GetCertStore() == nil {
+	if translator == nil {
 		return nil, fmt.Errorf("certificate store not configured")
 	}
 	certPEM, keyPEM, err := translator.GetCertStore().GetGatewayIdentityMaterial(identityName)
@@ -286,7 +286,7 @@ func (s *APIServer) classifyUpstreamTrust(peerCerts []*x509.Certificate, trusted
 	}
 
 	translator := s.snapshotManager.GetTranslator()
-	if translator == nil || translator.GetCertStore() == nil {
+	if translator == nil {
 		return "", false
 	}
 	bundle := translator.GetCertStore().GetCombinedCertificates()

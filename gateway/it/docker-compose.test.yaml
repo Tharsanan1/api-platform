@@ -242,7 +242,7 @@ services:
     networks:
       - it-gateway-runtime-network
 
-  # Outbound mTLS test backends (features/mtls-outbound.feature): each
+  # Outbound mTLS test backends: each
   # requires a client certificate signed by its own trusted authority and
   # echoes the presented client subject back in X-Client-Subject.
   mtls-backend-a:

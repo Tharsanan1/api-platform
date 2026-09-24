@@ -117,19 +117,6 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		validation.addFieldError(fe.field, fe.message)
 	}
 
-	if validation.legacyUpstreamCertErr != nil && len(validation.fieldErrors) == 0 {
-		// An invalid upstream certificate alone gets a flat error body with
-		// no errors[] envelope; existing callers depend on that shape.
-		log.Warn("Invalid certificate provided", slog.Any("error", validation.legacyUpstreamCertErr))
-		httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
-			"status":  "error",
-			"message": "Invalid certificate: " + validation.legacyUpstreamCertErr.Error(),
-		})
-		return
-	}
-	if validation.legacyUpstreamCertErr != nil {
-		validation.addFieldError("certificate", "Invalid certificate: "+validation.legacyUpstreamCertErr.Error())
-	}
 	if validation.hasProblems() {
 		fieldErrors := validation.fieldErrors
 		httputil.WriteJSON(w, http.StatusBadRequest, api.ErrorResponse{
@@ -195,22 +182,16 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		privateKeyCiphertext = ciphertext
 	default:
 		var err error
-		subject, issuer, notBefore, notAfter, err = s.extractCertificateMetadata(certData)
-		if err != nil {
-			// Unreachable: validateCertificate already accepted these bytes.
-			log.Warn("Failed to extract certificate metadata", slog.Any("error", err))
-			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
-				"status":  "error",
-				"message": "Failed to parse certificate metadata: " + err.Error(),
-			})
-			return
-		}
 		count, err = s.validateCertificate(certData)
+		if err == nil {
+			subject, issuer, notBefore, notAfter, err = s.extractCertificateMetadata(certData)
+		}
 		if err != nil {
-			log.Warn("Invalid certificate provided", slog.Any("error", err))
-			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{
+			// Unreachable: validateCertificateUpload already accepted these bytes.
+			log.Error("Failed to read a validated certificate", slog.Any("error", err))
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
 				"status":  "error",
-				"message": "Invalid certificate: " + err.Error(),
+				"message": "Failed to save certificate",
 			})
 			return
 		}
@@ -421,10 +402,7 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 	for _, cert := range certs {
 		totalBytes += len(cert.Certificate)
 
-		usage := cert.Usage
-		if usage == "" {
-			usage = models.CertificateUsageUpstream
-		}
+		usage := cert.EffectiveUsage()
 
 		item := CertificateResponse{
 			ID:       cert.UUID,
@@ -438,10 +416,7 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 		}
 
 		if usage == models.CertificateUsageClient {
-			role := cert.Role
-			if role == "" {
-				role = models.CertificateRoleClient
-			}
+			role := cert.EffectiveRole()
 			item.Role = role
 			if role == models.CertificateRoleRelay {
 				item.Match = cert.Match
@@ -551,14 +526,8 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 	// A non-relay client authority cannot be removed while a deployed API
 	// depends on it. Removing the last relay entry just turns header mode off.
 	if preDeleteCert != nil {
-		role := preDeleteCert.Role
-		if role == "" {
-			role = models.CertificateRoleClient
-		}
-		usage := preDeleteCert.Usage
-		if usage == "" {
-			usage = models.CertificateUsageUpstream
-		}
+		role := preDeleteCert.EffectiveRole()
+		usage := preDeleteCert.EffectiveUsage()
 		if usage == models.CertificateUsageClient && role != models.CertificateRoleRelay {
 			if errResp, statusCode, blocked := s.checkClientAuthorityDeletable(preDeleteCert); blocked {
 				httputil.WriteJSON(w, statusCode, errResp)
@@ -872,7 +841,7 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 
 	// The SDS update rebuilds this identity's gateway_identity:<name> secret.
 	// Reload does nothing for identity rows but keeps parity with upload.
-	if translator := s.snapshotManager.GetTranslator(); translator != nil && translator.GetCertStore() != nil {
+	if translator := s.snapshotManager.GetTranslator(); translator != nil {
 		if err := translator.GetCertStore().Reload(); err != nil {
 			log.Warn("Failed to reload certificate store after identity rotation", slog.Any("error", err))
 		}
@@ -1045,10 +1014,7 @@ func (s *APIServer) checkClientAuthorityDeletable(cert *models.StoredCertificate
 			if c.UUID == cert.UUID {
 				continue // the one about to be deleted
 			}
-			role := c.Role
-			if role == "" {
-				role = models.CertificateRoleClient
-			}
+			role := c.EffectiveRole()
 			if role != models.CertificateRoleRelay {
 				remainingNonRelay++
 			}
@@ -1307,11 +1273,6 @@ var certificateNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 type certUploadValidation struct {
 	fieldErrors []api.ValidationError
 
-	// legacyUpstreamCertErr holds a usage: upstream certificate-content
-	// failure. Alone, it is returned as a flat error with no errors[]
-	// envelope; with other problems it joins the errors[] list.
-	legacyUpstreamCertErr error
-
 	// identityBundle is the inspected chain and key of a usage: identity
 	// upload; nil unless both passed inspection.
 	identityBundle *gatewayidentity.Bundle
@@ -1325,7 +1286,7 @@ func (v *certUploadValidation) addFieldError(field, message string) {
 }
 
 func (v *certUploadValidation) hasProblems() bool {
-	return len(v.fieldErrors) > 0 || v.legacyUpstreamCertErr != nil
+	return len(v.fieldErrors) > 0
 }
 
 // validateMatchLists checks a relay entry's match narrowing: dnsSANs and
@@ -1453,7 +1414,7 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 			}
 		case effectiveUsage == models.CertificateUsageUpstream && certProvided:
 			if _, err := s.validateCertificate([]byte(req.Certificate)); err != nil {
-				v.legacyUpstreamCertErr = err
+				v.addFieldError("certificate", clientca.MsgNotPEMCertificate)
 			}
 		}
 	}
@@ -1462,10 +1423,7 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 }
 
 // publishClientAuthorities republishes the usage: client pool to the policy
-// engine after a committed change. A server without a publisher skips it.
+// engine after a committed change.
 func (s *APIServer) publishClientAuthorities(correlationID string) error {
-	if s.clientAuthorities == nil {
-		return nil
-	}
 	return s.clientAuthorities.Publish(correlationID)
 }

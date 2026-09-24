@@ -19,7 +19,7 @@
 # Runs against a gateway configured with
 #   [router.downstream_tls.client_certificate_header]
 #   forward_to_backend = true
-# (see test-config.mtls-header-forward.toml): cd it && make test-mtls-header-forward
+# Run with: cd it && make test-mtls-header-forward
 
 @mtls @mtls-header-forward
 Feature: Forwarding a believed relayed certificate to the backend

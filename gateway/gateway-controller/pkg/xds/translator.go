@@ -2478,7 +2478,7 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 				slog.String("upstream", address),
 				slog.String("secret_name", validationSecretName))
 
-		case hasTLSBlock && (t.certStore == nil || len(t.certStore.GetCombinedCertificates()) == 0):
+		case hasTLSBlock && len(t.certStore.GetCombinedCertificates()) == 0:
 			// A cluster with no trusted authority would skip chain validation,
 			// so fail this API's translation instead.
 			return nil, fmt.Errorf(

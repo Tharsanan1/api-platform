@@ -221,7 +221,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
     When I delete the certificate named "ref-edge-lb"
     Then the response should be successful
 
-  Scenario: An upstream trust certificate keeps today's removal behaviour
+  Scenario: An unreferenced upstream trust certificate can be deleted
     Given the certificate fixture "backend-ca" is pooled as "ref-backend-trust"
     When I delete the certificate named "ref-backend-trust"
     Then the response should be successful

@@ -19,7 +19,7 @@
 # Runs against a gateway configured with
 #   [router.downstream_tls.client_certificate_header]
 #   trust_any = true
-# (see test-config.mtls-header-bypass.toml): cd it && make test-mtls-header-bypass
+# Run with: cd it && make test-mtls-header-bypass
 
 @mtls @mtls-header-bypass
 Feature: Believing the relayed certificate from any connection on a trusted network

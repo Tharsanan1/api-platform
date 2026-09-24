@@ -155,10 +155,7 @@ func (v *UpstreamTLSValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validat
 					Message: fmt.Sprintf("no gateway identity named %s exists on this gateway", resolved.identity),
 				})
 			} else {
-				usage := cert.Usage
-				if usage == "" {
-					usage = models.CertificateUsageUpstream
-				}
+				usage := cert.EffectiveUsage()
 				if usage != models.CertificateUsageIdentity {
 					errs = append(errs, ValidationError{
 						Field:   fieldPath + ".identity",
@@ -184,10 +181,7 @@ func (v *UpstreamTLSValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validat
 				})
 				continue
 			}
-			usage := cert.Usage
-			if usage == "" {
-				usage = models.CertificateUsageUpstream
-			}
+			usage := cert.EffectiveUsage()
 			switch usage {
 			case models.CertificateUsageUpstream:
 				// OK — trustedCAs takes usage: upstream certificates.

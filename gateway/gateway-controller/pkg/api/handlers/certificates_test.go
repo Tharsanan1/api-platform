@@ -41,6 +41,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/clientca"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption/aesgcm"
@@ -107,7 +108,7 @@ RMVr21DnDN4l9BDDs8384GT2VOkW+6+Xl6co6gwNYSVRhsdOlDe8NkFtpe4BFg9H
 func TestExtractCertificateMetadata_Success(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	subject, issuer, notBefore, notAfter, err := server.extractCertificateMetadata([]byte(validTestCert))
 
@@ -122,7 +123,7 @@ func TestExtractCertificateMetadata_Success(t *testing.T) {
 func TestExtractCertificateMetadata_MultipleCerts(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	// Should extract from first cert in chain
 	subject, issuer, notBefore, notAfter, err := server.extractCertificateMetadata([]byte(certChain))
@@ -137,7 +138,7 @@ func TestExtractCertificateMetadata_MultipleCerts(t *testing.T) {
 func TestExtractCertificateMetadata_InvalidPEM(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	_, _, _, _, err := server.extractCertificateMetadata([]byte("not a PEM"))
 
@@ -148,7 +149,7 @@ func TestExtractCertificateMetadata_InvalidPEM(t *testing.T) {
 func TestExtractCertificateMetadata_NoCertificate(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	pemWithoutCert := `-----BEGIN RSA PRIVATE KEY-----
 MIIEowIBAAKCAQEA...
@@ -163,7 +164,7 @@ MIIEowIBAAKCAQEA...
 func TestValidateCertificate_SingleCert(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	count, err := server.validateCertificate([]byte(validTestCert))
 
@@ -174,7 +175,7 @@ func TestValidateCertificate_SingleCert(t *testing.T) {
 func TestValidateCertificate_CertChain(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	count, err := server.validateCertificate([]byte(certChain))
 
@@ -185,7 +186,7 @@ func TestValidateCertificate_CertChain(t *testing.T) {
 func TestValidateCertificate_InvalidPEM(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	_, err := server.validateCertificate([]byte("not valid PEM"))
 
@@ -196,7 +197,7 @@ func TestValidateCertificate_InvalidPEM(t *testing.T) {
 func TestValidateCertificate_NoCerts(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	pemWithoutCert := `-----BEGIN RSA PRIVATE KEY-----
 MIIEowIBAAKCAQEA...
@@ -269,7 +270,7 @@ func TestListCertificates_Success(t *testing.T) {
 	mockDB.certs = []*models.StoredCertificate{cert1, cert2}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newCertListHandler(server)
 	req := httptest.NewRequest(http.MethodGet, "/certificates", nil)
@@ -293,7 +294,7 @@ func TestListCertificates_EmptyList(t *testing.T) {
 	mockDB.certs = []*models.StoredCertificate{}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newCertListHandler(server)
 	req := httptest.NewRequest(http.MethodGet, "/certificates", nil)
@@ -316,7 +317,7 @@ func TestListCertificates_DatabaseError(t *testing.T) {
 	mockDB.getErr = errors.New("database error")
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newCertListHandler(server)
 	req := httptest.NewRequest(http.MethodGet, "/certificates", nil)
@@ -352,7 +353,7 @@ func TestListCertificates_CalculatesTotalBytes(t *testing.T) {
 	mockDB.certs = []*models.StoredCertificate{cert1, cert2}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newCertListHandler(server)
 	req := httptest.NewRequest(http.MethodGet, "/certificates", nil)
@@ -375,7 +376,7 @@ func TestListCertificates_CalculatesTotalBytes(t *testing.T) {
 func TestUploadCertificate_InvalidRequestBody(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newUploadCertHandler(server)
 
@@ -396,7 +397,7 @@ func TestUploadCertificate_InvalidRequestBody(t *testing.T) {
 func TestUploadCertificate_MissingRequiredFields(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newUploadCertHandler(server)
 
@@ -435,7 +436,7 @@ func TestUploadCertificate_MissingRequiredFields(t *testing.T) {
 func TestUploadCertificate_InvalidPEMFormat(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newUploadCertHandler(server)
 
@@ -454,16 +455,18 @@ func TestUploadCertificate_InvalidPEMFormat(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 
 	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "error", resp["status"])
-	assert.Contains(t, resp["message"], "Invalid certificate")
+	assert.Equal(t, certificateUploadInvalidMessage, resp["message"])
+	entry := firstFieldError(t, w.Body.Bytes(), "certificate")
+	assert.Equal(t, clientca.MsgNotPEMCertificate, entry["message"])
 }
 
 func TestUploadCertificate_DatabaseSaveError(t *testing.T) {
 	mockDB := NewMockStorage()
 	mockDB.saveErr = errors.New("database error")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newUploadCertHandler(server)
 
@@ -490,7 +493,7 @@ func TestUploadCertificate_DatabaseSaveError(t *testing.T) {
 func TestDeleteCertificate_EmptyID(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newDeleteCertHandler(server, "")
 
@@ -515,7 +518,7 @@ func TestDeleteCertificate_EmptyID(t *testing.T) {
 func TestUploadCertificate_LargeCertificate(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	// Create a large certificate by repeating the valid cert multiple times
 	largeCert := ""
@@ -534,7 +537,7 @@ func TestUploadCertificate_LargeCertificate(t *testing.T) {
 func TestUploadCertificate_EmptyPEMBlock(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newUploadCertHandler(server)
 
@@ -561,7 +564,7 @@ func TestUploadCertificate_EmptyPEMBlock(t *testing.T) {
 func TestUploadCertificate_MalformedPEMHeaders(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newUploadCertHandler(server)
 
@@ -608,7 +611,7 @@ func TestUploadCertificate_MalformedPEMHeaders(t *testing.T) {
 func TestSaveCertificate_SpecialCharactersInName(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	// Test various special character names are accepted and stored correctly
 	tests := []struct {
@@ -682,7 +685,7 @@ func TestListCertificates_LargeResultSet(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newCertListHandler(server)
 	req := httptest.NewRequest(http.MethodGet, "/certificates", nil)
@@ -703,7 +706,7 @@ func TestListCertificates_LargeResultSet(t *testing.T) {
 func TestDeleteCertificate_SpecialCharactersInID(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	// Test with various special character IDs - verify they can be looked up in DB
 	specialIDs := []string{
@@ -737,7 +740,7 @@ func TestDeleteCertificate_SpecialCharactersInID(t *testing.T) {
 func TestValidateCertificate_BoundaryConditions(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	tests := []struct {
 		name        string
@@ -787,7 +790,7 @@ func TestValidateCertificate_BoundaryConditions(t *testing.T) {
 func TestExtractCertificateMetadata_EdgeCases(t *testing.T) {
 	mockDB := NewMockStorage()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	tests := []struct {
 		name        string
@@ -840,7 +843,7 @@ func TestListCertificates_ConcurrentAccess(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig()}
+	server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
 
 	handler := newCertListHandler(server)
 
@@ -2100,9 +2103,7 @@ func TestDeleteCertificate_StoreReadFailure_Refuses(t *testing.T) {
 // withClientAuthorityPublisher wires a real publisher over server's database
 // into server and returns the lazy-resource manager it publishes through.
 func withClientAuthorityPublisher(server *APIServer) *lazyresourcexds.LazyResourceStateManager {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store := storage.NewLazyResourceStore(logger)
-	manager := lazyresourcexds.NewLazyResourceStateManager(store, lazyresourcexds.NewLazyResourceSnapshotManager(store, logger), logger)
+	manager := newTestLazyResourceManager()
 	server.clientAuthorities = utils.NewClientAuthorityPublisher(server.db, manager)
 	return manager
 }

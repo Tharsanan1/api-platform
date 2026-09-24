@@ -2670,7 +2670,7 @@ func assertNoInlineBytesAnywhere(t *testing.T, tlsCtx *tlsv3.UpstreamTlsContext)
 	}
 }
 
-func TestTranslator_CreateUpstreamTLSContextWithMTLS_IdentityAndTrust_VerifyHostNameTrue(t *testing.T) {
+func TestTranslator_CreateUpstreamTLSContext_IdentityAndTrust_VerifyHostNameTrue(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	routerCfg.Upstream.TLS.DisableSslVerification = false // the SAN-matching/validation-context branch is gated on this
@@ -2712,7 +2712,7 @@ func TestTranslator_CreateUpstreamTLSContextWithMTLS_IdentityAndTrust_VerifyHost
 	assertNoInlineBytesAnywhere(t, tlsCtx)
 }
 
-func TestTranslator_CreateUpstreamTLSContextWithMTLS_VerifyHostNameFalse_NoSANMatcher(t *testing.T) {
+func TestTranslator_CreateUpstreamTLSContext_VerifyHostNameFalse_NoSANMatcher(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	routerCfg.Upstream.TLS.DisableSslVerification = false
@@ -2741,7 +2741,7 @@ func TestTranslator_CreateUpstreamTLSContextWithMTLS_VerifyHostNameFalse_NoSANMa
 }
 
 // An IP-literal target gets an IP_ADDRESS SAN matcher and no SNI.
-func TestTranslator_CreateUpstreamTLSContextWithMTLS_IPAddressTarget_UsesIPMatcher(t *testing.T) {
+func TestTranslator_CreateUpstreamTLSContext_IPAddressTarget_UsesIPMatcher(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	routerCfg.Upstream.TLS.DisableSslVerification = false
@@ -2764,7 +2764,7 @@ func TestTranslator_CreateUpstreamTLSContextWithMTLS_IPAddressTarget_UsesIPMatch
 
 // A definition with no tls block presents no identity and uses the
 // router-wide trust and hostname defaults.
-func TestTranslator_CreateUpstreamTLSContextWithMTLS_NoTLSBlock_Unchanged(t *testing.T) {
+func TestTranslator_CreateUpstreamTLSContext_NoTLSBlock_UsesRouterTrust(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	routerCfg.Upstream.TLS.DisableSslVerification = false
@@ -2774,16 +2774,13 @@ func TestTranslator_CreateUpstreamTLSContextWithMTLS_NoTLSBlock_Unchanged(t *tes
 
 	withNilOpts, err := translator.createUpstreamTLSContext(nil, "plain-backend.example.com", nil, "")
 	require.NoError(t, err)
-	viaPlainHelper, err := translator.createUpstreamTLSContext(nil, "plain-backend.example.com", nil, "")
-	require.NoError(t, err)
 
 	assert.Empty(t, withNilOpts.CommonTlsContext.GetTlsCertificateSdsSecretConfigs(),
 		"a definition without tls must never reference a gateway identity secret")
-	assert.Equal(t, viaPlainHelper.Sni, withNilOpts.Sni)
-	assert.Equal(t,
-		viaPlainHelper.CommonTlsContext.GetCombinedValidationContext().GetValidationContextSdsSecretConfig().GetName(),
+	assert.Equal(t, "plain-backend.example.com", withNilOpts.Sni)
+	assert.Equal(t, SecretNameUpstreamCA,
 		withNilOpts.CommonTlsContext.GetCombinedValidationContext().GetValidationContextSdsSecretConfig().GetName(),
-		"trust must fall back to the router-wide default, exactly as before tls blocks existed")
+		"trust must fall back to the router-wide default")
 }
 
 // Only a tls block that sets identity or trustedCAs yields a secret ref.

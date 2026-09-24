@@ -116,10 +116,7 @@ Feature: Seeing what client and backend certificates did
     And I wait for the endpoint "http://localhost:8080/obs-partner/v1.0/anything" to respond with status 503
     When I send a GET request to "http://localhost:8080/obs-partner/v1.0/anything"
     Then the response status code should be 503
-    And the response body should be:
-      """
-      {"error":"Service Unavailable","message":"The upstream service could not be reached."}
-      """
+    And the response body should contain "upstream connect error"
     And the "gateway-runtime" container log should contain "\"upTlsFail\":\"TLS_error" within 10 seconds
 
   Scenario: Certificate gauges follow the pool and expiry is warned on every channel

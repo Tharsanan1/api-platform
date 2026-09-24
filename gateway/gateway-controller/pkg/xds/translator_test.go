@@ -23,7 +23,6 @@ import (
 	"math"
 	"net/url"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2968,51 +2967,6 @@ func TestTranslator_CreateListener_PerConnectionBufferLimitBytes(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, listener)
 	assert.Equal(t, uint32(2097152), listener.GetPerConnectionBufferLimitBytes().GetValue())
-}
-
-// Both listeners replace Envoy's upstream-failure reason text with the fixed
-// JSON body.
-func TestTranslator_CreateListener_LocalReplyConfig_SterileUF503Body(t *testing.T) {
-	logger := createTestLogger()
-	routerCfg := testRouterConfig()
-	routerCfg.HTTPSEnabled = true
-	routerCfg.HTTPSPort = 8443
-	routerCfg.Upstream.TLS.DisableSslVerification = false
-	cfg := testConfig()
-	cfg.Router = *routerCfg
-	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
-	require.NoError(t, err)
-	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
-
-	for _, isHTTPS := range []bool{false, true} {
-		lis, _, err := translator.createListener(nil, isHTTPS, false)
-		require.NoError(t, err, "isHTTPS=%v", isHTTPS)
-		manager := extractHCM(t, lis)
-
-		require.NotNil(t, manager.LocalReplyConfig, "isHTTPS=%v", isHTTPS)
-		require.Len(t, manager.LocalReplyConfig.Mappers, 1, "isHTTPS=%v", isHTTPS)
-		mapper := manager.LocalReplyConfig.Mappers[0]
-
-		assert.Equal(t, sterile503Body, mapper.GetBody().GetInlineString(), "isHTTPS=%v", isHTTPS)
-		assert.Equal(t, "application/json", mapper.GetBodyFormatOverride().GetContentType(), "isHTTPS=%v", isHTTPS)
-		assert.Equal(t, "%LOCAL_REPLY_BODY%", mapper.GetBodyFormatOverride().GetTextFormat(),
-			"no other command operator (upstream host, reset reason, etc.) may be interpolated, isHTTPS=%v", isHTTPS)
-
-		andFilter := mapper.GetFilter().GetAndFilter()
-		require.NotNil(t, andFilter, "isHTTPS=%v", isHTTPS)
-		require.Len(t, andFilter.Filters, 2, "isHTTPS=%v", isHTTPS)
-		var hasUFFlag, hasStatus503 bool
-		for _, f := range andFilter.Filters {
-			if rf := f.GetResponseFlagFilter(); rf != nil && slices.Contains(rf.Flags, "UF") {
-				hasUFFlag = true
-			}
-			if sf := f.GetStatusCodeFilter(); sf != nil && sf.GetComparison().GetValue().GetDefaultValue() == 503 {
-				hasStatus503 = true
-			}
-		}
-		assert.True(t, hasUFFlag, "expected a response-flag filter on UF, isHTTPS=%v", isHTTPS)
-		assert.True(t, hasStatus503, "expected a status-code filter on 503, isHTTPS=%v", isHTTPS)
-	}
 }
 
 // The listener certificate is referenced via SDS and never inlined.

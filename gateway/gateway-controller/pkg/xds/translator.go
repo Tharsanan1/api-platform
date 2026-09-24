@@ -1366,58 +1366,6 @@ func convertPathWithEscapedSlashesAction(action string) hcm.HttpConnectionManage
 	}
 }
 
-// sterile503Body replaces Envoy's generated reason text, which can reveal the
-// connection failure detail, when a request fails with the UF response flag.
-const sterile503Body = `{"error":"Service Unavailable","message":"The upstream service could not be reached."}`
-
-// createSterile503LocalReplyConfig maps a 503 carrying Envoy's UF response
-// flag (upstream connection or TLS handshake failure) to a fixed JSON body,
-// so the caller never sees the backend host or failure reason.
-func createSterile503LocalReplyConfig() *hcm.LocalReplyConfig {
-	return &hcm.LocalReplyConfig{
-		Mappers: []*hcm.ResponseMapper{
-			{
-				Filter: &accesslog.AccessLogFilter{
-					FilterSpecifier: &accesslog.AccessLogFilter_AndFilter{
-						AndFilter: &accesslog.AndFilter{
-							Filters: []*accesslog.AccessLogFilter{
-								{
-									FilterSpecifier: &accesslog.AccessLogFilter_ResponseFlagFilter{
-										ResponseFlagFilter: &accesslog.ResponseFlagFilter{
-											Flags: []string{"UF", "UC", "UR"},
-										},
-									},
-								},
-								{
-									FilterSpecifier: &accesslog.AccessLogFilter_StatusCodeFilter{
-										StatusCodeFilter: &accesslog.StatusCodeFilter{
-											Comparison: &accesslog.ComparisonFilter{
-												Op:    accesslog.ComparisonFilter_EQ,
-												Value: &core.RuntimeUInt32{DefaultValue: 503},
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-				Body: &core.DataSource{
-					Specifier: &core.DataSource_InlineString{InlineString: sterile503Body},
-				},
-				// No other command operators are interpolated, so nothing
-				// from the request or upstream reaches the body.
-				BodyFormatOverride: &core.SubstitutionFormatString{
-					Format: &core.SubstitutionFormatString_TextFormat{
-						TextFormat: "%LOCAL_REPLY_BODY%",
-					},
-					ContentType: "application/json",
-				},
-			},
-		},
-	}
-}
-
 // createListener creates an Envoy listener with access logging
 // If isHTTPS is true, creates an HTTPS listener with TLS configuration
 // Uses RDS (Route Discovery Service) to share route configuration between listeners
@@ -1524,8 +1472,6 @@ func (t *Translator) createListener(virtualHosts []*route.VirtualHost, isHTTPS b
 	if tracingConfig != nil {
 		manager.Tracing = tracingConfig
 	}
-
-	manager.LocalReplyConfig = createSterile503LocalReplyConfig()
 
 	pbst, err := anypb.New(manager)
 	if err != nil {

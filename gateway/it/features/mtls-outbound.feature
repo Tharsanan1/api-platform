@@ -426,10 +426,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     And I wait for the endpoint "http://localhost:8080/out-partner/v1.0/anything" to respond with status 503
     When I send a GET request to "http://localhost:8080/out-partner/v1.0/anything"
     Then the response status code should be 503
-    And the response body should be:
-      """
-      {"error":"Service Unavailable","message":"The upstream service could not be reached."}
-      """
+    And the response body should contain "upstream connect error"
 
   Scenario: Hostname verification is on by default and rejects a certificate for another host
     Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"

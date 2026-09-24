@@ -91,6 +91,7 @@ func TestOpenAPI_WarningCodeEnum_CoversEveryEmittedCode(t *testing.T) {
 		config.WarningCodeMTLSAcceptInheritsPool,
 		config.WarningCodeMTLSAcceptUnnarrowed,
 		config.WarningCodeMTLSAuthNotFirst,
+		config.WarningCodeMTLSAcceptNamesRelayAuthority,
 		config.WarningCodeMTLSThumbprintNormalised,
 		config.WarningCodeHeaderCertBypassActive,
 		config.WarningCodeTLSVerifyHostNameDisabled,

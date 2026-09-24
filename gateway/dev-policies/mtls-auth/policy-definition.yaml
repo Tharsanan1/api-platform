@@ -56,6 +56,15 @@ parameters:
             items:
               type: string
 
+    forwardCertificate:
+      type: boolean
+      description: >-
+        Whether the client certificate headers reach this API's backend on an
+        allowed request. Set to false to remove X-Forwarded-Client-Cert, and
+        the certificate header relayed by a front proxy, before the request is
+        forwarded.
+      default: true
+
     onFailureStatusCode:
       type: integer
       description: HTTP status code to return on authentication failure (401 for Unauthorized, 403 for Forbidden).

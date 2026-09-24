@@ -269,6 +269,12 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptListRejections(t *testing.T) {
 			message: "match must be an object listing uriSANs or dnsSANs",
 		},
 		{
+			name:    "forwardCertificate given as a string",
+			params:  map[string]interface{}{"forwardCertificate": "no"},
+			field:   "spec.policies[0].params.forwardCertificate",
+			message: "forwardCertificate must be true or false",
+		},
+		{
 			name:    "unknown top-level param mode",
 			params:  map[string]interface{}{"mode": "strict"},
 			field:   "spec.policies[0].params.mode",
@@ -504,6 +510,117 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_ThumbprintNormalised(t *te
 
 	if !hasWarning(warnings, WarningCodeMTLSThumbprintNormalised, "spec.policies[0].params.accept[0].thumbprints[0]") {
 		t.Fatalf("expected MTLS_THUMBPRINT_NORMALISED warning for spec.policies[0].params.accept[0].thumbprints[0], got %+v", warnings)
+	}
+}
+
+func TestMtlsAuthValidator_ValidateRestAPI_ForwardCertificateBoolean_NoErrors(t *testing.T) {
+	for _, forward := range []bool{true, false} {
+		v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")), true, false)
+		params := map[string]interface{}{
+			"accept":             []interface{}{map[string]interface{}{"ca": "listener-partner-a"}},
+			"forwardCertificate": forward,
+		}
+		if errs := v.ValidateRestAPI(restAPIWithAPILevelPolicies(mtlsPolicy(params))); len(errs) != 0 {
+			t.Fatalf("forwardCertificate: %v: expected no errors, got %+v", forward, errs)
+		}
+	}
+}
+
+func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_UnnarrowedEntry_SingleAuthorityPool_Warning(t *testing.T) {
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")), true, false)
+
+	acceptParams := map[string]interface{}{"accept": []interface{}{
+		map[string]interface{}{"ca": "listener-partner-a"},
+	}}
+	_, warnings := v.ResolveMtlsAuthForResponse(*restAPIWithAPILevelPolicies(mtlsPolicy(acceptParams)))
+
+	if !hasWarning(warnings, WarningCodeMTLSAcceptUnnarrowed, "spec.policies[0].params.accept[0]") {
+		t.Fatalf("expected MTLS_ACCEPT_UNNARROWED for an explicit unnarrowed entry with one pooled authority, got %+v", warnings)
+	}
+	if hasWarning(warnings, WarningCodeMTLSAcceptInheritsPool, "spec.policies[0].params.accept") {
+		t.Fatalf("MTLS_ACCEPT_INHERITS_POOL must not be raised for an explicit accept list, got %+v", warnings)
+	}
+}
+
+func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_NarrowedEntry_NoUnnarrowedWarning(t *testing.T) {
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("listener-partner-a"), clientCA("listener-partner-b")), true, false)
+
+	acceptParams := map[string]interface{}{"accept": []interface{}{
+		map[string]interface{}{"ca": "listener-partner-a", "match": map[string]interface{}{"uriSANs": []interface{}{"urn:x"}}},
+	}}
+	_, warnings := v.ResolveMtlsAuthForResponse(*restAPIWithAPILevelPolicies(mtlsPolicy(acceptParams)))
+
+	if hasWarning(warnings, WarningCodeMTLSAcceptUnnarrowed, "spec.policies[0].params.accept[0]") {
+		t.Fatalf("expected no MTLS_ACCEPT_UNNARROWED for a narrowed entry, got %+v", warnings)
+	}
+}
+
+// TestMtlsAuthValidator_ResolveMtlsAuthForResponse_AcceptNamesRelayAuthority
+// covers the same authority pooled under two names — once as a relay, once
+// as a client entry an API names in accept.
+func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_AcceptNamesRelayAuthority(t *testing.T) {
+	lbPEM, _, _ := generateXDSTestCA(t)
+	partnerPEM, _, _ := generateXDSTestCA(t)
+
+	pooled := func(name, role string, pem []byte) *models.StoredCertificate {
+		return &models.StoredCertificate{Name: name, Usage: models.CertificateUsageClient, Role: role, Certificate: pem}
+	}
+	acceptOf := func(ca string) *api.RestAPI {
+		return restAPIWithAPILevelPolicies(mtlsPolicy(map[string]interface{}{"accept": []interface{}{
+			map[string]interface{}{"ca": ca},
+		}}))
+	}
+	const field = "spec.policies[0].params.accept[0].ca"
+
+	tests := []struct {
+		name        string
+		pool        []*models.StoredCertificate
+		acceptCA    string
+		wantWarning bool
+	}{
+		{
+			name: "identical certificate bytes under a client and a relay name",
+			pool: []*models.StoredCertificate{
+				pooled("edge-lb-relay", models.CertificateRoleRelay, lbPEM),
+				pooled("edge-lb-client", models.CertificateRoleClient, lbPEM),
+			},
+			acceptCA:    "edge-lb-client",
+			wantWarning: true,
+		},
+		{
+			name: "same authority stored with different surrounding bytes",
+			pool: []*models.StoredCertificate{
+				pooled("edge-lb-relay", models.CertificateRoleRelay, lbPEM),
+				pooled("edge-lb-client", models.CertificateRoleClient, append([]byte("\n"), lbPEM...)),
+			},
+			acceptCA:    "edge-lb-client",
+			wantWarning: true,
+		},
+		{
+			name: "a different authority than every relay",
+			pool: []*models.StoredCertificate{
+				pooled("edge-lb-relay", models.CertificateRoleRelay, lbPEM),
+				pooled("partner-a", models.CertificateRoleClient, partnerPEM),
+			},
+			acceptCA:    "partner-a",
+			wantWarning: false,
+		},
+		{
+			name:        "no relay entries at all",
+			pool:        []*models.StoredCertificate{pooled("edge-lb-client", models.CertificateRoleClient, lbPEM)},
+			acceptCA:    "edge-lb-client",
+			wantWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := NewMtlsAuthValidator(newFakeMtlsCertStore(tt.pool...), true, false)
+			_, warnings := v.ResolveMtlsAuthForResponse(*acceptOf(tt.acceptCA))
+			if got := hasWarning(warnings, WarningCodeMTLSAcceptNamesRelayAuthority, field); got != tt.wantWarning {
+				t.Fatalf("MTLS_ACCEPT_NAMES_RELAY_AUTHORITY at %s present = %v, want %v; warnings %+v", field, got, tt.wantWarning, warnings)
+			}
+		})
 	}
 }
 

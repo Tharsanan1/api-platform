@@ -62,7 +62,7 @@ Feature: Believing the relayed certificate from any connection on a trusted netw
     Then the response should be successful
     And the response should include a warning with code "HEADER_CERT_BYPASS_ACTIVE"
 
-  Scenario Outline: The header is believed from any connection that presented no certificate, never in place of a rejected one
+  Scenario Outline: The header is believed from a connection that presented no certificate or a pooled one, never in place of a rejected one
     Given I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -94,7 +94,8 @@ Feature: Believing the relayed certificate from any connection on a trusted netw
     Examples:
       | url                                             | presenting                                                                                                              | status |
       | https://localhost:8443/bypass/v1.0/anything     | with no client certificate and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"                    | 200    |
-      | https://localhost:8443/bypass/v1.0/anything     | with client certificate "client-wrong-ca" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"     | 401    |
+      | https://localhost:8443/bypass/v1.0/anything     | with client certificate "client-wrong-ca" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"     | 200    |
+      | https://localhost:8443/bypass/v1.0/anything     | with client certificate "client-expired" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"      | 401    |
       | https://localhost:8443/bypass/v1.0/anything     | with no client certificate and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-wrong-ca"                 | 401    |
       | https://localhost:8443/bypass/v1.0/anything     | with no client certificate and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-expired"                  | 401    |
       | https://localhost:8443/bypass/v1.0/anything     | with no client certificate                                                                                              | 401    |

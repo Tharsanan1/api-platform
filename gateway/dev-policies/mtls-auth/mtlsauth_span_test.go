@@ -292,13 +292,13 @@ func TestMtlsAuthPolicy_SpanAttributes_HeaderSourceAndBypass(t *testing.T) {
 		requireAttrString(t, attrs, "mtls_auth.result", "deny")
 		requireAttrString(t, attrs, "mtls_auth.source", sourceHeader)
 		requireAttrString(t, attrs, "mtls_auth.relayed_by", "relay-edge-lb")
-		requireAttrString(t, attrs, "mtls_auth.reason", reasonAuthorityNotAccepted)
+		requireAttrString(t, attrs, "mtls_auth.reason", reasonUntrustedChain)
 		requireNoPEMLeaked(t, attrs)
 	})
 
 	t.Run("bypass", func(t *testing.T) {
 		p := mustBuildRelayPolicy(t, pool, acceptEntries, nil, map[string]interface{}{"trustAny": true})
-		reqCtx := reqCtxWithTLSAndHeader(nil, defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+		reqCtx := reqCtxWithTLSAndHeader(&policy.DownstreamTLS{MTLS: false}, defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
 		_, attrs := callWithRecordedSpan(t, p, reqCtx)
 
 		requireAttrString(t, attrs, "mtls_auth.result", "allow")

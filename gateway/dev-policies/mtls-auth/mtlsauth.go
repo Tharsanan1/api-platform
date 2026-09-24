@@ -49,8 +49,9 @@
 //
 // Two further internal params turn on support for a client certificate
 // relayed by a front proxy in a request header, rather than presented on the
-// connection itself — see evaluate's doc comment for the full decision
-// order:
+// connection itself. The connection's own certificate is always judged
+// first; a header is only ever judged when that certificate did not pass
+// `accept` — see evaluate's doc comment for the full decision order:
 //
 //   - __wso2_internal_mtls_relays: an ordered array of {"name": "<pool entry
 //     name>", "certificates": ["<PEM>", ...], "match": {...} (optional, same
@@ -62,6 +63,11 @@
 //     bool, "forwardToBackend": bool}. Missing entirely means no relays and
 //     header mode off, with the header name defaulting to
 //     X-WSO2-CLIENT-CERTIFICATE.
+//
+// One developer-facing parameter shapes what reaches the backend:
+// forwardCertificate (default true). When false, an allowed request reaches
+// this API's backend with neither X-Forwarded-Client-Cert nor the relayed
+// certificate header.
 package mtlsauth
 
 import (
@@ -115,6 +121,10 @@ const (
 	// defaultHeaderName is used when __wso2_internal_mtls_header is absent or
 	// omits "name".
 	defaultHeaderName = "X-WSO2-CLIENT-CERTIFICATE"
+
+	// forwardCertificateParam is the developer-facing parameter that, when
+	// false, removes every certificate header before this API's backend.
+	forwardCertificateParam = "forwardCertificate"
 
 	// xfccHeaderName mirrors the gateway-controller's pkg/xds/translator.go
 	// constant of the same name — the header Envoy writes with SANITIZE_SET
@@ -249,6 +259,11 @@ type MtlsAuthPolicy struct {
 	pool   []*x509.Certificate
 	relays []relayEntry
 	header headerConfig
+
+	// forwardCertificate is the developer-facing parameter of the same name:
+	// false removes X-Forwarded-Client-Cert and the relayed certificate
+	// header from every request this policy allows.
+	forwardCertificate bool
 }
 
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
@@ -275,7 +290,17 @@ func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (p
 		return nil, fmt.Errorf("mtls-auth: parsing relay list: %w", err)
 	}
 	header := parseHeaderParam(params[internalHeaderParam])
-	p := &MtlsAuthPolicy{accept: accept, pool: pool, relays: relays, header: header}
+	forwardCertificate, err := parseForwardCertificateParam(params[forwardCertificateParam])
+	if err != nil {
+		return nil, fmt.Errorf("mtls-auth: %w", err)
+	}
+	p := &MtlsAuthPolicy{
+		accept:             accept,
+		pool:               pool,
+		relays:             relays,
+		header:             header,
+		forwardCertificate: forwardCertificate,
+	}
 	p.warnUnpooledAcceptAuthorities()
 	return p, nil
 }
@@ -303,42 +328,85 @@ func (p *MtlsAuthPolicy) Mode() policy.ProcessingMode {
 // authentication_authorization.md GO-AUTH-001: any step that cannot decide
 // denies, it never passes through.
 //
-// Decision order (see the package doc comment for the header/relay/bypass
-// feature this implements):
+// The connection's own certificate is judged before any header. "Good"
+// below means Envoy reported a certificate on this connection and verified
+// it against the client-CA pool; "judged" means a header is decoded,
+// date-checked and run through the same accept-list evaluation as a
+// connection certificate.
 //
-//  1. Header absent → evaluate the connection certificate as itself.
-//  2. Header present, header mode off (no relays, trustAny false) → same as 1;
-//     the header is inert text.
-//  3. Header present, trustAny true → the header is believed unconditionally;
-//     the connection is never consulted (works with no certificate at all,
-//     including plaintext).
-//  4. Header present, relays configured → believed ONLY IF the connection's
-//     own certificate authenticates as a relay entry (mTLS, Envoy's own
-//     verdict, chain verification, and any SAN narrowing the relay entry
-//     carries — the same evaluation accept entries get). Otherwise the header
-//     is IGNORED (never rejected): fall back to 1, and log at Debug that a
-//     header was present on a non-relay connection.
-//  5. A believed header's certificate is decoded, date-checked, and run
-//     through the SAME accept-list evaluation as the connection path.
+//  1. The connection is good.
+//     a. Its certificate passes accept → allow as the connection
+//     (source handshake). Any header is ignored.
+//     b. Otherwise, with a header present and header mode on, the header is
+//     judged when trustAny is on (source bypass) or when the connection
+//     matches a relay entry (source header, relayedBy set). Either way
+//     a header that is not a single decodable certificate, or fails
+//     accept, denies with that reason; one that passes allows as the
+//     relayed client.
+//     c. Otherwise the header, if any, is ignored (logged at Debug) and the
+//     request is denied with the connection's own reason.
+//  2. The connection is not good.
+//     a. No certificate was presented: under trustAny a present header is
+//     judged (source bypass); otherwise deny no_certificate.
+//     b. A certificate was presented and Envoy rejected it → deny with the
+//     reason derived from that certificate. The header is ignored even
+//     under trustAny: a caller that identified itself with a bad
+//     certificate gets no second chance.
+//     c. No TLS attributes or no Envoy verdict at all → deny
+//     attribute_absent.
 func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[string]interface{}) evaluationResult {
 	now := time.Now()
+	tls := reqCtx.PeerCertificate()
+	headerValues := p.headerValues(reqCtx)
+	headerPresent := len(headerValues) > 0
 
-	if p.headerModeOn() {
-		if headerValue, present := p.headerRawValue(reqCtx); present {
-			if p.header.trustAny {
-				return p.evaluateHeaderCertificate(headerValue, now, sourceBypass, "", "")
-			}
-
-			tls := reqCtx.PeerCertificate()
-			if relay, relayLeaf, ok := p.matchRelay(reqCtx, tls, now); ok {
-				return p.evaluateHeaderCertificate(headerValue, now, sourceHeader, relay.name, relayLeaf.Subject.String())
-			}
-
-			p.logIgnoredHeader(tls)
+	if connectionVerified(tls) {
+		connection := p.evaluateVerifiedConnection(reqCtx, tls, now)
+		if connection.authenticated || !headerPresent {
+			return connection
 		}
+		if p.header.trustAny {
+			return p.evaluateHeaderCertificate(headerValues, now, sourceBypass, "", "")
+		}
+		if relay, relayLeaf, ok := p.matchRelay(reqCtx, tls, now); ok {
+			return p.evaluateHeaderCertificate(headerValues, now, sourceHeader, relay.name, relayLeaf.Subject.String())
+		}
+		p.logIgnoredHeader(tls)
+		return connection
 	}
 
-	return p.evaluateConnectionCertificate(reqCtx, now)
+	deny := evaluationResult{authenticated: false, entryIndex: -1, source: sourceHandshake}
+	switch {
+	case tls == nil:
+		// No gateway assertion about this connection at all. Nil MUST be
+		// treated as authentication failure, never as "no certificate
+		// required" — see policy.DownstreamTLS's doc comment.
+		deny.reason = reasonAttributeAbsent
+	case !tls.MTLS:
+		if headerPresent && p.header.trustAny {
+			return p.evaluateHeaderCertificate(headerValues, now, sourceBypass, "", "")
+		}
+		if headerPresent {
+			p.logIgnoredHeader(tls)
+		}
+		deny.reason = reasonNoCertificate
+	case tls.PeerCertValid == nil:
+		deny.reason = reasonAttributeAbsent
+	default:
+		reason, rejectedLeaf := p.deriveRejectReason(tls, now)
+		deny.reason = reason
+		if rejectedLeaf != nil {
+			deny = withLeafInfo(deny, rejectedLeaf)
+		}
+	}
+	return deny
+}
+
+// connectionVerified reports whether Envoy delivered a positive verdict for a
+// certificate presented on this connection: TLS attributes present, a
+// certificate presented, and peer_certificate_valid true.
+func connectionVerified(tls *policy.DownstreamTLS) bool {
+	return tls != nil && tls.MTLS && tls.PeerCertValid != nil && *tls.PeerCertValid
 }
 
 // withLeafInfo attaches leaf-derived, non-sensitive attributes (canonical
@@ -354,48 +422,14 @@ func withLeafInfo(result evaluationResult, leaf *x509.Certificate) evaluationRes
 	return result
 }
 
-// evaluateConnectionCertificate evaluates the connection's own certificate
-// against the accept list. This is
-// what runs whenever the header is absent, ignored (header mode off, or on
-// but no relay vouches for this connection), ignored-but-logged (step 4
-// above), or simply never in play at all.
-func (p *MtlsAuthPolicy) evaluateConnectionCertificate(reqCtx *policy.RequestHeaderContext, now time.Time) evaluationResult {
+// evaluateVerifiedConnection evaluates the certificate of a connection Envoy
+// already verified (see connectionVerified) against the accept list. Envoy's
+// verdict is not a substitute for this policy's own work: the leaf is parsed
+// and its validity dates re-checked on every request before the accept list
+// runs.
+func (p *MtlsAuthPolicy) evaluateVerifiedConnection(reqCtx *policy.RequestHeaderContext, tls *policy.DownstreamTLS, now time.Time) evaluationResult {
 	deny := evaluationResult{authenticated: false, entryIndex: -1, source: sourceHandshake}
 
-	// Step 1: no gateway assertion about this connection's certificate at
-	// all. Nil MUST be treated as authentication failure, never as "no
-	// certificate required" — see policy.DownstreamTLS's doc comment.
-	tls := reqCtx.PeerCertificate()
-	if tls == nil {
-		deny.reason = reasonAttributeAbsent
-		return deny
-	}
-
-	// Step 2: the gateway populated TLS but no certificate was presented on
-	// this connection at all.
-	if !tls.MTLS {
-		deny.reason = reasonNoCertificate
-		return deny
-	}
-
-	// Step 3: consult Envoy's own verification verdict against the
-	// client-CA pool before doing any of our own cryptographic work.
-	if tls.PeerCertValid == nil {
-		deny.reason = reasonAttributeAbsent
-		return deny
-	}
-	if !*tls.PeerCertValid {
-		reason, rejectedLeaf := p.deriveRejectReason(tls, now)
-		deny.reason = reason
-		if rejectedLeaf != nil {
-			deny = withLeafInfo(deny, rejectedLeaf)
-		}
-		return deny
-	}
-
-	// Step 4: parse the leaf and re-check validity dates ourselves on every
-	// request — Envoy's verdict above is not a substitute for this policy's
-	// own accept-list evaluation.
 	leaf, err := parseCertificatePEM(tls.PeerCertificatePEM)
 	if err != nil {
 		deny.reason = reasonInvalidCert
@@ -415,8 +449,8 @@ func (p *MtlsAuthPolicy) evaluateConnectionCertificate(reqCtx *policy.RequestHea
 	return result
 }
 
-// evaluateHeaderCertificate decodes and evaluates a believed header value
-// (step 5): decode → date-check → the same accept-list evaluation as the
+// evaluateHeaderCertificate decodes and evaluates a judged header: exactly
+// one value, decode → date-check → the same accept-list evaluation as the
 // connection path, but with Intermediates limited to pool material only —
 // there is no Envoy verdict and no XFCC chain for a header-carried
 // certificate — and with no Envoy-thumbprint cross-check (same reason).
@@ -426,13 +460,19 @@ func (p *MtlsAuthPolicy) evaluateConnectionCertificate(reqCtx *policy.RequestHea
 // trusted relay before the header's own certificate was evaluated at all, so
 // that fact belongs on the result regardless of what this header's
 // certificate turns out to do.
-func (p *MtlsAuthPolicy) evaluateHeaderCertificate(raw string, now time.Time, source, relayName, relaySubject string) evaluationResult {
+func (p *MtlsAuthPolicy) evaluateHeaderCertificate(values []string, now time.Time, source, relayName, relaySubject string) evaluationResult {
 	deny := evaluationResult{
 		authenticated: false, entryIndex: -1,
 		source: source, relayedBy: relayName, relaySubject: relaySubject,
 	}
 
-	leaf, err := decodeHeaderCertificate(raw)
+	// Several values for the header is never one identity: deny rather than
+	// pick one.
+	if len(values) != 1 {
+		deny.reason = reasonInvalidCert
+		return deny
+	}
+	leaf, err := decodeHeaderCertificate(values[0])
 	if err != nil {
 		deny.reason = reasonInvalidCert
 		return deny
@@ -447,6 +487,13 @@ func (p *MtlsAuthPolicy) evaluateHeaderCertificate(raw string, now time.Time, so
 	}
 
 	result := p.evaluateAcceptList(leaf, p.poolOnlyIntermediates(), now, "")
+	// No handshake verified this certificate, so the policy distinguishes the
+	// two ways it can reach no accept entry: it chains to no pooled authority
+	// at all (untrusted_chain), or it does but this API does not accept that
+	// authority (authority_not_accepted).
+	if result.reason == reasonAuthorityNotAccepted && !p.chainsToPool(leaf, now) {
+		result.reason = reasonUntrustedChain
+	}
 	result.source = source
 	result.relayedBy = relayName
 	result.relaySubject = relaySubject
@@ -547,12 +594,13 @@ func (p *MtlsAuthPolicy) evaluateAcceptList(leaf *x509.Certificate, intermediate
 
 // matchRelay reports whether the CONNECTION's own certificate (never the
 // header's) authenticates as one of this policy instance's relay entries:
-// mTLS presented, Envoy's own verdict positive, our own date re-check, and
+// Envoy's verdict positive (see connectionVerified), our own date re-check,
+// and
 // the leaf verifies against the relay's roots (Intermediates = pool + XFCC
 // chain, KeyUsages ExtKeyUsageAny — identical parameters to accept-entry
 // verification) and satisfies the relay's SAN narrowing if any.
 func (p *MtlsAuthPolicy) matchRelay(reqCtx *policy.RequestHeaderContext, tls *policy.DownstreamTLS, now time.Time) (*relayEntry, *x509.Certificate, bool) {
-	if tls == nil || !tls.MTLS || tls.PeerCertValid == nil || !*tls.PeerCertValid {
+	if !connectionVerified(tls) {
 		return nil, nil, false
 	}
 	leaf, err := parseCertificatePEM(tls.PeerCertificatePEM)
@@ -578,8 +626,8 @@ func (p *MtlsAuthPolicy) matchRelay(reqCtx *policy.RequestHeaderContext, tls *po
 }
 
 // logIgnoredHeader logs, at Debug, that a client-certificate header was
-// present but the connection did not authenticate as a relay — so the header
-// was ignored rather than trusted. Only the connection's own subject DN is
+// present but was never judged — the connection neither passed accept nor
+// matched a relay, and trustAny did not apply. Only the connection's own subject DN is
 // logged (never header contents or PEM), per GO-AUTH-003/authentication_
 // authorization.md's masked-logging requirement.
 func (p *MtlsAuthPolicy) logIgnoredHeader(tls *policy.DownstreamTLS) {
@@ -627,20 +675,22 @@ func authorityInPool(roots []*x509.Certificate, pool []*x509.Certificate) bool {
 	return false
 }
 
-// headerRawValue reads the configured client-certificate header from the
-// DOWNSTREAM SNAPSHOT (never live/mutated headers — see DownstreamRequest's
-// doc comment), so an earlier policy rewriting/removing the header can never
-// change this decision. An empty value is treated as absent.
-func (p *MtlsAuthPolicy) headerRawValue(reqCtx *policy.RequestHeaderContext) (string, bool) {
-	values := reqCtx.DownstreamRequest().Headers.Get(p.header.name)
-	if len(values) == 0 {
-		return "", false
+// headerValues returns the non-empty values of the configured
+// client-certificate header, or nil when header mode is off (the header is
+// then inert text). It reads the DOWNSTREAM SNAPSHOT (never live/mutated
+// headers — see DownstreamRequest's doc comment), so an earlier policy
+// rewriting/removing the header can never change this decision.
+func (p *MtlsAuthPolicy) headerValues(reqCtx *policy.RequestHeaderContext) []string {
+	if !p.headerModeOn() {
+		return nil
 	}
-	v := strings.TrimSpace(values[0])
-	if v == "" {
-		return "", false
+	var values []string
+	for _, v := range reqCtx.DownstreamRequest().Headers.Get(p.header.name) {
+		if v = strings.TrimSpace(v); v != "" {
+			values = append(values, v)
+		}
 	}
-	return v, true
+	return values
 }
 
 // intermediatesPool builds the path-building-only certificate pool used for
@@ -744,23 +794,20 @@ func (p *MtlsAuthPolicy) deriveRejectReason(tls *policy.DownstreamTLS, now time.
 		return reasonNotYetValid, leaf
 	}
 
-	// Not a date problem — check whether a path exists to ANY certificate in
-	// the gateway's whole client-CA pool (not just this API's narrower accept
-	// list), to distinguish "the chain genuinely doesn't reach a trusted
-	// authority" from some other reason Envoy rejected it.
-	pool := x509.NewCertPool()
-	for _, c := range p.pool {
-		pool.AddCert(c)
-	}
-	if _, err := leaf.Verify(x509.VerifyOptions{
-		Roots:         pool,
-		Intermediates: pool,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-		CurrentTime:   now,
-	}); err != nil {
+	// Not a date problem — distinguish "the chain genuinely doesn't reach a
+	// trusted authority" from some other reason Envoy rejected it.
+	if !p.chainsToPool(leaf, now) {
 		return reasonUntrustedChain, leaf
 	}
 	return reasonInvalidCert, leaf
+}
+
+// chainsToPool reports whether leaf verifies against ANY certificate in the
+// gateway's whole client-CA pool (not just this API's narrower accept list),
+// with the pool also serving as path-building material. Used only to choose
+// a deny reason, never to allow.
+func (p *MtlsAuthPolicy) chainsToPool(leaf *x509.Certificate, now time.Time) bool {
+	return verifyLeafAgainstRoots(leaf, p.pool, p.poolOnlyIntermediates(), now)
 }
 
 // chainCertificatesFromXFCC extracts every certificate in the Chain= element
@@ -820,16 +867,19 @@ func (p *MtlsAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Re
 	}
 
 	action := policy.UpstreamRequestHeaderModifications{}
-	// A header the gateway BELIEVED (source == header/bypass) is the one
-	// case forwardToBackend's opt-in means anything: the router already
-	// strips the header on every route when forwardToBackend is false, so
-	// there is nothing for this policy to do in that case. On a route where
-	// forwardToBackend is true, this policy must still remove the header
-	// whenever it did NOT believe it — a header the connection's own
-	// certificate simply carried past unexamined, or one from a
-	// non-relay/non-bypassed connection, never reaches upstream.
+	// forwardCertificate false keeps every certificate header away from this
+	// API's backend. Otherwise only the relayed header needs this policy's
+	// attention: the router already strips it on every route when
+	// forwardToBackend is off, and when forwardToBackend is on this policy
+	// must still remove it whenever it did NOT believe it (a header carried
+	// past an accepted connection, or one from a connection that was neither
+	// a relay nor covered by trustAny), so only a believed header reaches
+	// upstream.
 	believed := result.source == sourceHeader || result.source == sourceBypass
-	if p.header.forwardToBackend && !believed {
+	switch {
+	case !p.forwardCertificate:
+		action.HeadersToRemove = []string{xfccHeaderName, p.header.name}
+	case p.header.forwardToBackend && !believed:
 		action.HeadersToRemove = []string{p.header.name}
 	}
 	return action
@@ -1122,6 +1172,21 @@ func parseHeaderParam(raw interface{}) headerConfig {
 		cfg.forwardToBackend = forward
 	}
 	return cfg
+}
+
+// parseForwardCertificateParam parses the developer-facing
+// forwardCertificate parameter: absent means true; anything other than a
+// boolean is a GetPolicy error rather than a guess, so a malformed value
+// never silently forwards (or withholds) certificate headers.
+func parseForwardCertificateParam(raw interface{}) (bool, error) {
+	if raw == nil {
+		return true, nil
+	}
+	forward, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be true or false", forwardCertificateParam)
+	}
+	return forward, nil
 }
 
 // stringListParam reads an optional list-of-strings parameter. An absent or

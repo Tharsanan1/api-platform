@@ -392,6 +392,22 @@ func TestBuildPolicyChain_MtlsAuth_HeaderParam_CarriesRouterConfig(t *testing.T)
 	assert.Equal(t, true, header["forwardToBackend"])
 }
 
+func TestBuildPolicyChain_MtlsAuth_ForwardCertificate_PassesThroughUnchanged(t *testing.T) {
+	store := newFakeMtlsCertStore(clientCA(t, "auth-ca-a"))
+	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), store)
+
+	cfg := makeRestAPIStoredConfig([]api.Policy{mtlsAuthPolicy(map[string]interface{}{
+		"accept":             []interface{}{map[string]interface{}{"ca": "auth-ca-a"}},
+		"forwardCertificate": false,
+	})}, nil)
+
+	rdc, err := transformer.Transform(cfg)
+	require.NoError(t, err)
+	p := findPolicy(rdc, mtlsAuthTestRouteKey, config.MtlsAuthPolicyName)
+	require.NotNil(t, p)
+	assert.Equal(t, false, p.Params["forwardCertificate"])
+}
+
 func TestBuildPolicyChain_MtlsAuth_NilStore_NoInjection(t *testing.T) {
 	// mtlsCertStore deliberately passed as nil: injection is skipped entirely.
 	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, mtlsAuthDefs(), nil)

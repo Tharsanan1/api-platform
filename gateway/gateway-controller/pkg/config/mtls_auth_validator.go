@@ -19,6 +19,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"regexp"
 	"strings"
@@ -39,6 +40,13 @@ const (
 	WarningCodeMTLSAuthNotFirst         = "MTLS_AUTH_NOT_FIRST"
 	WarningCodeMTLSThumbprintNormalised = "MTLS_THUMBPRINT_NORMALISED"
 
+	// WarningCodeMTLSAcceptNamesRelayAuthority is raised for an accept entry
+	// whose authority is also pooled as a role: relay entry. Such an API
+	// authenticates that front proxy itself, so it never evaluates a
+	// certificate the proxy relays — legitimate, but easy to write by
+	// accident.
+	WarningCodeMTLSAcceptNamesRelayAuthority = "MTLS_ACCEPT_NAMES_RELAY_AUTHORITY"
+
 	// WarningCodeHeaderCertBypassActive is attached to every mtls-auth
 	// deploy response while
 	// router.downstream_tls.client_certificate_header.trust_any is true: the
@@ -57,6 +65,7 @@ var mtlsAuthAllowedParams = map[string]bool{
 	"onFailureStatusCode": true,
 	"errorMessageFormat":  true,
 	"errorMessage":        true,
+	"forwardCertificate":  true,
 }
 
 var mtlsAuthAllowedAcceptEntryParams = map[string]bool{
@@ -325,6 +334,15 @@ func (v *MtlsAuthValidator) validateParams(fieldPath string, params map[string]i
 		}
 	}
 
+	if forward, present := params["forwardCertificate"]; present {
+		if _, isBool := forward.(bool); !isBool {
+			errs = append(errs, ValidationError{
+				Field:   paramsPath + ".forwardCertificate",
+				Message: "forwardCertificate must be true or false",
+			})
+		}
+	}
+
 	acceptRaw, hasAccept := params["accept"]
 	if !hasAccept {
 		return errs
@@ -556,28 +574,61 @@ func unknownParamError(basePath, key string) ValidationError {
 	}
 }
 
-// nonRelayClientAuthorityNames returns the names of every usage: client
-// authority in the pool that is not a relay entry, in the order the store
-// returns them. This is the resolved-authority set an omitted `accept`
-// inherits, and the count used to decide whether the inheritance/unnarrowed
-// warnings apply.
-func (v *MtlsAuthValidator) nonRelayClientAuthorityNames() ([]string, error) {
+// clientAuthorityPool is the usage: client part of the certificate store as
+// the deploy-response resolution needs it: the non-relay authorities an
+// omitted accept inherits (in store order), every entry by name, and the
+// relay entries an accept entry might share an authority with.
+type clientAuthorityPool struct {
+	names  []string
+	byName map[string]*models.StoredCertificate
+	relays []*models.StoredCertificate
+}
+
+// loadClientAuthorityPool reads every usage: client row once. A store error
+// yields an empty pool: the deploy already validated, so the response then
+// simply carries no pool-derived echo or warnings.
+func (v *MtlsAuthValidator) loadClientAuthorityPool() clientAuthorityPool {
+	pool := clientAuthorityPool{byName: map[string]*models.StoredCertificate{}}
 	certs, err := v.store.ListCertificatesByUsage(models.CertificateUsageClient)
 	if err != nil {
-		return nil, err
+		return pool
 	}
-	names := make([]string, 0, len(certs))
 	for _, cert := range certs {
-		role := cert.Role
-		if role == "" {
-			role = models.CertificateRoleClient
-		}
-		if role == models.CertificateRoleRelay {
+		pool.byName[cert.Name] = cert
+		if cert.Role == models.CertificateRoleRelay {
+			pool.relays = append(pool.relays, cert)
 			continue
 		}
-		names = append(names, cert.Name)
+		pool.names = append(pool.names, cert.Name)
 	}
-	return names, nil
+	return pool
+}
+
+// relaySharingAuthority returns the first relay entry that shares an
+// authority with the named client entry, or nil. Two entries share an
+// authority when their stored certificate bytes are identical or their
+// identity certificates (the bottom of each stored chain) are equal.
+func (p clientAuthorityPool) relaySharingAuthority(caName string) *models.StoredCertificate {
+	client, ok := p.byName[caName]
+	if !ok || len(client.Certificate) == 0 {
+		return nil
+	}
+	clientIdentity, clientErr := clientca.IdentityCertificate(client.Certificate)
+	for _, relay := range p.relays {
+		if len(relay.Certificate) == 0 {
+			continue
+		}
+		if bytes.Equal(client.Certificate, relay.Certificate) {
+			return relay
+		}
+		if clientErr != nil {
+			continue
+		}
+		if relayIdentity, err := clientca.IdentityCertificate(relay.Certificate); err == nil && clientIdentity.Equal(relayIdentity) {
+			return relay
+		}
+	}
+	return nil
 }
 
 // ResolveMtlsAuthForResponse computes the warnings and the echoed/resolved
@@ -596,15 +647,12 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 		return apiConfig, nil
 	}
 
-	poolNames, err := v.nonRelayClientAuthorityNames()
-	if err != nil {
-		poolNames = nil
-	}
+	pool := v.loadClientAuthorityPool()
 
 	var warnings []clientca.Warning
 
 	if apiConfig.Spec.Policies != nil {
-		resolved, w := v.resolvePolicyList(*apiConfig.Spec.Policies, "spec.policies", poolNames)
+		resolved, w := v.resolvePolicyList(*apiConfig.Spec.Policies, "spec.policies", pool)
 		apiConfig.Spec.Policies = &resolved
 		warnings = append(warnings, w...)
 	}
@@ -615,7 +663,7 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 		if newOps[i].Policies == nil {
 			continue
 		}
-		resolved, w := v.resolvePolicyList(*newOps[i].Policies, fmt.Sprintf("spec.operations[%d].policies", i), poolNames)
+		resolved, w := v.resolvePolicyList(*newOps[i].Policies, fmt.Sprintf("spec.operations[%d].policies", i), pool)
 		newOps[i].Policies = &resolved
 		warnings = append(warnings, w...)
 	}
@@ -636,7 +684,7 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 // (either spec.policies or a single operation's policies), and reports
 // MTLS_AUTH_NOT_FIRST for any of the other auth policies preceding it in
 // that same chain.
-func (v *MtlsAuthValidator) resolvePolicyList(policies []api.Policy, listPath string, poolNames []string) ([]api.Policy, []clientca.Warning) {
+func (v *MtlsAuthValidator) resolvePolicyList(policies []api.Policy, listPath string, pool clientAuthorityPool) ([]api.Policy, []clientca.Warning) {
 	resolved := make([]api.Policy, len(policies))
 	copy(resolved, policies)
 
@@ -667,7 +715,7 @@ func (v *MtlsAuthValidator) resolvePolicyList(policies []api.Policy, listPath st
 			continue
 		}
 		fieldPath := fmt.Sprintf("%s[%d]", listPath, i)
-		newPolicy, w := v.resolveOnePolicy(p, fieldPath, poolNames)
+		newPolicy, w := v.resolveOnePolicy(p, fieldPath, pool)
 		resolved[i] = newPolicy
 		warnings = append(warnings, w...)
 	}
@@ -676,9 +724,12 @@ func (v *MtlsAuthValidator) resolvePolicyList(policies []api.Policy, listPath st
 }
 
 // resolveOnePolicy resolves a single mtls-auth policy's accept list for the
-// response echo and reports MTLS_ACCEPT_INHERITS_POOL,
-// MTLS_ACCEPT_UNNARROWED and MTLS_THUMBPRINT_NORMALISED as applicable.
-func (v *MtlsAuthValidator) resolveOnePolicy(p api.Policy, fieldPath string, poolNames []string) (api.Policy, []clientca.Warning) {
+// response echo and reports MTLS_ACCEPT_INHERITS_POOL (accept omitted while
+// more than one authority is pooled), MTLS_ACCEPT_UNNARROWED (an explicit
+// entry with neither match nor thumbprints, whatever the pool size),
+// MTLS_ACCEPT_NAMES_RELAY_AUTHORITY (an explicit entry whose authority is
+// also a relay entry's) and MTLS_THUMBPRINT_NORMALISED as applicable.
+func (v *MtlsAuthValidator) resolveOnePolicy(p api.Policy, fieldPath string, pool clientAuthorityPool) (api.Policy, []clientca.Warning) {
 	params := paramsOrEmpty(p.Params)
 	newParams := make(map[string]interface{}, len(params))
 	for k, val := range params {
@@ -690,18 +741,18 @@ func (v *MtlsAuthValidator) resolveOnePolicy(p api.Policy, fieldPath string, poo
 
 	acceptRaw, hasAccept := params["accept"]
 	if !hasAccept {
-		resolvedAccept := make([]interface{}, 0, len(poolNames))
-		for _, name := range poolNames {
+		resolvedAccept := make([]interface{}, 0, len(pool.names))
+		for _, name := range pool.names {
 			resolvedAccept = append(resolvedAccept, map[string]interface{}{"ca": name})
 		}
 		newParams["accept"] = resolvedAccept
-		if len(poolNames) > 1 {
+		if len(pool.names) > 1 {
 			warnings = append(warnings, clientca.Warning{
 				Code:  WarningCodeMTLSAcceptInheritsPool,
 				Field: acceptPath,
 				Message: fmt.Sprintf(
 					"accept is omitted and the pool holds %d authorities; this API accepts certificates from all of them",
-					len(poolNames)),
+					len(pool.names)),
 			})
 		}
 	} else if acceptSlice, ok := acceptRaw.([]interface{}); ok {
@@ -720,13 +771,24 @@ func (v *MtlsAuthValidator) resolveOnePolicy(p api.Policy, fieldPath string, poo
 
 			_, hasMatch := entryMap["match"]
 			tpRaw, hasThumbprints := entryMap["thumbprints"]
-			if !hasMatch && !hasThumbprints && len(poolNames) > 1 {
+			if !hasMatch && !hasThumbprints {
 				warnings = append(warnings, clientca.Warning{
 					Code:  WarningCodeMTLSAcceptUnnarrowed,
 					Field: entryPath,
 					Message: "this entry has neither match nor thumbprints, so it accepts any certificate from this authority; " +
-						"narrow it with match or thumbprints, since the pool holds other authorities too",
+						"narrow it with match or thumbprints",
 				})
+			}
+
+			if caName, ok := entryMap["ca"].(string); ok {
+				if relay := pool.relaySharingAuthority(caName); relay != nil {
+					warnings = append(warnings, clientca.Warning{
+						Code:  WarningCodeMTLSAcceptNamesRelayAuthority,
+						Field: entryPath + ".ca",
+						Message: fmt.Sprintf("%s is also pooled as the relay %s; this API authenticates that front proxy itself "+
+							"and never evaluates a certificate it relays", caName, relay.Name),
+					})
+				}
 			}
 
 			if hasThumbprints {

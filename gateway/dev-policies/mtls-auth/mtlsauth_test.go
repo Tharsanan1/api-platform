@@ -536,7 +536,7 @@ func reqCtxWithTLSAndHeader(tls *policy.DownstreamTLS, headerName, headerValue s
 
 // downstreamTLSFromLeaf builds the DownstreamTLS Envoy would report for a
 // connection that presented leaf, with valid pinning Envoy's own
-// peer_certificate_valid verdict (Step 3 in evaluate()).
+// peer_certificate_valid verdict.
 func downstreamTLSFromLeaf(leaf *testEntity, valid bool) *policy.DownstreamTLS {
 	return &policy.DownstreamTLS{
 		MTLS:               true,
@@ -606,7 +606,7 @@ func assertAuthenticated(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.Request
 	return result
 }
 
-// ─── Connection-level gating (Steps 1-3) ─────────────────────────────────────
+// ─── Connection-level gating ─────────────────────────────────────────────────
 
 // TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating guards evaluate()'s
 // fail-closed handling of the three ways the gateway can assert "nothing
@@ -631,7 +631,7 @@ func TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating(t *testing.T) {
 	})
 }
 
-// ─── Envoy already rejected: deriveRejectReason (Step 3 false branch) ────────
+// ─── Envoy already rejected: deriveRejectReason ──────────────────────────────
 
 // TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason covers the three
 // deriveRejectReason outcomes reachable when tls.PeerCertValid is a non-nil
@@ -766,8 +766,8 @@ func TestMtlsAuthPolicy_Evaluate_IntermediateViaXFCCChain(t *testing.T) {
 		rogueRoot := newRootCA(t, "Rogue Root CA")
 		rogueLeaf := newLeaf(t, rogueRoot, "client-rogue", certOpts{})
 		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-		// PeerCertValid=true here isolates Steps 5-6's own chain-building logic
-		// from Step 3's Envoy-verdict gate, specifically to demonstrate that a
+		// PeerCertValid=true here isolates this policy's own chain-building logic
+		// from Envoy's verdict, specifically to demonstrate that a
 		// self-signed CA certificate arriving via the XFCC Chain element is
 		// path-building material only — it never gets treated as a Root, no
 		// matter how "complete" a chain it appears to close.
@@ -1038,10 +1038,10 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 		}
 	})
 
-	t.Run("relay connection, header carries a cert from an unaccepted authority: denied", func(t *testing.T) {
+	t.Run("relay connection, header carries a cert from an unpooled authority: denied untrusted_chain", func(t *testing.T) {
 		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
 		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(unacceptedLeaf))
-		assertDenied(t, p, reqCtx, reasonAuthorityNotAccepted)
+		assertDenied(t, p, reqCtx, reasonUntrustedChain)
 	})
 
 	t.Run("relay connection, header carries an expired cert: denied", func(t *testing.T) {
@@ -1086,7 +1086,7 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 
 	t.Run("trustAny bypass: no connection certificate, header carries an accepted cert: authenticated, source bypass", func(t *testing.T) {
 		p := mustBuildRelayPolicy(t, pool, acceptEntries, nil, map[string]interface{}{"trustAny": true})
-		reqCtx := reqCtxWithTLSAndHeader(nil, defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+		reqCtx := reqCtxWithTLSAndHeader(&policy.DownstreamTLS{MTLS: false}, defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
 		result := assertAuthenticated(t, p, reqCtx, 0)
 		if result.source != sourceBypass {
 			t.Errorf("source = %q, want %q", result.source, sourceBypass)

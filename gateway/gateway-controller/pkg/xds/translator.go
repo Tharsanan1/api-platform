@@ -2452,11 +2452,11 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 
 	// Configure SSL verification unless disabled
 	if !t.routerConfig.Upstream.TLS.DisableSslVerification {
-		// Priority order for trusted CA certificates:
 		// Trust source, in order: per-upstream trustedCAs; an error for a tls
-		// block with no trust source; the gateway bundle via SDS; the
-		// per-endpoint certificate; the trusted cert path; Envoy's system
-		// store. The last three apply only without a tls block.
+		// block with no trust source; otherwise the gateway bundle via SDS.
+		// An empty bundle leaves an upstream without a tls block with no
+		// trusted authority, so its handshake fails until an upstream
+		// certificate is added.
 		switch {
 		case hasTLSBlock && len(tlsOpts.TrustedCANames) > 0 && validationSecretName != "":
 			sdsConfig := &core.ConfigSource{
@@ -2485,7 +2485,7 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 				"upstream %q: tls block requires a trust source (trustedCAs, or at least one upstream certificate in the gateway bundle) but none is configured",
 				address)
 
-		case t.certStore != nil:
+		default:
 			// Use SDS to dynamically fetch certificates, riding the same ADS
 			// stream Envoy already has open for LDS/CDS/RDS (bootstrap
 			// xds_cluster, see envoy-bootstrap.yaml's dynamic_resources).
@@ -2497,10 +2497,7 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 			// connection's own TLS is entirely gateway-runtime's concern,
 			// configured in its own bootstrap (docker-entrypoint.sh +
 			// config-override.yaml's xds_cluster), independent of this
-			// process. A prior version of this pushed a second CDS cluster
-			// ("sds_cluster") that duplicated xds_cluster's host:port and
-			// required this process to embed gateway-runtime-local file
-			// paths -- removed in favor of this ADS-based reference.
+			// process.
 			sdsConfig := &core.ConfigSource{
 				ResourceApiVersion: core.ApiVersion_V3,
 				ConfigSourceSpecifier: &core.ConfigSource_Ads{
@@ -2522,30 +2519,6 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 			t.logger.Debug("Using SDS for upstream TLS certificates",
 				slog.String("upstream", address),
 				slog.String("secret_name", SecretNameUpstreamCA))
-
-		case len(certificate) > 0:
-			// Use per-upstream certificate if provided.
-			upstreamTLSContext.CommonTlsContext.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContext{
-				ValidationContext: &tlsv3.CertificateValidationContext{
-					TrustedCa: &core.DataSource{
-						Specifier: &core.DataSource_InlineBytes{
-							InlineBytes: certificate,
-						},
-					},
-				},
-			}
-
-		case t.routerConfig.Upstream.TLS.TrustedCertPath != "":
-			// Fall back to system cert path.
-			upstreamTLSContext.CommonTlsContext.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContext{
-				ValidationContext: &tlsv3.CertificateValidationContext{
-					TrustedCa: &core.DataSource{
-						Specifier: &core.DataSource_Filename{
-							Filename: t.routerConfig.Upstream.TLS.TrustedCertPath,
-						},
-					},
-				},
-			}
 		}
 
 		// Every branch reachable with a tls block sets a

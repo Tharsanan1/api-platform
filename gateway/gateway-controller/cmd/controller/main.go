@@ -387,32 +387,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize SDS secret manager if custom certificates are configured
-	var sdsSecretManager *xds.SDSSecretManager
+	// The SDS secret manager serves the listener certificate, gateway
+	// identities and the upstream trust bundle from the certificate store.
+	// Without an encryption provider, gateway identity secrets fail to build
+	// rather than serve an undecrypted key.
 	translator := snapshotManager.GetTranslator()
-	if translator != nil && translator.GetCertStore() != nil {
-		// Without an encryption provider, gateway identity secrets fail to
-		// build rather than serve an undecrypted key.
-		translator.GetCertStore().SetEncryptionManager(encryptionProviderManager)
-
-		// Use the same cache and node ID as the main xDS to ensure Envoy can fetch secrets
-		sdsSecretManager = xds.NewSDSSecretManager(
-			translator.GetCertStore(),
-			snapshotManager.GetCache(),
-			"router-node", // Same node ID as main xDS
-			log,
-			cfg.Router.DownstreamTLS.CertPath,
-			cfg.Router.DownstreamTLS.KeyPath,
-			cfg.Router.HTTPSEnabled,
-		)
-		// Update SDS secrets with current certificates
-		if err := sdsSecretManager.UpdateSecrets(); err != nil {
-			log.Warn("Failed to initialize SDS secrets", slog.Any("error", err))
-		} else {
-			log.Info("SDS secret manager initialized successfully")
-			// Set the SDS secret manager in snapshot manager so secrets are included in snapshots
-			snapshotManager.SetSDSSecretManager(sdsSecretManager)
-		}
+	certStore := translator.GetCertStore()
+	certStore.SetEncryptionManager(encryptionProviderManager)
+	// Same cache and node ID as the main xDS, so Envoy fetches secrets on the
+	// same stream.
+	sdsSecretManager := xds.NewSDSSecretManager(
+		certStore,
+		snapshotManager.GetCache(),
+		"router-node",
+		log,
+		cfg.Router.DownstreamTLS.CertPath,
+		cfg.Router.DownstreamTLS.KeyPath,
+		cfg.Router.HTTPSEnabled,
+	)
+	if err := sdsSecretManager.UpdateSecrets(); err != nil {
+		log.Warn("Failed to initialize SDS secrets", slog.Any("error", err))
+	} else {
+		log.Info("SDS secret manager initialized successfully")
+		snapshotManager.SetSDSSecretManager(sdsSecretManager)
 	}
 
 	// Build transformer registry for StoredConfig → RuntimeDeployConfig conversion.

@@ -251,6 +251,9 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 		}
 	}
 
+	clientAuthorities, err := v.store.ListCertificatesByUsage(models.CertificateUsageClient)
+	poolEmpty := err != nil || countClientAuthorities(clientAuthorities) == 0
+
 	for _, occ := range occs {
 		if occ.conditional {
 			errs = append(errs, ValidationError{
@@ -266,13 +269,11 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 			})
 		}
 
-		clientAuthorities, err := v.store.ListCertificatesByUsage(models.CertificateUsageClient)
-		if err != nil || countClientAuthorities(clientAuthorities) == 0 {
+		if poolEmpty {
 			errs = append(errs, ValidationError{
 				Field:   occ.fieldPath,
 				Message: "mtls-auth requires at least one client authority; add one with POST /certificates and usage: client",
 			})
-			continue
 		}
 
 		errs = append(errs, v.validateParams(occ.fieldPath, occ.params)...)
@@ -382,11 +383,22 @@ func (v *MtlsAuthValidator) validateAcceptEntryCA(entryPath string, entry map[st
 		}}
 	}
 
-	usage := cert.EffectiveUsage()
-	if usage != models.CertificateUsageClient {
+	switch cert.EffectiveUsage() {
+	case models.CertificateUsageClient:
+	case models.CertificateUsageUpstream:
 		return []ValidationError{{
 			Field:   caPath,
 			Message: fmt.Sprintf("%s is a backend trust certificate (usage: upstream); accept takes usage: client authorities", caName),
+		}}
+	case models.CertificateUsageIdentity:
+		return []ValidationError{{
+			Field:   caPath,
+			Message: fmt.Sprintf("%s is a gateway identity (usage: identity); accept takes usage: client authorities", caName),
+		}}
+	default:
+		return []ValidationError{{
+			Field:   caPath,
+			Message: fmt.Sprintf("%s has an unrecognized usage; accept takes usage: client authorities", caName),
 		}}
 	}
 

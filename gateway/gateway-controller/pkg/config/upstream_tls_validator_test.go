@@ -122,6 +122,30 @@ func TestUpstreamTLSValidator_ValidateRestAPI_RefusalOutline(t *testing.T) {
 			field:   "spec.upstreamDefinitions[0].tls.mode",
 			message: "unknown parameter mode",
 		},
+		{
+			name:    "identity that is not a string",
+			def:     tlsUpstreamDef(map[string]interface{}{"identity": 42.0}, "https://mtls-backend-a:8443"),
+			field:   "spec.upstreamDefinitions[0].tls.identity",
+			message: "identity must be a string",
+		},
+		{
+			name:    "trustedCAs that is not a list",
+			def:     tlsUpstreamDef(map[string]interface{}{"trustedCAs": "out-backend-ca"}, "https://mtls-backend-a:8443"),
+			field:   "spec.upstreamDefinitions[0].tls.trustedCAs",
+			message: "trustedCAs must be a list of strings",
+		},
+		{
+			name:    "trustedCAs element that is not a string",
+			def:     tlsUpstreamDef(map[string]interface{}{"trustedCAs": []interface{}{"out-backend-ca", true}}, "https://mtls-backend-a:8443"),
+			field:   "spec.upstreamDefinitions[0].tls.trustedCAs[1]",
+			message: "trustedCAs must be a list of strings",
+		},
+		{
+			name:    "verifyHostName that is not a boolean",
+			def:     tlsUpstreamDef(map[string]interface{}{"verifyHostName": "false"}, "https://mtls-backend-a:8443"),
+			field:   "spec.upstreamDefinitions[0].tls.verifyHostName",
+			message: "verifyHostName must be true or false",
+		},
 	}
 
 	for _, tt := range tests {
@@ -209,6 +233,51 @@ func TestUpstreamTLSValidator_ValidateRestAPI_MixedHttpHttpsTargets_NamesTheHttp
 	}
 	if !hasError(errs, "spec.upstreamDefinitions[0].upstreams[1].url", want) {
 		t.Fatalf("expected error naming the http:// target at index 1, got %+v", errs)
+	}
+}
+
+func TestUpstreamTLSValidator_ValidateRestAPI_WrongTypedTrustedCAs_NoEmptyListError(t *testing.T) {
+	validator := NewUpstreamTLSValidator(newFakeMtlsCertStore(), false)
+
+	for name, value := range map[string]interface{}{
+		"not a list":               "out-backend-ca",
+		"list of only non-strings": []interface{}{1.0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(
+				tlsUpstreamDef(map[string]interface{}{"trustedCAs": value}, "https://mtls-backend-a:8443"),
+			))
+			if hasError(errs, "spec.upstreamDefinitions[0].tls.trustedCAs",
+				"omit trustedCAs to use the gateway trust bundle, or list at least one certificate") {
+				t.Fatalf("a wrong-typed trustedCAs must not also be reported as an empty list, got %+v", errs)
+			}
+		})
+	}
+}
+
+func TestUpstreamTLSValidator_ValidateRestAPI_TrustedCAsUnknownUsage_Rejected(t *testing.T) {
+	store := newFakeMtlsCertStore(&models.StoredCertificate{Name: "out-odd", Usage: "archive"})
+	validator := NewUpstreamTLSValidator(store, false)
+
+	errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
+		"trustedCAs": []interface{}{"out-odd"},
+	}, "https://mtls-backend-a:8443")))
+
+	want := "out-odd has an unrecognized usage; trustedCAs takes usage: upstream certificates"
+	if !hasError(errs, "spec.upstreamDefinitions[0].tls.trustedCAs[0]", want) {
+		t.Fatalf("expected error field=%q message=%q, got %+v", "spec.upstreamDefinitions[0].tls.trustedCAs[0]", want, errs)
+	}
+}
+
+func TestUpstreamTLSValidator_ValidateRestAPI_UppercaseHTTPSScheme_Accepted(t *testing.T) {
+	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"))
+	validator := NewUpstreamTLSValidator(store, false)
+
+	errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(
+		tlsUpstreamDef(map[string]interface{}{"identity": "out-identity-a"}, "HTTPS://mtls-backend-a:8443"),
+	))
+	if len(errs) != 0 {
+		t.Fatalf("expected an HTTPS:// target to be accepted, got %+v", errs)
 	}
 }
 

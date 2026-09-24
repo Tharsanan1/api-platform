@@ -725,14 +725,33 @@ var httpHeaderTokenPattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9
 // falls back to the same name.
 const DefaultClientCertificateHeaderName = "X-WSO2-CLIENT-CERTIFICATE"
 
+// reservedClientCertificateHeaderNames are header names, lower-cased, that
+// carry proxy or framing semantics and so cannot relay a client certificate.
+var reservedClientCertificateHeaderNames = map[string]bool{
+	"x-forwarded-client-cert": true,
+	"host":                    true,
+	"connection":              true,
+	"content-length":          true,
+	"transfer-encoding":       true,
+	"te":                      true,
+	"upgrade":                 true,
+	"keep-alive":              true,
+	"proxy-connection":        true,
+	"trailer":                 true,
+}
+
 // ValidateClientCertificateHeaderName reports whether name is a valid HTTP
-// header token. An empty name is accepted as not set.
+// header token that is free to relay a client certificate. An empty name is
+// accepted as not set.
 func ValidateClientCertificateHeaderName(name string) error {
 	if name == "" {
 		return nil
 	}
 	if !httpHeaderTokenPattern.MatchString(name) {
 		return fmt.Errorf("router.downstream_tls.client_certificate_header.name %q is not a valid HTTP header name", name)
+	}
+	if reservedClientCertificateHeaderNames[strings.ToLower(name)] {
+		return fmt.Errorf("%s cannot be used as the client certificate header", name)
 	}
 	return nil
 }

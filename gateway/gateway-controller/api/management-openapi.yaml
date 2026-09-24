@@ -926,7 +926,7 @@ paths:
           description: Filter the list to a single usage. Omit to list all certificates regardless of usage.
           schema:
             type: string
-            enum: [ upstream, client ]
+            enum: [ upstream, client, identity ]
       responses:
         "200":
           description: List of certificates
@@ -1096,9 +1096,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: |
-            The client-CA authority cannot be removed: it is explicitly named
-            in a deployed API's accept list, or it is the pool's last
-            non-relay authority and a deployed API still attaches mtls-auth.
+            The certificate is still referenced by a deployed API and cannot
+            be removed: a client authority named in an mtls-auth accept list
+            (or the pool's last non-relay authority while a deployed API still
+            attaches mtls-auth), an upstream certificate named in an upstream
+            definition's tls.trustedCAs, or a gateway identity named in an
+            upstream definition's tls.identity.
           content:
             application/json:
               schema:
@@ -5447,6 +5450,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CertificateResponse"
+        totalCount:
+          type: integer
+          description: Total number of certificate files
+          example: 3
+        totalBytes:
+          type: integer
+          description: Total bytes of all certificate files
+          example: 221599
+        status:
+          type: string
+          example: success
 
     UpstreamTLSTestBackend:
       type: object
@@ -5489,17 +5503,6 @@ components:
           type: string
           nullable: true
           description: Raw TLS error string, or null.
-        totalCount:
-          type: integer
-          description: Total number of certificate files
-          example: 3
-        totalBytes:
-          type: integer
-          description: Total bytes of all certificate files
-          example: 221599
-        status:
-          type: string
-          example: success
 
     APIKeyListResponse:
       type: object

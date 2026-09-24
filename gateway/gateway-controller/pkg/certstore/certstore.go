@@ -138,9 +138,10 @@ func (cs *CertStore) LoadCertificates() ([]byte, error) {
 	// An empty bundle is a valid state: the store still serves the listener
 	// certificate, client-CA pool and gateway identities over SDS, and an
 	// upstream definition that needs trust is refused at translation until
-	// a certificate exists. It is loud, because backends are unverified.
+	// a certificate exists. It is loud, because every HTTPS upstream that
+	// relies on the gateway bundle fails its handshake meanwhile.
 	if certBuffer.Len() == 0 {
-		cs.logger.Warn("No upstream trust certificates loaded; backends are not verified until an upstream certificate is added",
+		cs.logger.Warn("No upstream trust certificates loaded; HTTPS upstreams without their own trustedCAs will fail until an upstream trust certificate is added",
 			slog.String("custom_certs_path", cs.certsDir),
 			slog.String("system_cert_path", cs.systemCertPath))
 	}

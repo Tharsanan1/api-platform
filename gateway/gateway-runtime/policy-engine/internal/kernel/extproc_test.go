@@ -593,21 +593,25 @@ func TestInitializeExecutionContext_WithPolicyChain(t *testing.T) {
 // =============================================================================
 
 // TestExtractDownstreamTLS_AttributesNil guards that a nil attributes map
-// still yields a non-nil DownstreamTLS with MTLS false.
+// yields a nil DownstreamTLS, so a policy sees the attributes as absent.
 func TestExtractDownstreamTLS_AttributesNil(t *testing.T) {
-	tls := extractDownstreamTLS(nil)
-
-	require.NotNil(t, tls)
-	assert.False(t, tls.MTLS)
-	assert.Nil(t, tls.PeerCertValid)
+	assert.Nil(t, extractDownstreamTLS(nil))
 }
 
 // TestExtractDownstreamTLS_ExtProcFilterAbsent covers a map with no ext_proc
-// entry: the same non-nil, MTLS-false outcome.
+// entry: the same nil outcome.
 func TestExtractDownstreamTLS_ExtProcFilterAbsent(t *testing.T) {
 	attrs := map[string]*structpb.Struct{
 		"some.other.filter": {Fields: map[string]*structpb.Value{"x": structpb.NewStringValue("y")}},
 	}
+
+	assert.Nil(t, extractDownstreamTLS(attrs))
+}
+
+// TestExtractDownstreamTLS_ExtProcFilterEmpty covers an ext_proc entry with
+// no fields: the struct exists, so the result is a non-nil, MTLS-false value.
+func TestExtractDownstreamTLS_ExtProcFilterEmpty(t *testing.T) {
+	attrs := map[string]*structpb.Struct{constants.ExtProcFilter: {}}
 
 	tls := extractDownstreamTLS(attrs)
 

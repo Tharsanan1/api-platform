@@ -33,8 +33,9 @@ import (
 // fakeMtlsCertStore is a minimal, in-memory MtlsAuthCertificateStore for
 // tests: no database involved, just the two lookups the validator needs.
 type fakeMtlsCertStore struct {
-	byUsage map[string][]*models.StoredCertificate
-	byName  map[string]*models.StoredCertificate
+	byUsage   map[string][]*models.StoredCertificate
+	byName    map[string]*models.StoredCertificate
+	listCalls int
 }
 
 func newFakeMtlsCertStore(certs ...*models.StoredCertificate) *fakeMtlsCertStore {
@@ -62,6 +63,7 @@ func (s *fakeMtlsCertStore) GetCertificateByName(name string) (*models.StoredCer
 }
 
 func (s *fakeMtlsCertStore) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
+	s.listCalls++
 	return s.byUsage[usage], nil
 }
 
@@ -783,5 +785,60 @@ func TestMtlsAuthValidator_PoolOfRelaysOnlyCountsAsEmpty(t *testing.T) {
 	}
 	if !strings.Contains(errs[0].Message, "requires at least one client authority") {
 		t.Errorf("message: got %q", errs[0].Message)
+	}
+}
+
+func TestMtlsAuthValidator_ValidateRestAPI_PoolListedOncePerAPI(t *testing.T) {
+	store := newFakeMtlsCertStore(clientCA("listener-partner-a"))
+	v := NewMtlsAuthValidator(store, true, false)
+	cfg := restAPIWithAPILevelPolicies(mtlsPolicy(nil), mtlsPolicy(nil))
+
+	v.ValidateRestAPI(cfg)
+
+	if store.listCalls != 1 {
+		t.Fatalf("expected the client authority pool to be listed once, got %d", store.listCalls)
+	}
+}
+
+func TestMtlsAuthValidator_ValidateRestAPI_EmptyPool_ParamsStillValidated(t *testing.T) {
+	v := NewMtlsAuthValidator(newFakeMtlsCertStore(), true, false)
+	cfg := restAPIWithAPILevelPolicies(mtlsPolicy(map[string]interface{}{"acept": []interface{}{}}))
+
+	errs := v.ValidateRestAPI(cfg)
+
+	if !hasError(errs, "spec.policies[0]",
+		"mtls-auth requires at least one client authority; add one with POST /certificates and usage: client") {
+		t.Fatalf("expected the empty-pool error, got %+v", errs)
+	}
+	if !hasError(errs, "spec.policies[0].params.acept", "unknown parameter acept") {
+		t.Fatalf("expected the misspelled parameter to be reported alongside the empty pool, got %+v", errs)
+	}
+}
+
+func TestMtlsAuthValidator_ValidateRestAPI_AcceptNamesNonClientUsage(t *testing.T) {
+	store := newFakeMtlsCertStore(
+		clientCA("listener-partner-a"),
+		&models.StoredCertificate{Name: "out-identity-a", Usage: models.CertificateUsageIdentity},
+		&models.StoredCertificate{Name: "listener-odd", Usage: "archive"},
+	)
+	v := NewMtlsAuthValidator(store, true, false)
+
+	tests := []struct {
+		ca      string
+		message string
+	}{
+		{ca: "out-identity-a", message: "out-identity-a is a gateway identity (usage: identity); accept takes usage: client authorities"},
+		{ca: "listener-odd", message: "listener-odd has an unrecognized usage; accept takes usage: client authorities"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.ca, func(t *testing.T) {
+			cfg := restAPIWithAPILevelPolicies(mtlsPolicy(map[string]interface{}{
+				"accept": []interface{}{map[string]interface{}{"ca": tt.ca}},
+			}))
+			errs := v.ValidateRestAPI(cfg)
+			if !hasError(errs, "spec.policies[0].params.accept[0].ca", tt.message) {
+				t.Fatalf("expected %q, got %+v", tt.message, errs)
+			}
+		})
 	}
 }

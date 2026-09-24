@@ -798,17 +798,15 @@ func (s *ExternalProcessorServer) extractRouteKey(req *extprocv3.ProcessingReque
 }
 
 // extractDownstreamTLS reads the connection.* ext_proc attributes into a
-// non-nil policy.DownstreamTLS. PeerCertValid stays nil unless Envoy sent a
-// verdict. Never log PeerCertificatePEM or SHA256Thumbprint.
+// policy.DownstreamTLS, or returns nil when Envoy sent no ext_proc attributes
+// at all. PeerCertValid stays nil unless Envoy sent a verdict. Never log
+// PeerCertificatePEM or SHA256Thumbprint.
 func extractDownstreamTLS(attrs map[string]*structpb.Struct) *policy.DownstreamTLS {
-	tls := &policy.DownstreamTLS{}
-	if attrs == nil {
-		return tls
-	}
 	extProcAttrs, ok := attrs[constants.ExtProcFilter]
-	if !ok || extProcAttrs.Fields == nil {
-		return tls
+	if !ok || extProcAttrs == nil {
+		return nil
 	}
+	tls := &policy.DownstreamTLS{}
 	fields := extProcAttrs.Fields
 
 	if v, ok := fields[constants.ExtProcAttrConnectionMTLS]; ok {

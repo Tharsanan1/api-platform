@@ -377,20 +377,46 @@ func main() {
 		os.Exit(1)
 	}
 
-	snapshotManager := xds.NewSnapshotManager(configStore, log, &cfg.Router, db, cfg)
+	// A certificate store that fails to load is a startup failure.
+	snapshotManager, err := xds.NewSnapshotManager(configStore, log, &cfg.Router, db, cfg)
+	if err != nil {
+		log.Error("Refusing to start: certificate store failed to initialize", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	// Wire the WebSub xDS translation hooks into the Envoy translator.
-	snapshotManager.GetTranslator().SetEventGatewayXDSHooks(translator.New(eventGatewayCfg))
-
-	var sdsSecretManager *xds.SDSSecretManager
 	xdsTranslator := snapshotManager.GetTranslator()
-	if xdsTranslator != nil && xdsTranslator.GetCertStore() != nil {
-		sdsSecretManager = xds.NewSDSSecretManager(xdsTranslator.GetCertStore(), snapshotManager.GetCache(), "router-node", log)
-		if err := sdsSecretManager.UpdateSecrets(); err != nil {
-			log.Warn("Failed to initialize SDS secrets", slog.Any("error", err))
-		} else {
-			snapshotManager.SetSDSSecretManager(sdsSecretManager)
-		}
+	xdsTranslator.SetEventGatewayXDSHooks(translator.New(eventGatewayCfg))
+
+	// Publish the client authority pool so the policy engine holds it before
+	// any API is served.
+	clientAuthorities := utils.NewClientAuthorityPublisher(db, lazyResourceXDSManager)
+	if err := clientAuthorities.Publish(""); err != nil {
+		log.Error("Refusing to start: client certificate authorities could not be published", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	// The SDS secret manager serves the listener certificate, gateway
+	// identities and the upstream trust bundle from the certificate store.
+	// Without an encryption provider, gateway identity secrets fail to build
+	// rather than serve an undecrypted key.
+	certStore := xdsTranslator.GetCertStore()
+	certStore.SetEncryptionManager(encryptionProviderManager)
+	// Same cache and node ID as the main xDS, so Envoy fetches secrets on the
+	// same stream.
+	sdsSecretManager := xds.NewSDSSecretManager(
+		certStore,
+		snapshotManager.GetCache(),
+		"router-node",
+		log,
+		cfg.Router.DownstreamTLS.CertPath,
+		cfg.Router.DownstreamTLS.KeyPath,
+		cfg.Router.HTTPSEnabled,
+	)
+	if err := sdsSecretManager.UpdateSecrets(); err != nil {
+		log.Warn("Failed to initialize SDS secrets", slog.Any("error", err))
+	} else {
+		snapshotManager.SetSDSSecretManager(sdsSecretManager)
 	}
 
 	// Build the transformer registry and wire it into the Envoy translator before
@@ -494,7 +520,7 @@ func main() {
 	}
 
 	validator := coreconfig.NewAPIValidator()
-	policyValidator := coreconfig.NewPolicyValidator(policyDefinitions)
+	policyValidator := coreconfig.NewPolicyValidator(policyDefinitions, nil)
 	validator.SetPolicyValidator(policyValidator)
 
 	// Build the single shared outbound *http.Client used by every control-plane /
@@ -573,7 +599,7 @@ func main() {
 	}
 
 	apiServer, err := handlers.NewAPIServer(
-		configStore, db, snapshotManager, policyManager, lazyResourceXDSManager, log, cpClient,
+		configStore, db, snapshotManager, policyManager, lazyResourceXDSManager, clientAuthorities, log, cpClient,
 		policyDefinitions, templateDefinitions, validator, apiKeyXDSManager, cfg, eventHubInstance,
 		subscriptionSnapshotManager, secretsService, restAPIService, httpClient,
 	)

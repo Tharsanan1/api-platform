@@ -70,6 +70,7 @@ type resolvedUpstreamTLS struct {
 	identity          string   // "" means none
 	trustedCAs        []string // resolved list; nil when the key was omitted
 	hasTrustedCAs     bool     // true when the key was present at all, even as an empty list
+	trustedCAsListed  bool     // true when the key held anything other than an empty list
 	verifyHostName    bool     // effective value; defaults to true
 	hasVerifyHostName bool     // true when the key was explicitly present
 }
@@ -90,17 +91,34 @@ func parseUpstreamTLSParams(fieldPath string, params map[string]interface{}) (re
 	if idRaw, ok := params["identity"]; ok {
 		if idStr, ok := idRaw.(string); ok {
 			r.identity = strings.TrimSpace(idStr)
+		} else {
+			errs = append(errs, ValidationError{
+				Field:   fieldPath + ".identity",
+				Message: "identity must be a string",
+			})
 		}
 	}
 
 	if caRaw, ok := params["trustedCAs"]; ok {
 		r.hasTrustedCAs = true
 		if caSlice, ok := caRaw.([]interface{}); ok {
-			for _, c := range caSlice {
+			r.trustedCAsListed = len(caSlice) > 0
+			for k, c := range caSlice {
 				if s, ok := c.(string); ok {
 					r.trustedCAs = append(r.trustedCAs, s)
+				} else {
+					errs = append(errs, ValidationError{
+						Field:   fmt.Sprintf("%s.trustedCAs[%d]", fieldPath, k),
+						Message: "trustedCAs must be a list of strings",
+					})
 				}
 			}
+		} else {
+			r.trustedCAsListed = true
+			errs = append(errs, ValidationError{
+				Field:   fieldPath + ".trustedCAs",
+				Message: "trustedCAs must be a list of strings",
+			})
 		}
 	}
 
@@ -108,6 +126,11 @@ func parseUpstreamTLSParams(fieldPath string, params map[string]interface{}) (re
 		r.hasVerifyHostName = true
 		if vh, ok := vhRaw.(bool); ok {
 			r.verifyHostName = vh
+		} else {
+			errs = append(errs, ValidationError{
+				Field:   fieldPath + ".verifyHostName",
+				Message: "verifyHostName must be true or false",
+			})
 		}
 	}
 
@@ -165,7 +188,7 @@ func (v *UpstreamTLSValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validat
 			}
 		}
 
-		if resolved.hasTrustedCAs && len(resolved.trustedCAs) == 0 {
+		if resolved.hasTrustedCAs && !resolved.trustedCAsListed {
 			errs = append(errs, ValidationError{
 				Field:   fieldPath + ".trustedCAs",
 				Message: "omit trustedCAs to use the gateway trust bundle, or list at least one certificate",
@@ -195,11 +218,16 @@ func (v *UpstreamTLSValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validat
 					Field:   caPath,
 					Message: fmt.Sprintf("%s is a gateway identity (usage: identity); trustedCAs takes usage: upstream certificates", name),
 				})
+			default:
+				errs = append(errs, ValidationError{
+					Field:   caPath,
+					Message: fmt.Sprintf("%s has an unrecognized usage; trustedCAs takes usage: upstream certificates", name),
+				})
 			}
 		}
 
 		for u, up := range def.Upstreams {
-			if !strings.HasPrefix(up.Url, "https://") {
+			if !strings.HasPrefix(strings.ToLower(up.Url), "https://") {
 				errs = append(errs, ValidationError{
 					Field:   fmt.Sprintf("spec.upstreamDefinitions[%d].upstreams[%d].url", d, u),
 					Message: "tls is configured but this target is http://; every target of a definition with tls must be https://",

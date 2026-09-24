@@ -1111,7 +1111,8 @@ func TestDefaultConfig_ClientCertificateHeaderDefaults(t *testing.T) {
 	assert.False(t, h.ForwardToBackend)
 }
 
-// Header names must be RFC 7230 tokens, whatever https_enabled says.
+// Header names must be RFC 7230 tokens that carry no proxy or framing
+// semantics, whatever https_enabled says.
 func TestConfig_ValidateClientCertificateHeaderName(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1123,6 +1124,17 @@ func TestConfig_ValidateClientCertificateHeaderName(t *testing.T) {
 		{name: "empty is not validated, same convention as other DownstreamTLS string fields", headerName: "", wantErr: false},
 		{name: "space is not a valid tchar", headerName: "X Bad", wantErr: true, errContains: "is not a valid HTTP header name"},
 		{name: "colon is not a valid tchar", headerName: "X:Y", wantErr: true, errContains: "is not a valid HTTP header name"},
+		{name: "reserved x-forwarded-client-cert", headerName: "x-forwarded-client-cert", wantErr: true, errContains: "x-forwarded-client-cert cannot be used as the client certificate header"},
+		{name: "reserved X-Forwarded-Client-Cert", headerName: "X-Forwarded-Client-Cert", wantErr: true, errContains: "X-Forwarded-Client-Cert cannot be used as the client certificate header"},
+		{name: "reserved Host", headerName: "Host", wantErr: true, errContains: "Host cannot be used as the client certificate header"},
+		{name: "reserved connection", headerName: "connection", wantErr: true, errContains: "connection cannot be used as the client certificate header"},
+		{name: "reserved Content-Length", headerName: "Content-Length", wantErr: true, errContains: "Content-Length cannot be used as the client certificate header"},
+		{name: "reserved Transfer-Encoding", headerName: "Transfer-Encoding", wantErr: true, errContains: "Transfer-Encoding cannot be used as the client certificate header"},
+		{name: "reserved TE", headerName: "TE", wantErr: true, errContains: "TE cannot be used as the client certificate header"},
+		{name: "reserved Upgrade", headerName: "Upgrade", wantErr: true, errContains: "Upgrade cannot be used as the client certificate header"},
+		{name: "reserved Keep-Alive", headerName: "Keep-Alive", wantErr: true, errContains: "Keep-Alive cannot be used as the client certificate header"},
+		{name: "reserved Proxy-Connection", headerName: "Proxy-Connection", wantErr: true, errContains: "Proxy-Connection cannot be used as the client certificate header"},
+		{name: "reserved Trailer", headerName: "Trailer", wantErr: true, errContains: "Trailer cannot be used as the client certificate header"},
 	}
 
 	for _, tt := range tests {

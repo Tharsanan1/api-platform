@@ -106,7 +106,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	log := s.logger.With(slog.String("correlation_id", correlationID))
 
 	// Bound the request body before reading it, per go-network-service-hardening.md.
-	r.Body = http.MaxBytesReader(w, r.Body, maxCertificateUploadBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.systemConfig.Controller.Server.MaxCertificateUploadBytes)
 
 	var req UploadCertificateRequest
 	shapeErrors, err := decodeCertificateUpload(r.Body, &req)
@@ -357,11 +357,15 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		log.Warn("Failed to refresh certificate metrics after upload", slog.Any("error", err))
 	}
 
-	// The client-CA pool just changed: keep every deployed mtls-auth API's
-	// policy chain current so an API that inherits the pool sees the new
-	// authority on its next request (see repushMtlsAuthDeployments).
 	if effectiveUsage == models.CertificateUsageClient {
-		s.repushMtlsAuthDeployments(log)
+		if err := s.publishClientAuthorities(correlationID); err != nil {
+			log.Error("Failed to publish client certificate authorities", slog.Any("error", err))
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+				"status":  "error",
+				"message": "Certificate saved but failed to update the policy engine",
+			})
+			return
+		}
 	}
 
 	resp := CertificateResponse{

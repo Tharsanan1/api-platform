@@ -348,13 +348,13 @@ func TestMtlsAuthPolicy_Evaluate_MostSpecificReasonAcrossEntries(t *testing.T) {
 	})
 }
 
-// ─── Unpooled accept-authority WARN ───────────────────────────────────────────
+// ─── Log capture ─────────────────────────────────────────────────────────────
 
 // captureSlog redirects the process-wide default slog logger to a buffer for
 // the duration of fn, so a test can assert on WARN/Debug output without
-// depending on log level filtering or a test-specific logger threaded
-// through GetPolicy (this policy always logs via the package-level slog
-// functions, matching every other dev policy in this repo).
+// depending on log level filtering or a test-specific logger (this policy
+// always logs via the package-level slog functions, matching every other dev
+// policy in this repo).
 func captureSlog(t *testing.T, fn func()) string {
 	t.Helper()
 	var buf bytes.Buffer
@@ -363,39 +363,4 @@ func captureSlog(t *testing.T, fn func()) string {
 	defer slog.SetDefault(prev)
 	fn()
 	return buf.String()
-}
-
-func TestMtlsAuthPolicy_WarnsWhenAcceptAuthorityNotInPool(t *testing.T) {
-	rootA := newRootCA(t, "Partner A Root CA")
-	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
-	// The pool omits rootA entirely: the accept entry still carries its own
-	// embedded certificate (per GetPolicy's doc comment), but the gateway's
-	// client-CA pool no longer has a copy of that same authority.
-	// The warning is emitted once, when the policy is bound to its chain,
-	// not on every request.
-	output := captureSlog(t, func() {
-		mustBuildPolicy(t, nil, entries)
-	})
-
-	if !strings.Contains(output, "auth-ca-a") {
-		t.Fatalf("expected a WARN naming the unpooled authority %q, got:\n%s", "auth-ca-a", output)
-	}
-	if !strings.Contains(strings.ToLower(output), "warn") {
-		t.Fatalf("expected the unpooled-authority message to be logged at WARN, got:\n%s", output)
-	}
-}
-
-func TestMtlsAuthPolicy_NoWarnWhenAcceptAuthorityIsPooled(t *testing.T) {
-	rootA := newRootCA(t, "Partner A Root CA")
-	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
-	p := mustBuildPolicy(t, []*testEntity{rootA}, entries) // pool DOES include rootA
-	leaf := newLeaf(t, rootA, "client-valid", certOpts{})
-
-	output := captureSlog(t, func() {
-		p.evaluate(reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true)), nil)
-	})
-
-	if strings.Contains(output, "not present in the gateway") {
-		t.Fatalf("did not expect an unpooled-authority WARN when the authority is pooled, got:\n%s", output)
-	}
 }

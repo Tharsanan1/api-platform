@@ -1138,7 +1138,8 @@ func createTestAPIServerWithDB(db storage.Storage) *APIServer {
 	systemCfg := &config.Config{
 		Controller: config.Controller{
 			Server: config.ServerConfig{
-				GatewayID: gatewayID,
+				GatewayID:                 gatewayID,
+				MaxCertificateUploadBytes: 1 << 20,
 			},
 		},
 		Router: config.RouterConfig{

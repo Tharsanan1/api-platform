@@ -75,7 +75,7 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxCertificateUploadBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, s.systemConfig.Controller.Server.MaxCertificateUploadBytes)
 
 	var req UploadCertificateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

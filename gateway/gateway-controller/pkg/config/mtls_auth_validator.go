@@ -187,16 +187,6 @@ func collectMTLSAuthOccurrences(apiConfig *api.RestAPI) []mtlsOccurrence {
 	return occs
 }
 
-// HasMtlsAuthAttached reports whether apiConfig attaches mtls-auth anywhere —
-// at API level or on any single operation. Exposed so callers outside this
-// package (e.g. a certificate-upload/delete handler deciding which deployed
-// RestAPIs need their policy chain re-pushed after a client-CA pool change)
-// can ask the question without duplicating collectMTLSAuthOccurrences's
-// traversal.
-func HasMtlsAuthAttached(apiConfig *api.RestAPI) bool {
-	return len(collectMTLSAuthOccurrences(apiConfig)) > 0
-}
-
 // NamedAcceptEntryFieldPaths returns, in document order, the field path of
 // every accept entry across every mtls-auth occurrence on apiConfig (API- or
 // operation-level) whose `ca` explicitly names caName. An omitted `accept`

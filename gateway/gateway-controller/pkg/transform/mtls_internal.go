@@ -19,42 +19,30 @@
 package transform
 
 import (
-	"encoding/pem"
-	"fmt"
 	"strings"
 
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	policyenginev1 "github.com/wso2/api-platform/sdk/core/policyengine"
 )
 
-// The mtls-auth policy runs inside the policy engine, which has no database
-// access, so the controller must hand it the client-CA pool material it
-// needs to evaluate a presented certificate, inside the policy chain already
-// pushed over policy-xDS. These two keys are injected into every mtls-auth
-// instance's params at chain-build time (see injectMtlsInternalParams) and
-// must never be accepted from an author — the deploy validator
-// (pkg/config/mtls_auth_validator.go) already rejects unknown params, and
-// __wso2_internal_* is the existing convention for engine-internal
-// parameters (see sdk/core/policy/v1alpha2/system_parameters.go).
+// The mtls-auth policy runs inside the policy engine, which reads the
+// gateway's client certificate authority pool from shared lazy resources
+// (see utils.ClientAuthorityPublisher). A policy chain therefore carries no
+// certificate material: only what this API's author wrote, in the form the
+// engine evaluates, plus the router's client-certificate header settings.
+// These keys are injected into every mtls-auth instance's params at
+// chain-build time (see injectMtlsInternalParams) and must never be accepted
+// from an author — the deploy validator (pkg/config/mtls_auth_validator.go)
+// already rejects unknown params, and __wso2_internal_* is the existing
+// convention for engine-internal parameters (see
+// sdk/core/policy/v1alpha2/system_parameters.go).
 const (
-	// mtlsInternalAcceptParam resolves the policy's own (possibly omitted)
-	// `accept` param into an ordered array of
-	// {"ca", "certificates", "match"?, "thumbprints"?} objects.
+	// mtlsInternalAcceptParam is the policy's own `accept` param as an
+	// ordered array of {"ca", "match"?, "thumbprints"?} objects, with each
+	// thumbprint normalised to 64 lowercase hex. Absent when the author
+	// omitted `accept`: the policy then accepts every client authority in the
+	// pool, resolved against the pool it currently holds.
 	mtlsInternalAcceptParam = "__wso2_internal_mtls_accept"
-
-	// mtlsInternalPoolParam is an ordered array of every certificate PEM held
-	// by every usage: client row on the gateway (relay rows included) —
-	// path-building material for the policy, independent of what this
-	// particular API accepts.
-	mtlsInternalPoolParam = "__wso2_internal_mtls_pool"
-
-	// mtlsInternalRelaysParam is an ordered array of
-	// {"name", "certificates", "match"?} objects, one per usage: client,
-	// role: relay pool row — the set of connections whose presented
-	// certificate can make a relayed header believed. "match" is present
-	// only when the relay entry itself was stored with a narrowing match.
-	mtlsInternalRelaysParam = "__wso2_internal_mtls_relays"
 
 	// mtlsInternalHeaderParam is {"name", "trustAny", "forwardToBackend"},
 	// mirroring router.downstream_tls.client_certificate_header — the
@@ -64,42 +52,9 @@ const (
 )
 
 // injectMtlsInternalParams mutates every mtls-auth PolicyInstance in chain in
-// place, adding the __wso2_internal_mtls_* parameters above. A nil store
-// (not yet wired, e.g. in a test transformer) or a chain with no mtls-auth
-// instance is a no-op. Certificate PEM material is never logged by any of
-// the helpers this function calls.
-func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store config.MtlsAuthCertificateStore, headerConfig config.ClientCertificateHeader) error {
-	if store == nil {
-		return nil
-	}
-
-	hasMtlsAuth := false
-	for i := range chain {
-		if chain[i].Name == config.MtlsAuthPolicyName {
-			hasMtlsAuth = true
-			break
-		}
-	}
-	if !hasMtlsAuth {
-		return nil
-	}
-
-	clientCerts, err := store.ListCertificatesByUsage(models.CertificateUsageClient)
-	if err != nil {
-		// Pushing a chain with an empty pool would deny every caller of this
-		// API on a transient store error; refusing to build it keeps the
-		// previous chain in place instead.
-		return fmt.Errorf("listing client authorities for mtls-auth: %w", err)
-	}
-
-	pool := make([]interface{}, 0, len(clientCerts))
-	for _, cert := range clientCerts {
-		for _, pemStr := range splitCertificatePEMs(cert.Certificate) {
-			pool = append(pool, pemStr)
-		}
-	}
-
-	relays := buildMtlsRelaysMaterial(clientCerts)
+// place, adding the __wso2_internal_mtls_* parameters above. A chain with no
+// mtls-auth instance is left untouched.
+func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, headerConfig config.ClientCertificateHeader) {
 	header := map[string]interface{}{
 		"name":             headerConfig.Name,
 		"trustAny":         headerConfig.TrustAny,
@@ -113,61 +68,24 @@ func injectMtlsInternalParams(chain []policyenginev1.PolicyInstance, store confi
 		if chain[i].Parameters == nil {
 			chain[i].Parameters = map[string]interface{}{}
 		}
-		chain[i].Parameters[mtlsInternalAcceptParam] = resolveMtlsAcceptMaterial(chain[i].Parameters, store, clientCerts)
-		chain[i].Parameters[mtlsInternalPoolParam] = pool
-		chain[i].Parameters[mtlsInternalRelaysParam] = relays
+		if accept, ok := engineAcceptEntries(chain[i].Parameters); ok {
+			chain[i].Parameters[mtlsInternalAcceptParam] = accept
+		}
 		chain[i].Parameters[mtlsInternalHeaderParam] = header
 	}
-	return nil
 }
 
-// buildMtlsRelaysMaterial builds the __wso2_internal_mtls_relays material:
-// one entry per usage: client, role: relay row in clientCerts, in the same
-// (pool) order the rows were returned.
-func buildMtlsRelaysMaterial(clientCerts []*models.StoredCertificate) []interface{} {
-	relays := make([]interface{}, 0)
-	for _, cert := range clientCerts {
-		role := cert.Role
-		if role == "" {
-			role = models.CertificateRoleClient
-		}
-		if role != models.CertificateRoleRelay {
-			continue
-		}
-		entry := map[string]interface{}{
-			"name":         cert.Name,
-			"certificates": stringsToInterfaces(splitCertificatePEMs(cert.Certificate)),
-		}
-		if cert.Match != nil {
-			matchParam := map[string]interface{}{}
-			if len(cert.Match.DNSSANs) > 0 {
-				matchParam["dnsSANs"] = stringsToInterfaces(cert.Match.DNSSANs)
-			}
-			if len(cert.Match.URISANs) > 0 {
-				matchParam["uriSANs"] = stringsToInterfaces(cert.Match.URISANs)
-			}
-			entry["match"] = matchParam
-		}
-		relays = append(relays, entry)
-	}
-	return relays
-}
-
-// resolveMtlsAcceptMaterial resolves one mtls-auth instance's own `accept`
-// param (params["accept"], as authored — untouched by this function) into
-// the certificate material the policy engine evaluates against. When the
-// author omitted accept (or supplied something that isn't the expected
-// array shape — the deploy validator already refuses that at deploy time,
-// this is a defensive fallback), every usage: client, non-relay pool entry
-// is listed, in pool order, with no match/thumbprints.
-func resolveMtlsAcceptMaterial(params map[string]interface{}, store config.MtlsAuthCertificateStore, clientCerts []*models.StoredCertificate) []interface{} {
-	acceptRaw, hasAccept := params["accept"]
-	if !hasAccept {
-		return defaultMtlsAccept(clientCerts)
-	}
-	acceptSlice, ok := acceptRaw.([]interface{})
+// engineAcceptEntries converts one mtls-auth instance's own `accept` param
+// (params["accept"], as authored — untouched by this function) into the
+// entries the policy engine evaluates: the authority name, the author's
+// match copied through, and thumbprints normalised. ok is false when the
+// author omitted `accept`, or supplied something that is not an array (the
+// deploy validator already refuses that; the policy then treats the list as
+// omitted, exactly as it would for a missing key).
+func engineAcceptEntries(params map[string]interface{}) ([]interface{}, bool) {
+	acceptSlice, ok := params["accept"].([]interface{})
 	if !ok {
-		return defaultMtlsAccept(clientCerts)
+		return nil, false
 	}
 
 	result := make([]interface{}, 0, len(acceptSlice))
@@ -177,20 +95,7 @@ func resolveMtlsAcceptMaterial(params map[string]interface{}, store config.MtlsA
 			continue
 		}
 		caName, _ := entryMap["ca"].(string)
-		caName = strings.TrimSpace(caName)
-		cert, err := store.GetCertificateByName(caName)
-		if err != nil || cert == nil {
-			// The deploy validator (ValidateRestAPI) already refuses to deploy
-			// an accept entry naming an authority absent from the pool, so this
-			// should be unreachable in practice; skip defensively rather than
-			// hand the policy engine a half-built entry.
-			continue
-		}
-
-		entry := map[string]interface{}{
-			"ca":           caName,
-			"certificates": stringsToInterfaces(splitCertificatePEMs(cert.Certificate)),
-		}
+		entry := map[string]interface{}{"ca": strings.TrimSpace(caName)}
 		if matchRaw, hasMatch := entryMap["match"]; hasMatch {
 			entry["match"] = matchRaw
 		}
@@ -199,28 +104,7 @@ func resolveMtlsAcceptMaterial(params map[string]interface{}, store config.MtlsA
 		}
 		result = append(result, entry)
 	}
-	return result
-}
-
-// defaultMtlsAccept builds the inherited-pool accept list for an omitted
-// `accept`: every usage: client, non-relay pool entry in listing order, with
-// no match/thumbprints keys at all.
-func defaultMtlsAccept(clientCerts []*models.StoredCertificate) []interface{} {
-	result := make([]interface{}, 0, len(clientCerts))
-	for _, cert := range clientCerts {
-		role := cert.Role
-		if role == "" {
-			role = models.CertificateRoleClient
-		}
-		if role == models.CertificateRoleRelay {
-			continue
-		}
-		result = append(result, map[string]interface{}{
-			"ca":           cert.Name,
-			"certificates": stringsToInterfaces(splitCertificatePEMs(cert.Certificate)),
-		})
-	}
-	return result
+	return result, true
 }
 
 // normalizeThumbprintsForEngine canonicalises an author-supplied thumbprints
@@ -243,38 +127,6 @@ func normalizeThumbprintsForEngine(raw interface{}) interface{} {
 			continue
 		}
 		out[i] = canonical
-	}
-	return out
-}
-
-// splitCertificatePEMs decodes every CERTIFICATE PEM block in data, in
-// order, re-encoding each one individually so callers get a clean
-// one-certificate-per-string slice (dropping any other block type and any
-// stray bytes between/around blocks). Certificate material only — never
-// logged by any caller.
-func splitCertificatePEMs(data []byte) []string {
-	var out []string
-	rest := data
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-		out = append(out, strings.TrimRight(string(pem.EncodeToMemory(block)), "\n"))
-	}
-	return out
-}
-
-// stringsToInterfaces converts a []string to []interface{} for embedding in
-// the generic map[string]interface{} params shape the policy engine expects.
-func stringsToInterfaces(ss []string) []interface{} {
-	out := make([]interface{}, len(ss))
-	for i, s := range ss {
-		out[i] = s
 	}
 	return out
 }

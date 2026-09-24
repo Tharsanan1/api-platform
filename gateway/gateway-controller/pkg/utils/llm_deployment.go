@@ -39,6 +39,11 @@ import (
 const (
 	LazyResourceTypeLLMProviderTemplate     = "LlmProviderTemplate"
 	LazyResourceTypeProviderTemplateMapping = "ProviderTemplateMapping"
+
+	// LazyResourceTypeClientCertificateAuthority is one usage: client
+	// certificate row, published for the mtls-auth policy (see
+	// ClientAuthorityPublisher).
+	LazyResourceTypeClientCertificateAuthority = "ClientCertificateAuthority"
 )
 
 var (

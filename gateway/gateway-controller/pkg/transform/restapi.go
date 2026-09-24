@@ -43,32 +43,19 @@ type RestAPITransformer struct {
 	systemConfig      *config.Config
 	policyDefinitions map[string]models.PolicyDefinition
 	latestVersions    map[string]string // pre-computed policyName -> latest full semver
-
-	// mtlsCertStore is the client certificate authority pool lookup used to
-	// resolve mtls-auth's accept list into certificate material at
-	// chain-build time (see injectMtlsInternalParams in mtls_internal.go).
-	// Nil disables the injection entirely.
-	mtlsCertStore config.MtlsAuthCertificateStore
 }
 
-// NewRestAPITransformer creates a new RestAPITransformer. mtlsCertStore wires
-// the client-CA pool lookup used to resolve mtls-auth's accept list at
-// chain-build time — cmd/controller (and NewLLMTransformer, which owns its
-// own RestAPITransformer) pass the same storage.Storage already threaded to
-// every other consumer of the certificate pool; a nil value disables the
-// injection entirely.
+// NewRestAPITransformer creates a new RestAPITransformer.
 func NewRestAPITransformer(
 	routerConfig *config.RouterConfig,
 	systemConfig *config.Config,
 	policyDefinitions map[string]models.PolicyDefinition,
-	mtlsCertStore config.MtlsAuthCertificateStore,
 ) *RestAPITransformer {
 	return &RestAPITransformer{
 		routerConfig:      routerConfig,
 		systemConfig:      systemConfig,
 		policyDefinitions: policyDefinitions,
 		latestVersions:    config.BuildLatestVersionIndex(policyDefinitions),
-		mtlsCertStore:     mtlsCertStore,
 	}
 }
 
@@ -243,10 +230,7 @@ func (t *RestAPITransformer) Transform(cfg *models.StoredConfig) (*models.Runtim
 			rdc.Routes[routeKey] = rdcRoute
 
 			// Build policy chain: API-level + operation-level + system policies
-			chain, err := t.buildPolicyChain(apiPolicies, op.Policies)
-			if err != nil {
-				return nil, err
-			}
+			chain := t.buildPolicyChain(apiPolicies, op.Policies)
 			injected := utils.InjectSystemPolicies(chain, t.systemConfig, nil)
 			rdc.PolicyChains[routeKey] = sdkChainToModel(injected)
 		}
@@ -438,7 +422,7 @@ func (t *RestAPITransformer) collectAPIPolicies(policies *[]api.Policy) []policy
 func (t *RestAPITransformer) buildPolicyChain(
 	apiPolicies []policyenginev1.PolicyInstance,
 	opPolicies *[]api.Policy,
-) ([]policyenginev1.PolicyInstance, error) {
+) []policyenginev1.PolicyInstance {
 	var result []policyenginev1.PolicyInstance
 
 	// API-level policies (already resolved, in spec order, evaluated before operation-level).
@@ -456,19 +440,16 @@ func (t *RestAPITransformer) buildPolicyChain(
 		}
 	}
 
-	// The policy engine has no database access, so every mtls-auth instance in
-	// this chain gets handed its resolved certificate material here, at
-	// chain-build time — see mtls_internal.go. No-op when mtlsCertStore is
-	// unset or the chain has no mtls-auth instance.
+	// Every mtls-auth instance in this chain gets its engine-facing accept
+	// entries and the router's client-certificate header settings here, at
+	// chain-build time — see mtls_internal.go.
 	var headerConfig config.ClientCertificateHeader
 	if t.routerConfig != nil {
 		headerConfig = t.routerConfig.DownstreamTLS.ClientCertificateHeader
 	}
-	if err := injectMtlsInternalParams(result, t.mtlsCertStore, headerConfig); err != nil {
-		return nil, err
-	}
+	injectMtlsInternalParams(result, headerConfig)
 
-	return result, nil
+	return result
 }
 
 // upstreamClusterResult holds the result of resolving and registering an upstream cluster.

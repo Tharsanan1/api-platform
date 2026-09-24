@@ -383,6 +383,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Publish the client certificate authority pool the certificate store
+	// just loaded, so the mtls-auth policy holds it before any API is served.
+	// Every certificate write republishes it from then on (pkg/api/handlers).
+	clientAuthorities := utils.NewClientAuthorityPublisher(db, lazyResourceXDSManager)
+	if err := clientAuthorities.Publish(""); err != nil {
+		log.Error("Refusing to start: client certificate authorities could not be published", slog.Any("error", err))
+		os.Exit(1)
+	}
+
 	// Initialize SDS secret manager if custom certificates are configured
 	var sdsSecretManager *xds.SDSSecretManager
 	translator := snapshotManager.GetTranslator()
@@ -420,12 +429,7 @@ func main() {
 	// falls back to the legacy path, which names clusters "cluster_<scheme>_<host>" —
 	// the policy engine then routes to upstream_* clusters that don't exist in Envoy,
 	// and every API returns 503 cluster_not_found until it is redeployed
-	// The policy engine has no database access, so mtls-auth's accept list is
-	// resolved into certificate material at chain-build time — see
-	// pkg/transform/mtls_internal.go. db already satisfies
-	// config.MtlsAuthCertificateStore (the same lookups the deploy-time
-	// validator uses).
-	restTransformer := transform.NewRestAPITransformer(&cfg.Router, cfg, policyDefinitions, db)
+	restTransformer := transform.NewRestAPITransformer(&cfg.Router, cfg, policyDefinitions)
 	llmTransformer := transform.NewLLMTransformer(configStore, db, &cfg.Router, cfg, policyDefinitions, policyVersionResolver)
 	transformerRegistry := transform.NewRegistry(restTransformer, llmTransformer)
 
@@ -700,6 +704,7 @@ func main() {
 		snapshotManager,
 		policyManager,
 		lazyResourceXDSManager,
+		clientAuthorities,
 		log,
 		cpClient,
 		policyDefinitions,

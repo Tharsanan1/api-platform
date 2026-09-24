@@ -29,6 +29,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net/url"
 	"slices"
@@ -347,18 +348,79 @@ func xfccChainField(certs ...*testEntity) string {
 	return "Chain=" + url.PathEscape(pemBlob.String())
 }
 
-// ─── __wso2_internal_mtls_accept / _pool param construction ──────────────────
+// ─── Pool publication and accept-param construction ─────────────────────────
+
+// authoritySpec is one pool entry as the controller publishes it, expressed
+// with real certificates.
+type authoritySpec struct {
+	name    string
+	role    string
+	certs   []*testEntity
+	uriSANs []string
+	dnsSANs []string
+}
+
+// authorityResource renders spec as the ClientCertificateAuthority lazy
+// resource the policy engine receives from the controller (JSON-decoded, so
+// every list is []interface{}).
+func authorityResource(spec authoritySpec) *policy.LazyResource {
+	body := map[string]interface{}{
+		"certificates": entitiesToPEMInterfaces(spec.certs),
+		"role":         spec.role,
+	}
+	if len(spec.uriSANs) > 0 || len(spec.dnsSANs) > 0 {
+		match := map[string]interface{}{}
+		if len(spec.uriSANs) > 0 {
+			match["uriSANs"] = stringsToInterfaces(spec.uriSANs)
+		}
+		if len(spec.dnsSANs) > 0 {
+			match["dnsSANs"] = stringsToInterfaces(spec.dnsSANs)
+		}
+		body["match"] = match
+	}
+	return &policy.LazyResource{ID: spec.name, ResourceType: clientAuthorityResourceType, Resource: body}
+}
+
+// publishResources replaces the whole process-wide lazy resource store with
+// resources, as a policy-engine snapshot does, and empties it again when the
+// test ends so no test sees another's pool.
+func publishResources(t *testing.T, resources ...*policy.LazyResource) {
+	t.Helper()
+	store := policy.GetLazyResourceStoreInstance()
+	if err := store.ReplaceAll(resources); err != nil {
+		t.Fatalf("ReplaceAll: %v", err)
+	}
+	t.Cleanup(func() { _ = store.ReplaceAll(nil) })
+}
+
+// publishAuthorities publishes specs as the gateway's whole pool.
+func publishAuthorities(t *testing.T, specs ...authoritySpec) {
+	t.Helper()
+	resources := make([]*policy.LazyResource, len(specs))
+	for i, spec := range specs {
+		resources[i] = authorityResource(spec)
+	}
+	publishResources(t, resources...)
+}
 
 // entrySpec is one accept-list entry, expressed with real certificates/SAN
-// values rather than the raw JSON-ish shape GetPolicy actually parses —
-// buildParams does that translation once, the same way the
-// gateway-controller's transform package would when injecting these params.
+// values: ca names the pool entry, and roots are that entry's certificates
+// (see poolAuthorities).
 type entrySpec struct {
 	ca          string
 	roots       []*testEntity
 	uriSANs     []string
 	dnsSANs     []string
 	thumbprints []string
+}
+
+// relaySpec is one relay pool entry, expressed with real certificates/SAN
+// values.
+type relaySpec struct {
+	name    string
+	roots   []*testEntity
+	uriSANs []string
+	dnsSANs []string
 }
 
 func stringsToInterfaces(ss []string) []interface{} {
@@ -377,13 +439,48 @@ func entitiesToPEMInterfaces(entities []*testEntity) []interface{} {
 	return out
 }
 
-func buildParams(pool []*testEntity, entries []entrySpec) map[string]interface{} {
+// poolAuthorities is the pool a test describes: a client entry per distinct
+// accept entry name holding that entry's roots, a relay entry per relay, and
+// a client entry (named "pool-<n>") for every pool certificate no accept
+// entry or relay holds.
+func poolAuthorities(t *testing.T, pool []*testEntity, entries []entrySpec, relays []relaySpec) []authoritySpec {
+	t.Helper()
+	var specs []authoritySpec
+	held := map[*testEntity]bool{}
+	named := map[string][]*testEntity{}
+	for _, e := range entries {
+		if roots, seen := named[e.ca]; seen {
+			if !slices.Equal(roots, e.roots) {
+				t.Fatalf("accept entries naming %q disagree about its certificates", e.ca)
+			}
+			continue
+		}
+		named[e.ca] = e.roots
+		specs = append(specs, authoritySpec{name: e.ca, role: roleClient, certs: e.roots})
+		for _, c := range e.roots {
+			held[c] = true
+		}
+	}
+	for _, r := range relays {
+		specs = append(specs, authoritySpec{name: r.name, role: roleRelay, certs: r.roots, uriSANs: r.uriSANs, dnsSANs: r.dnsSANs})
+		for _, c := range r.roots {
+			held[c] = true
+		}
+	}
+	for i, c := range pool {
+		if !held[c] {
+			specs = append(specs, authoritySpec{name: fmt.Sprintf("pool-%d", i), role: roleClient, certs: []*testEntity{c}})
+		}
+	}
+	return specs
+}
+
+// buildParams builds the chain params the controller injects for an API
+// whose author wrote accept as entries: names and narrowing only.
+func buildParams(entries []entrySpec) map[string]interface{} {
 	acceptList := make([]interface{}, 0, len(entries))
 	for _, e := range entries {
-		obj := map[string]interface{}{
-			"ca":           e.ca,
-			"certificates": entitiesToPEMInterfaces(e.roots),
-		}
+		obj := map[string]interface{}{"ca": e.ca}
 		if len(e.uriSANs) > 0 || len(e.dnsSANs) > 0 {
 			match := map[string]interface{}{}
 			if len(e.uriSANs) > 0 {
@@ -399,76 +496,25 @@ func buildParams(pool []*testEntity, entries []entrySpec) map[string]interface{}
 		}
 		acceptList = append(acceptList, obj)
 	}
-
-	return map[string]interface{}{
-		internalAcceptParam: acceptList,
-		internalPoolParam:   entitiesToPEMInterfaces(pool),
-	}
+	return map[string]interface{}{internalAcceptParam: acceptList}
 }
 
-func mustBuildPolicy(t *testing.T, pool []*testEntity, entries []entrySpec) *MtlsAuthPolicy {
-	t.Helper()
-	p, err := GetPolicy(policy.PolicyMetadata{}, buildParams(pool, entries))
-	if err != nil {
-		t.Fatalf("GetPolicy returned an error: %v", err)
-	}
-	mp, ok := p.(*MtlsAuthPolicy)
-	if !ok {
-		t.Fatalf("GetPolicy returned %T, want *MtlsAuthPolicy", p)
-	}
-	return mp
-}
-
-// ─── __wso2_internal_mtls_relays / _header param construction ────────────────
-
-// relaySpec is one relay-list entry, expressed with real certificates/SAN
-// values rather than the raw JSON-ish shape GetPolicy actually parses — the
-// same translation entrySpec/buildParams do for __wso2_internal_mtls_accept.
-type relaySpec struct {
-	name    string
-	roots   []*testEntity
-	uriSANs []string
-	dnsSANs []string
-}
-
-// buildParamsWithHeader is buildParams plus the two header-relay params.
-// nil relays/header means the corresponding param is omitted entirely
-// (absent, not an empty array/object) — matching parseRelaysParam/
-// parseHeaderParam's documented "absent means off" contract.
-func buildParamsWithHeader(pool []*testEntity, entries []entrySpec, relays []relaySpec, header map[string]interface{}) map[string]interface{} {
-	params := buildParams(pool, entries)
-
-	if relays != nil {
-		relayList := make([]interface{}, 0, len(relays))
-		for _, r := range relays {
-			obj := map[string]interface{}{
-				"name":         r.name,
-				"certificates": entitiesToPEMInterfaces(r.roots),
-			}
-			if len(r.uriSANs) > 0 || len(r.dnsSANs) > 0 {
-				match := map[string]interface{}{}
-				if len(r.uriSANs) > 0 {
-					match["uriSANs"] = stringsToInterfaces(r.uriSANs)
-				}
-				if len(r.dnsSANs) > 0 {
-					match["dnsSANs"] = stringsToInterfaces(r.dnsSANs)
-				}
-				obj["match"] = match
-			}
-			relayList = append(relayList, obj)
-		}
-		params[internalRelaysParam] = relayList
-	}
-
+// buildParamsWithHeader is buildParams plus the header param; a nil header
+// omits the param entirely, matching parseHeaderParam's "absent means
+// defaults" contract.
+func buildParamsWithHeader(entries []entrySpec, header map[string]interface{}) map[string]interface{} {
+	params := buildParams(entries)
 	if header != nil {
 		params[internalHeaderParam] = header
 	}
 	return params
 }
 
-func mustBuildRelayPolicy(t *testing.T, pool []*testEntity, entries []entrySpec, relays []relaySpec, header map[string]interface{}) *MtlsAuthPolicy {
+// mustPolicy binds an instance with params, against whatever pool the test
+// has published.
+func mustPolicy(t *testing.T, params map[string]interface{}) *MtlsAuthPolicy {
 	t.Helper()
-	p, err := GetPolicy(policy.PolicyMetadata{}, buildParamsWithHeader(pool, entries, relays, header))
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
 	if err != nil {
 		t.Fatalf("GetPolicy returned an error: %v", err)
 	}
@@ -477,6 +523,22 @@ func mustBuildRelayPolicy(t *testing.T, pool []*testEntity, entries []entrySpec,
 		t.Fatalf("GetPolicy returned %T, want *MtlsAuthPolicy", p)
 	}
 	return mp
+}
+
+// mustBuildPolicy publishes the pool described by pool and entries (see
+// poolAuthorities) and binds an instance accepting entries.
+func mustBuildPolicy(t *testing.T, pool []*testEntity, entries []entrySpec) *MtlsAuthPolicy {
+	t.Helper()
+	publishAuthorities(t, poolAuthorities(t, pool, entries, nil)...)
+	return mustPolicy(t, buildParams(entries))
+}
+
+// mustBuildRelayPolicy is mustBuildPolicy with relays added to the pool and
+// header as the header param.
+func mustBuildRelayPolicy(t *testing.T, pool []*testEntity, entries []entrySpec, relays []relaySpec, header map[string]interface{}) *MtlsAuthPolicy {
+	t.Helper()
+	publishAuthorities(t, poolAuthorities(t, pool, entries, relays)...)
+	return mustPolicy(t, buildParamsWithHeader(entries, header))
 }
 
 // ─── Header-value encodings a front proxy might emit ─────────────────────────
@@ -933,36 +995,6 @@ func TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny(t *tes
 	assertAuthenticated(t, p, reqCtx, 0)
 }
 
-// ─── GetPolicy bind-time validation ───────────────────────────────────────────
-
-// TestGetPolicy_MalformedPEM_ReturnsError guards GetPolicy's doc-commented
-// contract: a pool or accept-list certificate that isn't valid PEM/DER is a
-// bind-time error, never deferred to request time.
-func TestGetPolicy_MalformedPEM_ReturnsError(t *testing.T) {
-	t.Run("malformed pool certificate", func(t *testing.T) {
-		params := map[string]interface{}{
-			internalPoolParam: []interface{}{"not a valid PEM certificate"},
-		}
-		if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil {
-			t.Fatal("expected GetPolicy to return an error for a malformed pool certificate")
-		}
-	})
-
-	t.Run("malformed accept-list certificate", func(t *testing.T) {
-		params := map[string]interface{}{
-			internalAcceptParam: []interface{}{
-				map[string]interface{}{
-					"ca":           "auth-ca-a",
-					"certificates": []interface{}{"not a valid PEM certificate"},
-				},
-			},
-		}
-		if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil {
-			t.Fatal("expected GetPolicy to return an error for a malformed accept-list certificate")
-		}
-	})
-}
-
 // ─── Header-relay decision order ───────────────────────────────────
 
 // TestMtlsAuthPolicy_Evaluate_HeaderRelay covers evaluate()'s full decision
@@ -1166,8 +1198,7 @@ func TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend(t *testing.T) {
 }
 
 func TestGetPolicy_MalformedNarrowingFailsClosed(t *testing.T) {
-	rootA := newRootCA(t, "Partner A Root CA")
-	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
+	entries := []entrySpec{{ca: "auth-ca-a"}}
 
 	for name, mutate := range map[string]func(entry map[string]interface{}){
 		"thumbprints as a scalar": func(e map[string]interface{}) { e["thumbprints"] = "9f86d081" },
@@ -1177,7 +1208,7 @@ func TestGetPolicy_MalformedNarrowingFailsClosed(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			params := buildParams([]*testEntity{rootA}, entries)
+			params := buildParams(entries)
 			entry := params[internalAcceptParam].([]interface{})[0].(map[string]interface{})
 			mutate(entry)
 			_, err := GetPolicy(policy.PolicyMetadata{}, params)

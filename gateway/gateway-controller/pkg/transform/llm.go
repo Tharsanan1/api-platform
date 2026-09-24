@@ -46,11 +46,9 @@ func NewLLMTransformer(
 	policyDefinitions map[string]models.PolicyDefinition,
 	policyVersionResolver utils.PolicyVersionResolver,
 ) *LLMTransformer {
-	restTransformer := NewRestAPITransformer(routerConfig, systemConfig, policyDefinitions, db)
-
 	return &LLMTransformer{
 		llmTransformer:  utils.NewLLMProviderTransformer(store, db, routerConfig, policyVersionResolver),
-		restTransformer: restTransformer,
+		restTransformer: NewRestAPITransformer(routerConfig, systemConfig, policyDefinitions),
 		store:           store,
 	}
 }

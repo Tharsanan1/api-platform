@@ -40,12 +40,11 @@ import (
 //     /certificates/reload, and the referential-integrity checks that guard
 //     a delete against a still-deployed API depending on the row being
 //     removed.
-
-// maxCertificateUploadBytes bounds the /certificates request body. A client-CA
-// chain is small (a handful of KB at most), so 1 MiB comfortably covers any
-// legitimate upload while stopping an oversized body from being read into
-// memory in full (see go-network-service-hardening.md).
-const maxCertificateUploadBytes = 1 << 20 // 1 MiB
+//
+// Every handler that can change the usage: client pool republishes it to the
+// policy engine through publishClientAuthorities (below) once the change has
+// committed and SDS is updated. PUT /certificates/{id} changes only a usage:
+// identity row, so it never does.
 
 // certificateUploadInvalidMessage is the single top-level message returned
 // for any 400 from certificate upload validation, regardless of how many
@@ -82,6 +81,16 @@ type CertificateResponse struct {
 	ReferencedByApis *int                     `json:"referencedByApis,omitempty"`
 	Message          string                   `json:"message,omitempty"`
 	Status           string                   `json:"status"` // success, error
+}
+
+// publishClientAuthorities republishes the usage: client pool to the policy
+// engine (see utils.ClientAuthorityPublisher). A server built without a
+// publisher (some unit tests) has nothing to publish to.
+func (s *APIServer) publishClientAuthorities(correlationID string) error {
+	if s.clientAuthorities == nil {
+		return nil
+	}
+	return s.clientAuthorities.Publish(correlationID)
 }
 
 // ListCertificatesResponse represents the response for listing certificates

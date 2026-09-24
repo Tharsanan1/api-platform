@@ -146,10 +146,15 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 		log.Warn("Failed to refresh certificate metrics after delete", slog.Any("error", err))
 	}
 
-	// The client-CA pool just changed: keep every deployed mtls-auth API's
-	// policy chain current (see repushMtlsAuthDeployments).
 	if preDeleteCert != nil && preDeleteCert.Usage == models.CertificateUsageClient {
-		s.repushMtlsAuthDeployments(log)
+		if err := s.publishClientAuthorities(correlationID); err != nil {
+			log.Error("Failed to publish client certificate authorities", slog.Any("error", err))
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+				"status":  "error",
+				"message": "Certificate deleted but failed to update the policy engine",
+			})
+			return
+		}
 	}
 
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{
@@ -198,6 +203,15 @@ func (s *APIServer) ReloadCertificates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info("Certificates reloaded and SDS snapshot updated")
+
+	if err := s.publishClientAuthorities(correlationID); err != nil {
+		log.Error("Failed to publish client certificate authorities", slog.Any("error", err))
+		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"status":  "error",
+			"message": "Certificates reloaded but failed to update the policy engine",
+		})
+		return
+	}
 
 	if _, err := certmetrics.Refresh(s.db); err != nil {
 		log.Warn("Failed to refresh certificate metrics after reload", slog.Any("error", err))

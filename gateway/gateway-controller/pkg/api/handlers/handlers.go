@@ -81,6 +81,10 @@ type APIServer struct {
 	subscriptionSnapshotUpdater utils.SubscriptionSnapshotUpdater
 	subscriptionResourceService *utils.SubscriptionResourceService
 
+	// clientAuthorities republishes the client certificate authority pool to
+	// the policy engine after every certificate write that can change it.
+	clientAuthorities *utils.ClientAuthorityPublisher
+
 	// encryptionManager encrypts a gateway identity's private key at rest.
 	// Set post-construction via SetEncryptionManager, since the encryption
 	// provider manager is built from operator config that may configure no
@@ -102,6 +106,7 @@ func NewAPIServer(
 	snapshotManager *xds.SnapshotManager,
 	policyManager *policyxds.PolicyManager,
 	lazyResourceManager *lazyresourcexds.LazyResourceStateManager,
+	clientAuthorities *utils.ClientAuthorityPublisher,
 	logger *slog.Logger,
 	controlPlaneClient controlplane.ControlPlaneClient,
 	policyDefinitions map[string]models.PolicyDefinition,
@@ -163,6 +168,7 @@ func NewAPIServer(
 		gatewayID:                   gatewayID,
 		subscriptionSnapshotUpdater: subscriptionSnapshotUpdater,
 		subscriptionResourceService: subscriptionResourceService,
+		clientAuthorities:           clientAuthorities,
 	}
 	// Wire the DP->CP push into the LLM/MCP deployment services so create flows push to the
 	// control plane from the service layer (mirroring the REST API service), instead of the

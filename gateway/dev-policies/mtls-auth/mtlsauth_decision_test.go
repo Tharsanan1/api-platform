@@ -70,15 +70,21 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 	relayCA := newRootCA(t, "Edge LB CA")
 	edgeLB := newLeaf(t, relayCA, "edge-lb", certOpts{dnsSANs: []string{"edge-lb.internal"}})
 
-	pool := []*testEntity{rootA, rootB, relayCA}
-	acceptPartnerA := []entrySpec{{ca: "partner-a", roots: []*testEntity{rootA}}}
-	acceptRelayAuthority := []entrySpec{{ca: "edge-lb-client", roots: []*testEntity{relayCA}}}
-	relays := []relaySpec{{name: "edge-lb-ca", roots: []*testEntity{relayCA}}}
-	trustAny := map[string]interface{}{"trustAny": true}
+	// One gateway pool serves every instance below, as it does in a running
+	// policy engine: the load balancer's authority is held twice, once as a
+	// relay and once as a client authority an API may accept.
+	publishAuthorities(t,
+		authoritySpec{name: "partner-a", role: roleClient, certs: []*testEntity{rootA}},
+		authoritySpec{name: "partner-b", role: roleClient, certs: []*testEntity{rootB}},
+		authoritySpec{name: "edge-lb-client", role: roleClient, certs: []*testEntity{relayCA}},
+		authoritySpec{name: "edge-lb-ca", role: roleRelay, certs: []*testEntity{relayCA}},
+	)
+	acceptPartnerA := []entrySpec{{ca: "partner-a"}}
+	acceptRelayAuthority := []entrySpec{{ca: "edge-lb-client"}}
 
-	relayPolicy := mustBuildRelayPolicy(t, pool, acceptPartnerA, relays, nil)
-	bypassPolicy := mustBuildRelayPolicy(t, pool, acceptPartnerA, nil, trustAny)
-	lbAsClientPolicy := mustBuildRelayPolicy(t, pool, acceptRelayAuthority, relays, nil)
+	relayPolicy := mustPolicy(t, buildParams(acceptPartnerA))
+	bypassPolicy := mustPolicy(t, buildParamsWithHeader(acceptPartnerA, map[string]interface{}{"trustAny": true}))
+	lbAsClientPolicy := mustPolicy(t, buildParams(acceptRelayAuthority))
 
 	noCertificate := func() *policy.DownstreamTLS { return &policy.DownstreamTLS{MTLS: false} }
 	header := func(e *testEntity) string { return url.PathEscape(e.pemCert()) }
@@ -284,19 +290,17 @@ func TestMtlsAuthPolicy_OnRequestHeaders_ForwardCertificate(t *testing.T) {
 	relayCA := newRootCA(t, "Edge LB CA")
 	edgeLB := newLeaf(t, relayCA, "edge-lb", certOpts{})
 
-	pool := []*testEntity{rootA, relayCA}
-	accept := []entrySpec{{ca: "partner-a", roots: []*testEntity{rootA}}}
-	relays := []relaySpec{{name: "edge-lb-ca", roots: []*testEntity{relayCA}}}
+	publishAuthorities(t,
+		authoritySpec{name: "partner-a", role: roleClient, certs: []*testEntity{rootA}},
+		authoritySpec{name: "edge-lb-ca", role: roleRelay, certs: []*testEntity{relayCA}},
+	)
+	accept := []entrySpec{{ca: "partner-a"}}
 
 	build := func(t *testing.T, forward interface{}, header map[string]interface{}) *MtlsAuthPolicy {
 		t.Helper()
-		params := buildParamsWithHeader(pool, accept, relays, header)
+		params := buildParamsWithHeader(accept, header)
 		params[forwardCertificateParam] = forward
-		p, err := GetPolicy(policy.PolicyMetadata{}, params)
-		if err != nil {
-			t.Fatalf("GetPolicy returned an error: %v", err)
-		}
-		return p.(*MtlsAuthPolicy)
+		return mustPolicy(t, params)
 	}
 	wantBoth := []string{xfccHeaderName, defaultHeaderName}
 
@@ -344,7 +348,7 @@ func TestMtlsAuthPolicy_OnRequestHeaders_ForwardCertificate(t *testing.T) {
 	})
 
 	t.Run("omitted defaults to true", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, accept, relays, nil)
+		p := mustPolicy(t, buildParams(accept))
 		if !p.forwardCertificate {
 			t.Errorf("forwardCertificate = false, want true when the parameter is omitted")
 		}
@@ -352,7 +356,7 @@ func TestMtlsAuthPolicy_OnRequestHeaders_ForwardCertificate(t *testing.T) {
 
 	for name, value := range map[string]interface{}{"string": "no", "number": 0, "list": []interface{}{false}} {
 		t.Run("non-boolean "+name+" fails GetPolicy", func(t *testing.T) {
-			params := buildParamsWithHeader(pool, accept, relays, nil)
+			params := buildParams(accept)
 			params[forwardCertificateParam] = value
 			if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil {
 				t.Fatalf("GetPolicy accepted forwardCertificate = %#v, want an error", value)

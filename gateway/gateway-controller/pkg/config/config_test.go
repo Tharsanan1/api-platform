@@ -37,14 +37,15 @@ func validConfig() *Config {
 	return &Config{
 		Controller: Controller{
 			Server: ServerConfig{
-				APIPort:           8080,
-				XDSPort:           18000,
-				GatewayID:         constants.PlatformGatewayId,
-				ReadTimeout:       30 * time.Second,
-				ReadHeaderTimeout: 30 * time.Second,
-				WriteTimeout:      60 * time.Second,
-				IdleTimeout:       120 * time.Second,
-				MaxHeaderBytes:    1 << 20,
+				APIPort:                   8080,
+				XDSPort:                   18000,
+				GatewayID:                 constants.PlatformGatewayId,
+				ReadTimeout:               30 * time.Second,
+				ReadHeaderTimeout:         30 * time.Second,
+				WriteTimeout:              60 * time.Second,
+				IdleTimeout:               120 * time.Second,
+				MaxHeaderBytes:            1 << 20,
+				MaxCertificateUploadBytes: 1 << 20,
 			},
 			Storage: StorageConfig{
 				Type: "sqlite",
@@ -2444,4 +2445,29 @@ func TestConfig_Validate_EmptyClientCertificateHeaderNameBecomesDefault(t *testi
 	cfg.Router.DownstreamTLS.ClientCertificateHeader.Name = ""
 	require.NoError(t, cfg.Validate())
 	assert.Equal(t, DefaultClientCertificateHeaderName, cfg.Router.DownstreamTLS.ClientCertificateHeader.Name)
+}
+
+func TestConfig_Validate_MaxCertificateUploadBytes(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int64
+		wantErr string
+	}{
+		{name: "default is accepted", value: 1 << 20},
+		{name: "zero is rejected", value: 0, wantErr: "server.max_certificate_upload_bytes must be positive, got: 0"},
+		{name: "negative is rejected", value: -1, wantErr: "server.max_certificate_upload_bytes must be positive, got: -1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Controller.Server.MaxCertificateUploadBytes = tt.value
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }

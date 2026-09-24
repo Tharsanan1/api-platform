@@ -330,6 +330,13 @@ type ServerConfig struct {
 	WriteTimeout      time.Duration `koanf:"write_timeout"`
 	IdleTimeout       time.Duration `koanf:"idle_timeout"`
 	MaxHeaderBytes    int           `koanf:"max_header_bytes"`
+
+	// MaxCertificateUploadBytes bounds the request body of POST /certificates
+	// and PUT /certificates/{id}. A certificate chain is a few KB, so the
+	// default covers any legitimate upload while stopping an oversized body
+	// from being read into memory. Must be non-zero -- defaultConfig supplies
+	// a safe default.
+	MaxCertificateUploadBytes int64 `koanf:"max_certificate_upload_bytes"`
 }
 
 // ServerTLSConfig holds configuration for an additional TLS listener for the
@@ -699,9 +706,9 @@ type DownstreamTLS struct {
 // client certificate relayed via an HTTP header (e.g. from a load balancer
 // that terminates TLS) rather than presented directly on the mTLS
 // connection. By default, the header is believed only when the connection
-// itself authenticated as a role: relay pool entry (see
-// pkg/transform/mtls_internal.go's __wso2_internal_mtls_relays); TrustAny and
-// ForwardToBackend are both narrow, off-by-default opt-ins.
+// itself authenticated as a role: relay pool entry (published to the policy
+// engine by utils.ClientAuthorityPublisher); TrustAny and ForwardToBackend
+// are both narrow, off-by-default opt-ins.
 type ClientCertificateHeader struct {
 	// Name is the HTTP header carrying the relayed client certificate (PEM
 	// or base64-encoded PEM). Must be a valid HTTP header token (RFC 7230
@@ -1124,6 +1131,7 @@ func defaultConfig() *Config {
 				WriteTimeout:                    60 * time.Second,
 				IdleTimeout:                     120 * time.Second,
 				MaxHeaderBytes:                  1 << 20, // 1 MiB
+				MaxCertificateUploadBytes:       1 << 20, // 1 MiB
 				TLS: ServerTLSConfig{
 					Enabled:                false,
 					Port:                   9093,
@@ -1736,6 +1744,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Controller.Server.MaxHeaderBytes <= 0 {
 		return fmt.Errorf("server.max_header_bytes must be positive, got: %d", c.Controller.Server.MaxHeaderBytes)
+	}
+	if c.Controller.Server.MaxCertificateUploadBytes <= 0 {
+		return fmt.Errorf("server.max_certificate_upload_bytes must be positive, got: %d", c.Controller.Server.MaxCertificateUploadBytes)
 	}
 
 	// Validate REST API TLS config

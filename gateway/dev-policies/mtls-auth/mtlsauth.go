@@ -29,40 +29,42 @@
 // receives — this policy is what turns "a certificate was presented" into
 // "this API's caller is authenticated".
 //
-// The controller resolves this policy instance's `accept` list against the
-// gateway's client-CA pool and injects the result as two internal params that
-// never appear in the author-facing schema (policy-definition.yaml's
-// additionalProperties: false is enforced by the controller's own validator,
-// not here):
+// The gateway's client certificate authority pool does not travel in this
+// policy's params. The controller publishes each pool entry once per gateway
+// as a shared lazy resource (see authorities.go for its shape), and every
+// instance of this policy reads the same parsed copy of that pool, rebuilt
+// once per store version. A pool change is therefore seen by every API on its
+// next request, without any policy chain being pushed. Every certificate of
+// every pool entry is path-building material ONLY — it goes into an
+// x509.VerifyOptions.Intermediates pool, never Roots. A certificate belongs in
+// Roots for a given request only via the accept entry that names its pool
+// entry.
 //
-//   - __wso2_internal_mtls_accept: an ordered array of
-//     {"ca": "<pool entry name>", "certificates": ["<PEM>", ...],
-//     "match": {"uriSANs": [...], "dnsSANs": [...]} (optional),
-//     "thumbprints": ["<64 lowercase hex>", ...] (optional)}. Entries are
-//     tried in order; the first that verifies AND satisfies every narrowing
-//     it carries wins (see evaluate).
-//   - __wso2_internal_mtls_pool: every certificate in the gateway's
-//     client-CA pool, PEM-encoded. This is path-building material ONLY —
-//     every use of it below goes into an x509.VerifyOptions.Intermediates
-//     pool, never Roots. A certificate belongs in Roots for a given request
-//     only via the specific accept entry that named it.
+// The controller injects two internal params that never appear in the
+// author-facing schema (policy-definition.yaml's additionalProperties: false
+// is enforced by the controller's own validator, not here):
 //
-// Two further internal params turn on support for a client certificate
-// relayed by a front proxy in a request header, rather than presented on the
-// connection itself. The connection's own certificate is always judged
-// first; a header is only ever judged when that certificate did not pass
-// `accept` — see evaluate's doc comment for the full decision order:
-//
-//   - __wso2_internal_mtls_relays: an ordered array of {"name": "<pool entry
-//     name>", "certificates": ["<PEM>", ...], "match": {...} (optional, same
-//     shape as accept's)}. A relay entry is never itself accepted as a
-//     client — it exists only to let this policy recognize "this connection
-//     IS the trusted front proxy", never "this connection is a valid API
-//     caller".
+//   - __wso2_internal_mtls_accept: the author's accept list as an ordered
+//     array of {"ca": "<pool entry name>", "match": {"uriSANs": [...],
+//     "dnsSANs": [...]} (optional), "thumbprints": ["<64 lowercase hex>",
+//     ...] (optional)}. Entries are tried in order; the first whose pool
+//     entry verifies the certificate AND whose narrowing it satisfies wins
+//     (see evaluate). An entry naming no client entry currently in the pool
+//     matches nothing. Absent when the author omitted accept: every client
+//     entry in the pool is accepted, in name order, with no narrowing.
 //   - __wso2_internal_mtls_header: {"name": "<header name>", "trustAny":
-//     bool, "forwardToBackend": bool}. Missing entirely means no relays and
-//     header mode off, with the header name defaulting to
-//     X-WSO2-CLIENT-CERTIFICATE.
+//     bool, "forwardToBackend": bool}. Missing entirely means header mode is
+//     off unless the pool holds a relay entry, with the header name
+//     defaulting to X-WSO2-CLIENT-CERTIFICATE.
+//
+// Relay entries in the pool, and trustAny, turn on support for a client
+// certificate relayed by a front proxy in a request header, rather than
+// presented on the connection itself. A relay entry is never itself accepted
+// as a client — it exists only to let this policy recognize "this connection
+// IS the trusted front proxy", never "this connection is a valid API
+// caller". The connection's own certificate is always judged first; a header
+// is only ever judged when that certificate did not pass `accept` — see
+// evaluate's doc comment for the full decision order.
 //
 // One developer-facing parameter shapes what reaches the backend:
 // forwardCertificate (default true). When false, an allowed request reaches
@@ -102,20 +104,10 @@ const (
 	defaultErrorMessageFormat  = "json"
 	defaultErrorMessage        = "Authentication failed"
 
-	// internalAcceptParam and internalPoolParam are the controller-injected
+	// internalAcceptParam and internalHeaderParam are the controller-injected
 	// params described in the package doc comment. Never present in the
 	// author-facing policy-definition.yaml schema.
 	internalAcceptParam = "__wso2_internal_mtls_accept"
-	internalPoolParam   = "__wso2_internal_mtls_pool"
-
-	// internalRelaysParam and internalHeaderParam are the two additional
-	// controller-injected params that turn on client-certificate-header
-	// support: __wso2_internal_mtls_relays (an ordered array of
-	// {"name", "certificates", "match"} — pool entries marked as a front-proxy
-	// relay) and __wso2_internal_mtls_header ({"name", "trustAny",
-	// "forwardToBackend"}). Both are optional; absent means no relays and
-	// header mode off. Never present in the author-facing schema.
-	internalRelaysParam = "__wso2_internal_mtls_relays"
 	internalHeaderParam = "__wso2_internal_mtls_header"
 
 	// defaultHeaderName is used when __wso2_internal_mtls_header is absent or
@@ -162,11 +154,11 @@ const (
 	sourceBypass    = "bypass"
 )
 
-// acceptEntry is one parsed, ready-to-verify entry of the controller-resolved
-// accept list (see __wso2_internal_mtls_accept above).
+// acceptEntry is one parsed entry of the accept list (see
+// __wso2_internal_mtls_accept above): the pool entry it names and the
+// narrowing it applies. Its trust anchors come from the pool, per request.
 type acceptEntry struct {
-	ca    string
-	roots []*x509.Certificate
+	ca string
 
 	// uriSANs/dnsSANs narrow this entry to certificates whose SANs overlap
 	// these values; nil (not empty) means "this entry carries no such
@@ -179,24 +171,6 @@ type acceptEntry struct {
 	// thumbprint is one of these values. Normalized to lowercase hex with no
 	// separators at parse time. Nil means no thumbprint narrowing.
 	thumbprints []string
-}
-
-// relayEntry is one parsed entry of __wso2_internal_mtls_relays: a pool
-// certificate authority marked as a front-proxy relay. A relay entry can
-// never itself be an accept entry (enforced by the controller's validator,
-// see mtls-header-relay.feature's "cannot be accepted as a client" scenario)
-// — this policy only ever uses roots/match here to decide whether the
-// CONNECTION's own certificate came from a trusted relay, never to
-// authenticate the relay as an API caller.
-type relayEntry struct {
-	name  string
-	roots []*x509.Certificate
-
-	// uriSANs/dnsSANs narrow this relay to connections whose SANs overlap
-	// these values; nil means no such narrowing. Same semantics as
-	// acceptEntry's fields.
-	uriSANs []string
-	dnsSANs []string
 }
 
 // headerConfig is the parsed __wso2_internal_mtls_header param.
@@ -245,19 +219,21 @@ type evaluationResult struct {
 	relaySubject string
 }
 
-// MtlsAuthPolicy authenticates API callers via mutual TLS. Unlike the
-// stateless dev/sample policies elsewhere in this repo, this policy IS its
-// per-binding instance state: GetPolicy parses the controller-resolved accept
-// list and client-CA pool once, at policy-bind time, into x509.Certificate
-// values — so a malformed pool entry surfaces as a bind-time error instead of
-// being re-parsed (and possibly failing) on every request. This mirrors the
-// gateway-controller's cors policy's GetPolicy: a per-binding instance
-// carrying its own parsed state, rather than a stateless singleton shared
-// across every binding.
+// MtlsAuthPolicy authenticates API callers via mutual TLS. An instance holds
+// only what its binding configured — the accept list's names and narrowing,
+// the header settings, forwardCertificate — and no certificate material: the
+// pool it verifies against is the shared, per-version parsed set read on
+// every request (see authorityCache).
 type MtlsAuthPolicy struct {
-	accept []acceptEntry
-	pool   []*x509.Certificate
-	relays []relayEntry
+	// accept is the author's accept list; nil with inheritAccept set when the
+	// author omitted it, meaning every client entry in the pool.
+	accept        []acceptEntry
+	inheritAccept bool
+
+	// acceptNames is accept's pool entry names joined in order, identifying
+	// this list in the warning logged when none of them is in the pool.
+	acceptNames string
+
 	header headerConfig
 
 	// forwardCertificate is the developer-facing parameter of the same name:
@@ -269,47 +245,49 @@ type MtlsAuthPolicy struct {
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
 //
 // Deploy-time validation of `accept` (the gateway-controller's mtls-auth
-// validator) is what guarantees every instance of this policy can name at
-// least one reachable client authority — see go-network-service-hardening.md
-// and authentication_authorization.md for the invariants that validation, and
-// this policy's own fail-closed behavior below, jointly uphold. A parse
-// failure here (a pool or accept-list certificate that isn't valid PEM/DER) is
-// itself a GetPolicy error, refusing to bind this policy instance rather than
-// deferring the failure to request time.
+// validator) is what guarantees every instance of this policy names only
+// client authorities that were in the pool when it was deployed — see
+// go-network-service-hardening.md and authentication_authorization.md for
+// the invariants that validation, and this policy's own fail-closed behavior
+// below, jointly uphold. Binding parses no certificates; a malformed accept
+// list or forwardCertificate is a GetPolicy error, refusing to bind this
+// policy instance rather than guessing.
 func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
-	pool, err := parsePoolParam(params[internalPoolParam])
-	if err != nil {
-		return nil, fmt.Errorf("mtls-auth: parsing client-CA pool: %w", err)
-	}
 	accept, err := parseAcceptParam(params[internalAcceptParam])
 	if err != nil {
 		return nil, fmt.Errorf("mtls-auth: parsing accept list: %w", err)
 	}
-	relays, err := parseRelaysParam(params[internalRelaysParam])
-	if err != nil {
-		return nil, fmt.Errorf("mtls-auth: parsing relay list: %w", err)
-	}
-	header := parseHeaderParam(params[internalHeaderParam])
 	forwardCertificate, err := parseForwardCertificateParam(params[forwardCertificateParam])
 	if err != nil {
 		return nil, fmt.Errorf("mtls-auth: %w", err)
 	}
-	p := &MtlsAuthPolicy{
-		accept:             accept,
-		pool:               pool,
-		relays:             relays,
-		header:             header,
-		forwardCertificate: forwardCertificate,
+	names := make([]string, len(accept))
+	for i, entry := range accept {
+		names[i] = entry.ca
 	}
-	p.warnUnpooledAcceptAuthorities()
-	return p, nil
+	return &MtlsAuthPolicy{
+		accept:             accept,
+		inheritAccept:      params[internalAcceptParam] == nil,
+		acceptNames:        strings.Join(names, ","),
+		header:             parseHeaderParam(params[internalHeaderParam]),
+		forwardCertificate: forwardCertificate,
+	}, nil
 }
 
 // headerModeOn reports whether a client-certificate header can ever be
-// believed for this policy instance: at least one relay entry exists, or the
-// (explicitly off-by-default) trustAny bypass is configured.
-func (p *MtlsAuthPolicy) headerModeOn() bool {
-	return len(p.relays) > 0 || p.header.trustAny
+// believed: the pool holds at least one relay entry, or the (explicitly
+// off-by-default) trustAny bypass is configured.
+func (p *MtlsAuthPolicy) headerModeOn(set *authoritySet) bool {
+	return len(set.relays) > 0 || p.header.trustAny
+}
+
+// acceptEntries returns the accept list evaluated against set: the author's
+// own list, or — when the author omitted it — every client entry in set.
+func (p *MtlsAuthPolicy) acceptEntries(set *authoritySet) []acceptEntry {
+	if p.inheritAccept {
+		return set.inherited
+	}
+	return p.accept
 }
 
 // Mode declares that mtls-auth only needs the request-header phase: the
@@ -354,22 +332,26 @@ func (p *MtlsAuthPolicy) Mode() policy.ProcessingMode {
 //     certificate gets no second chance.
 //     c. No TLS attributes or no Envoy verdict at all → deny
 //     attribute_absent.
+//
+// Every step reads the pool from the one set loaded at the start, so a
+// single request is judged against a single version of the pool.
 func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[string]interface{}) evaluationResult {
 	now := time.Now()
+	set := clientAuthorities.get()
 	tls := reqCtx.PeerCertificate()
-	headerValues := p.headerValues(reqCtx)
+	headerValues := p.headerValues(reqCtx, set)
 	headerPresent := len(headerValues) > 0
 
 	if connectionVerified(tls) {
-		connection := p.evaluateVerifiedConnection(reqCtx, tls, now)
+		connection := p.evaluateVerifiedConnection(set, reqCtx, tls, now)
 		if connection.authenticated || !headerPresent {
 			return connection
 		}
 		if p.header.trustAny {
-			return p.evaluateHeaderCertificate(headerValues, now, sourceBypass, "", "")
+			return p.evaluateHeaderCertificate(set, headerValues, now, sourceBypass, "", "")
 		}
-		if relay, relayLeaf, ok := p.matchRelay(reqCtx, tls, now); ok {
-			return p.evaluateHeaderCertificate(headerValues, now, sourceHeader, relay.name, relayLeaf.Subject.String())
+		if relay, relayLeaf, ok := set.matchRelay(reqCtx, tls, now); ok {
+			return p.evaluateHeaderCertificate(set, headerValues, now, sourceHeader, relay.name, relayLeaf.Subject.String())
 		}
 		p.logIgnoredHeader(tls)
 		return connection
@@ -384,7 +366,7 @@ func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[str
 		deny.reason = reasonAttributeAbsent
 	case !tls.MTLS:
 		if headerPresent && p.header.trustAny {
-			return p.evaluateHeaderCertificate(headerValues, now, sourceBypass, "", "")
+			return p.evaluateHeaderCertificate(set, headerValues, now, sourceBypass, "", "")
 		}
 		if headerPresent {
 			p.logIgnoredHeader(tls)
@@ -393,7 +375,7 @@ func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[str
 	case tls.PeerCertValid == nil:
 		deny.reason = reasonAttributeAbsent
 	default:
-		reason, rejectedLeaf := p.deriveRejectReason(tls, now)
+		reason, rejectedLeaf := set.deriveRejectReason(tls, now)
 		deny.reason = reason
 		if rejectedLeaf != nil {
 			deny = withLeafInfo(deny, rejectedLeaf)
@@ -427,7 +409,7 @@ func withLeafInfo(result evaluationResult, leaf *x509.Certificate) evaluationRes
 // verdict is not a substitute for this policy's own work: the leaf is parsed
 // and its validity dates re-checked on every request before the accept list
 // runs.
-func (p *MtlsAuthPolicy) evaluateVerifiedConnection(reqCtx *policy.RequestHeaderContext, tls *policy.DownstreamTLS, now time.Time) evaluationResult {
+func (p *MtlsAuthPolicy) evaluateVerifiedConnection(set *authoritySet, reqCtx *policy.RequestHeaderContext, tls *policy.DownstreamTLS, now time.Time) evaluationResult {
 	deny := evaluationResult{authenticated: false, entryIndex: -1, source: sourceHandshake}
 
 	leaf, err := parseCertificatePEM(tls.PeerCertificatePEM)
@@ -444,7 +426,7 @@ func (p *MtlsAuthPolicy) evaluateVerifiedConnection(reqCtx *policy.RequestHeader
 		return withLeafInfo(deny, leaf)
 	}
 
-	result := p.evaluateAcceptList(leaf, p.intermediatesPool(reqCtx, tls), now, tls.SHA256Thumbprint)
+	result := p.evaluateAcceptList(set, leaf, set.connectionIntermediates(reqCtx, tls), now, tls.SHA256Thumbprint)
 	result.source = sourceHandshake
 	return result
 }
@@ -460,7 +442,7 @@ func (p *MtlsAuthPolicy) evaluateVerifiedConnection(reqCtx *policy.RequestHeader
 // trusted relay before the header's own certificate was evaluated at all, so
 // that fact belongs on the result regardless of what this header's
 // certificate turns out to do.
-func (p *MtlsAuthPolicy) evaluateHeaderCertificate(values []string, now time.Time, source, relayName, relaySubject string) evaluationResult {
+func (p *MtlsAuthPolicy) evaluateHeaderCertificate(set *authoritySet, values []string, now time.Time, source, relayName, relaySubject string) evaluationResult {
 	deny := evaluationResult{
 		authenticated: false, entryIndex: -1,
 		source: source, relayedBy: relayName, relaySubject: relaySubject,
@@ -486,12 +468,12 @@ func (p *MtlsAuthPolicy) evaluateHeaderCertificate(values []string, now time.Tim
 		return withLeafInfo(deny, leaf)
 	}
 
-	result := p.evaluateAcceptList(leaf, p.poolOnlyIntermediates(), now, "")
+	result := p.evaluateAcceptList(set, leaf, set.pool, now, "")
 	// No handshake verified this certificate, so the policy distinguishes the
 	// two ways it can reach no accept entry: it chains to no pooled authority
 	// at all (untrusted_chain), or it does but this API does not accept that
 	// authority (authority_not_accepted).
-	if result.reason == reasonAuthorityNotAccepted && !p.chainsToPool(leaf, now) {
+	if result.reason == reasonAuthorityNotAccepted && !set.chainsToPool(leaf, now) {
 		result.reason = reasonUntrustedChain
 	}
 	result.source = source
@@ -519,15 +501,18 @@ func acceptRejectRank(reason string) int {
 }
 
 // evaluateAcceptList is the accept-list matching loop shared by both the
-// connection path and the believed-header path: the first accept entry that
-// verifies leaf against its roots (via intermediates for path-building) AND
+// connection path and the believed-header path: the first accept entry whose
+// pool entry in set verifies leaf (via intermediates for path-building) AND
 // satisfies every narrowing it carries wins. On a deny, the reported reason
 // is the MOST SPECIFIC rejection reached across every entry (see
 // acceptRejectRank) — an entry whose authority matched but SAN narrowing
 // failed makes the deny at least san_mismatch, one whose authority and SAN
 // both matched but thumbprint narrowing failed makes it thumbprint_mismatch,
 // and authority_not_accepted only stands when no entry's authority verified
-// the certificate at all.
+// the certificate at all. An entry naming no client entry in set matches
+// nothing; when that is true of every entry, the deny is
+// authority_not_accepted and the drift is logged once for this set (see
+// warnNoAcceptedAuthority).
 //
 // connectionThumbprint is the Envoy-reported SHA-256 digest for THIS SAME
 // connection's certificate, used only as a defense-in-depth cross-check
@@ -535,7 +520,7 @@ func acceptRejectRank(reason string) int {
 // header-carried leaf, which has no corresponding Envoy verdict to check
 // against (skipping the cross-check, not disabling the thumbprint narrowing
 // itself).
-func (p *MtlsAuthPolicy) evaluateAcceptList(leaf *x509.Certificate, intermediates *x509.CertPool, now time.Time, connectionThumbprint string) evaluationResult {
+func (p *MtlsAuthPolicy) evaluateAcceptList(set *authoritySet, leaf *x509.Certificate, intermediates *x509.CertPool, now time.Time, connectionThumbprint string) evaluationResult {
 	canonicalThumbprint := sha256Hex(leaf.Raw)
 	deny := evaluationResult{
 		authenticated: false, entryIndex: -1,
@@ -551,8 +536,14 @@ func (p *MtlsAuthPolicy) evaluateAcceptList(leaf *x509.Certificate, intermediate
 		}
 	}
 
-	for i, entry := range p.accept {
-		if !verifyLeafAgainstRoots(leaf, entry.roots, intermediates, now) {
+	inPool := 0
+	for i, entry := range p.acceptEntries(set) {
+		roots, ok := set.clients[entry.ca]
+		if !ok {
+			continue
+		}
+		inPool++
+		if !verifyLeafAgainstRoots(leaf, roots, intermediates, now) {
 			continue
 		}
 
@@ -589,17 +580,40 @@ func (p *MtlsAuthPolicy) evaluateAcceptList(leaf *x509.Certificate, intermediate
 		}
 	}
 
+	if inPool == 0 {
+		p.warnNoAcceptedAuthority(set)
+	}
 	return deny
 }
 
+// warnNoAcceptedAuthority logs a WARN, once per pool version for this accept
+// list, that none of the pool entries it names is in the pool — a chain that
+// arrived before the pool entries it names, or an entry removed while this
+// API still names it. Every request is denied until the pool holds one of
+// them again.
+func (p *MtlsAuthPolicy) warnNoAcceptedAuthority(set *authoritySet) {
+	key := "accept:" + p.acceptNames
+	if p.inheritAccept {
+		key = "inherit"
+	}
+	if !set.firstWarning(key) {
+		return
+	}
+	slog.Warn("mtls-auth: none of the client certificate authorities this API accepts is in the gateway's client-CA pool",
+		slog.String("accept", p.acceptNames),
+		slog.Bool("inherited", p.inheritAccept),
+		slog.Uint64("pool_version", set.version),
+	)
+}
+
 // matchRelay reports whether the CONNECTION's own certificate (never the
-// header's) authenticates as one of this policy instance's relay entries:
+// header's) authenticates as one of the pool's relay entries:
 // Envoy's verdict positive (see connectionVerified), our own date re-check,
 // and
 // the leaf verifies against the relay's roots (Intermediates = pool + XFCC
 // chain, KeyUsages ExtKeyUsageAny — identical parameters to accept-entry
 // verification) and satisfies the relay's SAN narrowing if any.
-func (p *MtlsAuthPolicy) matchRelay(reqCtx *policy.RequestHeaderContext, tls *policy.DownstreamTLS, now time.Time) (*relayEntry, *x509.Certificate, bool) {
+func (s *authoritySet) matchRelay(reqCtx *policy.RequestHeaderContext, tls *policy.DownstreamTLS, now time.Time) (*relayEntry, *x509.Certificate, bool) {
 	if !connectionVerified(tls) {
 		return nil, nil, false
 	}
@@ -611,9 +625,9 @@ func (p *MtlsAuthPolicy) matchRelay(reqCtx *policy.RequestHeaderContext, tls *po
 		return nil, nil, false
 	}
 
-	intermediates := p.intermediatesPool(reqCtx, tls)
-	for i := range p.relays {
-		entry := &p.relays[i]
+	intermediates := s.connectionIntermediates(reqCtx, tls)
+	for i := range s.relays {
+		entry := &s.relays[i]
 		if !verifyLeafAgainstRoots(leaf, entry.roots, intermediates, now) {
 			continue
 		}
@@ -642,46 +656,13 @@ func (p *MtlsAuthPolicy) logIgnoredHeader(tls *policy.DownstreamTLS) {
 	)
 }
 
-// warnUnpooledAcceptAuthorities logs a WARN, once per policy binding, for
-// every accept entry whose named authority is not found among this
-// instance's own client-CA pool material — a sign the pool has drifted
-// since the chain was built (the authority was removed from the pool but
-// this API's accept list still carries its own embedded copy). Deploy-time
-// validation makes this unreachable in the normal flow, so it is not
-// throttled beyond binding.
-func (p *MtlsAuthPolicy) warnUnpooledAcceptAuthorities() {
-	for _, entry := range p.accept {
-		if authorityInPool(entry.roots, p.pool) {
-			continue
-		}
-		slog.Warn("mtls-auth: accept entry names an authority not present in the gateway's client-CA pool",
-			slog.String("ca", entry.ca),
-		)
-	}
-}
-
-// authorityInPool reports whether any certificate in roots (an accept
-// entry's own embedded authority certificates) is also present, by exact
-// match, in pool (the gateway's whole client-CA pool material this policy
-// instance holds).
-func authorityInPool(roots []*x509.Certificate, pool []*x509.Certificate) bool {
-	for _, root := range roots {
-		for _, poolCert := range pool {
-			if root.Equal(poolCert) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // headerValues returns the non-empty values of the configured
 // client-certificate header, or nil when header mode is off (the header is
 // then inert text). It reads the DOWNSTREAM SNAPSHOT (never live/mutated
 // headers — see DownstreamRequest's doc comment), so an earlier policy
 // rewriting/removing the header can never change this decision.
-func (p *MtlsAuthPolicy) headerValues(reqCtx *policy.RequestHeaderContext) []string {
-	if !p.headerModeOn() {
+func (p *MtlsAuthPolicy) headerValues(reqCtx *policy.RequestHeaderContext, set *authoritySet) []string {
+	if !p.headerModeOn(set) {
 		return nil
 	}
 	var values []string
@@ -693,45 +674,32 @@ func (p *MtlsAuthPolicy) headerValues(reqCtx *policy.RequestHeaderContext) []str
 	return values
 }
 
-// intermediatesPool builds the path-building-only certificate pool used for
-// CONNECTION-leaf verification (accept-entry and relay-entry alike): every
-// client-pool certificate, plus — only because tls.MTLS is true, per
-// directive 5 — any certificates in the X-Forwarded-Client-Cert Chain
-// element, read from the pristine downstream snapshot.
-func (p *MtlsAuthPolicy) intermediatesPool(reqCtx *policy.RequestHeaderContext, tls *policy.DownstreamTLS) *x509.CertPool {
-	intermediates := x509.NewCertPool()
-	for _, c := range p.pool {
+// connectionIntermediates returns the path-building-only certificate pool
+// used for CONNECTION-leaf verification (accept-entry and relay-entry
+// alike): every certificate in the pool, plus — only because tls.MTLS is
+// true, per directive 5 — any certificates in the X-Forwarded-Client-Cert
+// Chain element, read from the pristine downstream snapshot. The shared pool
+// is never modified; a request carrying chain certificates gets its own copy.
+func (s *authoritySet) connectionIntermediates(reqCtx *policy.RequestHeaderContext, tls *policy.DownstreamTLS) *x509.CertPool {
+	if tls == nil || !tls.MTLS {
+		return s.pool
+	}
+	chain := chainCertificatesFromXFCC(reqCtx)
+	if len(chain) == 0 {
+		return s.pool
+	}
+	intermediates := s.pool.Clone()
+	for _, c := range chain {
 		intermediates.AddCert(c)
 	}
-	if tls != nil && tls.MTLS {
-		for _, c := range p.chainCertificatesFromXFCC(reqCtx) {
-			intermediates.AddCert(c)
-		}
-	}
 	return intermediates
-}
-
-// poolOnlyIntermediates builds the path-building-only certificate pool used
-// for a HEADER-carried leaf: pool material only, since there is no XFCC
-// chain for a certificate that never terminated a TLS connection at this
-// gateway.
-func (p *MtlsAuthPolicy) poolOnlyIntermediates() *x509.CertPool {
-	pool := x509.NewCertPool()
-	for _, c := range p.pool {
-		pool.AddCert(c)
-	}
-	return pool
 }
 
 // verifyLeafAgainstRoots reports whether leaf verifies against roots (via
 // intermediates for path-building), using the same VerifyOptions every
 // verification in this package uses: ExtKeyUsageAny and the given point in
 // time.
-func verifyLeafAgainstRoots(leaf *x509.Certificate, rootCerts []*x509.Certificate, intermediates *x509.CertPool, now time.Time) bool {
-	roots := x509.NewCertPool()
-	for _, c := range rootCerts {
-		roots.AddCert(c)
-	}
+func verifyLeafAgainstRoots(leaf *x509.Certificate, roots, intermediates *x509.CertPool, now time.Time) bool {
 	_, err := leaf.Verify(x509.VerifyOptions{
 		Roots:         roots,
 		Intermediates: intermediates,
@@ -782,7 +750,7 @@ func sanNarrowedSubject(leaf *x509.Certificate, uriSANs, dnsSANs []string) (stri
 // attach tls.client.* span attributes (via withLeafInfo) to a certificate
 // Envoy rejected outright. A nil certificate means parsing itself failed;
 // the reason is always reasonInvalidCert in that case.
-func (p *MtlsAuthPolicy) deriveRejectReason(tls *policy.DownstreamTLS, now time.Time) (string, *x509.Certificate) {
+func (s *authoritySet) deriveRejectReason(tls *policy.DownstreamTLS, now time.Time) (string, *x509.Certificate) {
 	leaf, err := parseCertificatePEM(tls.PeerCertificatePEM)
 	if err != nil {
 		return reasonInvalidCert, nil
@@ -796,7 +764,7 @@ func (p *MtlsAuthPolicy) deriveRejectReason(tls *policy.DownstreamTLS, now time.
 
 	// Not a date problem — distinguish "the chain genuinely doesn't reach a
 	// trusted authority" from some other reason Envoy rejected it.
-	if !p.chainsToPool(leaf, now) {
+	if !s.chainsToPool(leaf, now) {
 		return reasonUntrustedChain, leaf
 	}
 	return reasonInvalidCert, leaf
@@ -806,8 +774,8 @@ func (p *MtlsAuthPolicy) deriveRejectReason(tls *policy.DownstreamTLS, now time.
 // gateway's whole client-CA pool (not just this API's narrower accept list),
 // with the pool also serving as path-building material. Used only to choose
 // a deny reason, never to allow.
-func (p *MtlsAuthPolicy) chainsToPool(leaf *x509.Certificate, now time.Time) bool {
-	return verifyLeafAgainstRoots(leaf, p.pool, p.poolOnlyIntermediates(), now)
+func (s *authoritySet) chainsToPool(leaf *x509.Certificate, now time.Time) bool {
+	return verifyLeafAgainstRoots(leaf, s.pool, s.pool, now)
 }
 
 // chainCertificatesFromXFCC extracts every certificate in the Chain= element
@@ -815,7 +783,7 @@ func (p *MtlsAuthPolicy) chainsToPool(leaf *x509.Certificate, now time.Time) boo
 // snapshot (DownstreamRequest(), never live/mutated headers) — a client can
 // never inject a value here because Envoy writes this header with
 // SANITIZE_SET, overwriting anything the caller sent.
-func (p *MtlsAuthPolicy) chainCertificatesFromXFCC(reqCtx *policy.RequestHeaderContext) []*x509.Certificate {
+func chainCertificatesFromXFCC(reqCtx *policy.RequestHeaderContext) []*x509.Certificate {
 	values := reqCtx.DownstreamRequest().Headers.Get(xfccHeaderName)
 	if len(values) == 0 {
 		return nil
@@ -993,35 +961,12 @@ func (p *MtlsAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusC
 
 // ─── Instance-param parsing (GetPolicy time) ─────────────────────────────────
 
-// parsePoolParam parses __wso2_internal_mtls_pool: an array of PEM strings.
-// A parse failure here is a GetPolicy error (see GetPolicy's doc comment).
-func parsePoolParam(raw interface{}) ([]*x509.Certificate, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	items, ok := raw.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("%s must be an array", internalPoolParam)
-	}
-	certs := make([]*x509.Certificate, 0, len(items))
-	for i, item := range items {
-		pemStr, ok := item.(string)
-		if !ok {
-			return nil, fmt.Errorf("%s[%d] must be a string", internalPoolParam, i)
-		}
-		cert, err := parseCertificatePEM(pemStr)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d]: %w", internalPoolParam, i, err)
-		}
-		certs = append(certs, cert)
-	}
-	return certs, nil
-}
-
 // parseAcceptParam parses __wso2_internal_mtls_accept: an ordered array of
-// accept-list entries. A certificate parse failure here is a GetPolicy error;
-// a malformed (non-string) narrowing value is dropped rather than failing the
-// whole entry, since narrowing is optional and best-effort by nature.
+// accept-list entries naming pool entries and the narrowing each applies.
+// Absent yields nil (the author omitted accept). A malformed entry or
+// narrowing value is a GetPolicy error, never silently "no narrowing" — a
+// malformed narrowing must fail closed at bind time, not widen what the
+// entry accepts.
 func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 	if raw == nil {
 		return nil, nil
@@ -1039,25 +984,7 @@ func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 		}
 
 		ca, _ := obj["ca"].(string)
-
-		certsRaw, ok := obj["certificates"].([]interface{})
-		if !ok {
-			return nil, fmt.Errorf("%s[%d].certificates must be an array", internalAcceptParam, i)
-		}
-		roots := make([]*x509.Certificate, 0, len(certsRaw))
-		for j, c := range certsRaw {
-			pemStr, ok := c.(string)
-			if !ok {
-				return nil, fmt.Errorf("%s[%d].certificates[%d] must be a string", internalAcceptParam, i, j)
-			}
-			cert, err := parseCertificatePEM(pemStr)
-			if err != nil {
-				return nil, fmt.Errorf("%s[%d].certificates[%d]: %w", internalAcceptParam, i, j, err)
-			}
-			roots = append(roots, cert)
-		}
-
-		entry := acceptEntry{ca: ca, roots: roots}
+		entry := acceptEntry{ca: ca}
 
 		if matchRaw, ok := obj["match"]; ok && matchRaw != nil {
 			matchObj, ok := matchRaw.(map[string]interface{})
@@ -1087,75 +1014,11 @@ func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 	return entries, nil
 }
 
-// parseRelaysParam parses __wso2_internal_mtls_relays: an array of relay
-// entries (pool entries marked as a front-proxy relay). Absent/nil means no
-// relays — header mode stays off unless trustAny is separately configured. A
-// certificate parse failure here is a GetPolicy error, mirroring
-// parseAcceptParam; a malformed narrowing value is dropped rather than
-// failing the whole entry, for the same reason.
-func parseRelaysParam(raw interface{}) ([]relayEntry, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	items, ok := raw.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("%s must be an array", internalRelaysParam)
-	}
-
-	entries := make([]relayEntry, 0, len(items))
-	for i, item := range items {
-		obj, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("%s[%d] must be an object", internalRelaysParam, i)
-		}
-
-		name, _ := obj["name"].(string)
-
-		certsRaw, ok := obj["certificates"].([]interface{})
-		if !ok {
-			return nil, fmt.Errorf("%s[%d].certificates must be an array", internalRelaysParam, i)
-		}
-		roots := make([]*x509.Certificate, 0, len(certsRaw))
-		for j, c := range certsRaw {
-			pemStr, ok := c.(string)
-			if !ok {
-				return nil, fmt.Errorf("%s[%d].certificates[%d] must be a string", internalRelaysParam, i, j)
-			}
-			cert, err := parseCertificatePEM(pemStr)
-			if err != nil {
-				return nil, fmt.Errorf("%s[%d].certificates[%d]: %w", internalRelaysParam, i, j, err)
-			}
-			roots = append(roots, cert)
-		}
-
-		entry := relayEntry{name: name, roots: roots}
-
-		if matchRaw, ok := obj["match"]; ok && matchRaw != nil {
-			matchObj, ok := matchRaw.(map[string]interface{})
-			if !ok {
-				return nil, fmt.Errorf("%s[%d].match must be an object", internalRelaysParam, i)
-			}
-			matchPath := fmt.Sprintf("%s[%d].match", internalRelaysParam, i)
-			var err error
-			if entry.uriSANs, err = stringListParam(matchObj, "uriSANs", matchPath); err != nil {
-				return nil, err
-			}
-			if entry.dnsSANs, err = stringListParam(matchObj, "dnsSANs", matchPath); err != nil {
-				return nil, err
-			}
-		}
-
-		entries = append(entries, entry)
-	}
-	return entries, nil
-}
-
 // parseHeaderParam parses __wso2_internal_mtls_header: {"name", "trustAny",
-// "forwardToBackend"}. Unlike parseAcceptParam/parseRelaysParam, absence or a
-// malformed shape is never a GetPolicy error — this param only ever narrows
-// optional, best-effort behaviour (a missing/invalid field falls back to its
-// documented default) and never carries certificate material that could fail
-// to parse.
+// "forwardToBackend"}. Unlike parseAcceptParam, absence or a malformed shape
+// is never a GetPolicy error — a missing/invalid field falls back to its
+// documented default, and every default is the more restrictive setting
+// (trustAny and forwardToBackend off).
 func parseHeaderParam(raw interface{}) headerConfig {
 	cfg := headerConfig{name: defaultHeaderName}
 	obj, ok := raw.(map[string]interface{})
@@ -1189,10 +1052,10 @@ func parseForwardCertificateParam(raw interface{}) (bool, error) {
 	return forward, nil
 }
 
-// stringListParam reads an optional list-of-strings parameter. An absent or
-// nil key yields nil; a present key that is not a list of strings is an
-// error, never silently "no narrowing" — a malformed narrowing must fail
-// closed at bind time, not widen what the entry accepts.
+// stringListParam reads an optional list-of-strings field. An absent or nil
+// key yields nil; a present key that is not a list of strings is an error,
+// never silently "no narrowing" — a malformed narrowing must fail closed,
+// not widen what the entry accepts.
 func stringListParam(obj map[string]interface{}, key, path string) ([]string, error) {
 	raw, ok := obj[key]
 	if !ok || raw == nil {

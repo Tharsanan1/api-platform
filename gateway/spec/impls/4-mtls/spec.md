@@ -77,7 +77,10 @@ Each decision states what was chosen and why.
 | D9 | Invalid client certificate | **Envoy validates but never drops** — `trust_chain_verification: ACCEPT_UNTRUSTED`; the verdict reaches the policy as `connection.peer_certificate_valid` and the policy rejects with the uniform `401` (§3.1.1) | Dropping at the handshake (a TLS alert with no HTTP response, no analytics, no log line) |
 | D10 | Propagation of changes | **The policy re-evaluates `accept` and `notAfter` on every request**; pool changes reach new handshakes only. No connection-duration bound is added (§3.1.2) | A new `max_connection_duration` listener setting |
 | D11 | `X-Forwarded-Client-Cert` to backends | **Only on routes whose chain contains `mtls-auth`**: every other route strips it with route-level `request_headers_to_remove` (§3.1.7) | Forward whenever a certificate was presented |
-| D12 | Client certificate **relayed in a header** by a front proxy | **Same policy, same `accept`.** Believed only when the connection's own certificate chains to a pool entry marked `role: relay`, or under an explicit, off-by-default `trust_any` bypass. The relayed certificate is validated by the policy itself. Header deleted before backends unless forwarding is enabled and the header was believed (§3.1.3) | A separate `header-cert-auth` policy; believing any pooled connection (the APIM gap); a trusted-IP rung (N5) |
+| D12 | Client certificate **relayed in a header** by a front proxy | **Same policy, same `accept`.** The connection's own certificate is judged first; a header is judged only when the connection does not pass `accept` and either chains to a pool entry marked `role: relay` (with that entry's `match`) or `trust_any` is on. `trust_any` is an explicit, off-by-default bypass and applies only to a connection that presented **no** certificate; a connection whose certificate Envoy rejected is never rescued by a header. The relayed certificate is validated by the policy itself. Header deleted before backends unless forwarding is enabled and the header was believed (§3.1.3) | A separate `header-cert-auth` policy; believing any pooled connection (the APIM gap); a trusted-IP rung (N5); judging the header before the connection |
+| D13 | Precedence between connection and header | **Connection first.** An API whose `accept` covers the connection's certificate authenticates the connection and ignores the header; only a connection that does not pass hands over to the header. One load balancer can therefore serve an API that accepts the load balancer itself and an API that accepts the clients it relays, with the same certificate (§3.1.3) | Header first — the relayed certificate overrides an accepted connection, so an API that accepts the load balancer refuses every end user who presented a certificate to it |
+| D14 | Certificate header to the backend, per API | **`forwardCertificate` parameter on `mtls-auth`, default `true`.** `false` removes `X-Forwarded-Client-Cert` (and the relayed header, when forwarding is on) before this API's backend; the decision lives with the policy that authenticated the certificate (§3.1.7) | Relying on the generic `remove-headers` policy alone; a route-level flag outside the policy |
+| D15 | How pool material reaches the policy engine | **Shared lazy resources, not per-route chain parameters.** Each pool entry is published once per gateway as a lazy resource of type `ClientCertificateAuthority` (ID = entry name; certificates, role, `match`); a chain carries only the developer's `accept` names and narrowing. The policy reads a shared, version-keyed parsed set on every request, rebuilt once per snapshot under a lock; a named entry absent from the store is a deny, never a skip (§3.1.4) | Copying the pool into every route's chain (payload grows with pool × operations, and every certificate change re-pushes every mTLS API); resolving at bind into per-instance copies (stale until re-push) |
 
 The rationale for each decision, including what was rejected and why, is in Appendix A.
 
@@ -300,29 +303,49 @@ comes from a shared corporate CA, the entry takes the same narrowing an `accept`
 (`match: {dnsSANs: [...]}`), because "chains to the corporate CA" would let every corporate service
 relay identities.
 
-**What the policy does, in plain steps.** On a route with `mtls-auth`:
+**What the policy does, in plain steps.** On a route with `mtls-auth`. "Passes `accept`" means the
+certificate chains to an `accept` entry (§3.1.2), is within its dates, and satisfies that entry's SAN
+and thumbprint narrowing. "Matches a relay" means the connection's certificate chains to a pool entry
+marked `role: relay` and satisfies that entry's `match`.
 
-1. Header absent → evaluate the connection's certificate against `accept`, exactly as §3.1.2.
-2. Header present, header mode off → same as step 1; the header is deleted.
-3. Header present, `trust_any` true → **believe the header** (go to step 5). The connection is not
-   consulted; this is the network-is-trusted posture.
-4. Header present, relay entries exist → believe the header **only if** the connection presented a
-   certificate, Envoy reported it valid, and it chains to a relay entry (with `match` satisfied).
-   Otherwise the header is **ignored, not rejected**: the connection's own certificate is evaluated
-   as itself, so a partner sending a header is authenticated as that partner, never as the header.
-5. Header believed → the certificate **inside the header** becomes the subject. Because no
-   handshake validated it, the policy does the work Envoy would have: parse it (URL-encoded PEM,
-   PEM, or bare base64 body, detected), check `notBefore`/`notAfter`, build a path to the pool
-   (§3.1.1's `x509.Verify`), then evaluate it against `accept`.
+1. Envoy says the connection is **good** (a certificate was presented and it chains to the pool).
+   1. The connection's certificate passes `accept` → **allow as the connection.** The header is
+      ignored; `trust_any` plays no role.
+   2. Otherwise, a header is present:
+      1. the header is not a single parseable certificate, or fails `accept` → **`401`**;
+      2. the header passes `accept` and `trust_any` is on → **allow as the relayed client**;
+      3. the header passes `accept`, `trust_any` is off → allow as the relayed client **only if the
+         connection matches a relay**; otherwise **`401`**.
+   3. Otherwise (no header) → **`401`**.
+2. Envoy says the connection is **not good**.
+   1. No certificate was presented, `trust_any` is on, and the header passes `accept` → **allow as
+      the relayed client.**
+   2. A certificate was presented and Envoy rejected it → **`401`**, header ignored, `trust_any`
+      irrelevant: a caller who identified itself with a bad certificate gets no second chance.
+   3. Otherwise → **`401`**.
+3. Envoy delivered no verdict at all → **`401`** (a misconfiguration, treated as not good).
+
+When the header is believed, the certificate **inside the header** becomes the subject. Because no
+handshake validated it, the policy does the work Envoy would have: parse it (URL-encoded PEM, PEM, or
+bare base64 body, detected), check `notBefore`/`notAfter`, build a path to the pool (§3.1.1's
+`x509.Verify`), then evaluate it against `accept`.
 
 | Header | Connection certificate | Header mode | Evaluated against `accept` |
 |---|---|---|---|
-| absent | none / invalid / valid | any | none → `401`; invalid → `401`; valid → the connection certificate |
-| present | any | off | as if absent; header deleted |
-| present | none or invalid | relay | none → `401 no_certificate`; invalid → `401` (Envoy's reason). Header ignored |
-| present | valid, not a relay entry | relay | the **connection** certificate, as itself |
-| present | valid, chains to a relay entry | relay | the **header** certificate |
-| present | anything, even none | bypass | the **header** certificate |
+| any | passes `accept` | any | the **connection** certificate; the header is ignored |
+| absent | none / rejected / valid but not accepted | any | `401` (`no_certificate` / Envoy's reason / `authority_not_accepted`) |
+| present | rejected by Envoy | any, including bypass | `401` with Envoy's reason; header ignored |
+| present | none | relay | `401 no_certificate`; header ignored |
+| present | none | bypass | the **header** certificate |
+| present | valid, not accepted, not a relay | relay | the connection, as itself → `401` |
+| present | valid, not accepted, chains to a relay entry | relay | the **header** certificate |
+| present | valid, not accepted | bypass | the **header** certificate |
+
+An API whose `accept` covers a relay's authority (pooled a second time as a client entry, since a
+relay entry itself cannot be named) always stops at step 1.1 for that relay's traffic and never sees
+a relayed certificate. That is a legitimate "the load balancer is the caller" configuration, so the
+deploy succeeds, with the warning `MTLS_ACCEPT_NAMES_RELAY_AUTHORITY` (§5.2.2) because it is also
+easy to write by accident.
 
 **What `AuthContext` records.** `AuthType` stays `mtls`, so `subscription-validation`, analytics and
 every consumer are unchanged. `Properties` gains `source` = `handshake` \| `header` \| `bypass` and,
@@ -466,6 +489,31 @@ the `accept` entries in order per D4, and on the first match writes an `AuthCont
 metadata: no application id, nothing another policy consumes. On any failure, one uniform `401`
 (S2a) with the reason on telemetry only (§3.3).
 
+**Pool material delivery (D15).** The policy engine has no database; it learns about certificates only
+from the controller. Two channels exist on policy-xDS: per-route policy chains, and the shared
+**lazy resource** snapshot that already carries the LLM provider templates and that every Go policy
+reads through the SDK's process-wide `LazyResourceStore`. Pool material uses the second. The
+controller publishes every client-authority entry as a lazy resource — type
+`ClientCertificateAuthority`, ID the entry name, fields the PEM certificates, `role` and `match` —
+from the same handlers that update SDS, so a certificate change is one small push instead of a
+re-push of every mTLS API's chains. A chain carries only what the developer wrote: `accept` names,
+SAN and thumbprint narrowing, `forwardCertificate`.
+
+On the engine the policy keeps a single parsed set beside the store — trust anchors per entry,
+the intermediate pool, the relay entries with their `match` compiled — tagged with the store version
+it was built from. On each request the policy compares that tag with the store's current version:
+equal, use the set; different, one goroutine rebuilds it from the store while the others keep using
+the previous set, then the new one is swapped in. Parsing therefore happens once per snapshot, and
+every route sees a pool change on its next request without any chain push. The set is guarded by a
+read-write lock and swapped atomically; the rebuild is serialised so concurrent first-readers after a
+snapshot do not each parse the pool, and the race detector runs over the concurrency tests (§8.6).
+
+Fail-closed rules carry over. An `accept` name absent from the store — a chain that arrived before
+its entries, or an entry removed while an API still names it — is a deny with
+`authority_not_accepted` and the runtime WARN, healing on the next snapshot; `accept` omitted resolves
+to every non-relay entry currently in the store, which is the inheritance semantics evaluated live.
+The controller's deploy-time validation is unchanged; this only changes what travels.
+
 #### 3.1.5 The user-facing surface: a pool, and a policy that selects from it
 
 Two tiers, governed differently. This split is the design, not an implementation detail.
@@ -597,6 +645,13 @@ route a rejected certificate never reaches the backend at all:
 | `mtls-auth` | invalid, or valid but not in `accept` | `401` | never forwarded |
 | `mtls-auth` | valid and accepted | allow | forwarded, truthfully |
 
+**Per API, the backend may be spared the header.** `forwardCertificate: false` on `mtls-auth`
+(default `true`, §3.1.8) makes the policy remove `X-Forwarded-Client-Cert` — and the relayed header,
+when `forward_to_backend` is on — before this API's backend, on allow. The decision lives with the
+policy that authenticated the certificate rather than in a generic header policy, so it is visible
+next to `accept` and cannot be forgotten on a new API. The route-level stripping on routes without
+`mtls-auth` is unchanged.
+
 The **configured client-certificate header** (§3.1.3) follows the same rule with one addition: it is
 deleted on every route unless `forward_to_backend` is on **and** the gateway believed it. A header the
 gateway ignored is never forwarded, whatever the route.
@@ -611,6 +666,7 @@ policies already have, with the same defaults, and renders the body with the sam
 | `onFailureStatusCode` | `401` | status of every policy-layer rejection |
 | `errorMessageFormat` | `json` | `json` → JSON body below with `content-type: application/json`; `plain` → `<errorMessage>` as `text/plain`; `minimal` → the literal `Unauthorized` |
 | `errorMessage` | `Authentication failed` | the message text |
+| `forwardCertificate` | `true` | `false` removes the certificate headers before this API's backend on allow (§3.1.7) |
 
 Default body, byte for byte:
 
@@ -1068,6 +1124,14 @@ policy `i`", and the real response carries the actual numbers.
 | pool empty | `spec.policies[i]` | `mtls-auth` requires at least one client authority; add one with `POST /certificates` and `usage: client` |
 | `match.uriSANs: []`, or an empty string in `uriSANs`/`dnsSANs` | `spec.policies[i].params.accept[j].match.uriSANs` (or `…[k]` for the empty element) | list at least one non-empty SAN, or remove `match` to accept any certificate from this authority |
 | `thumbprints: []` | `spec.policies[i].params.accept[j].thumbprints` | list at least one fingerprint, or remove `thumbprints` to accept any certificate from this authority |
+| `accept` is not a list | `spec.policies[i].params.accept` | accept must be a list of entries; omit it to inherit every pooled authority |
+| an entry is not an object | `spec.policies[i].params.accept[j]` | each accept entry must be an object naming ca |
+| `match` is not an object | `spec.policies[i].params.accept[j].match` | match must be an object listing uriSANs or dnsSANs |
+| `match: {}` | `spec.policies[i].params.accept[j].match` | match must list uriSANs or dnsSANs; remove it to accept any certificate from this authority |
+| `uriSANs`/`dnsSANs` not a list | `spec.policies[i].params.accept[j].match.uriSANs` | uriSANs must be a list |
+| `thumbprints` not a list | `spec.policies[i].params.accept[j].thumbprints` | thumbprints must be a list |
+| `forwardCertificate` not a boolean | `spec.policies[i].params.forwardCertificate` | forwardCertificate must be true or false |
+| `executionCondition` on `mtls-auth` | `spec.policies[i].executionCondition` | mtls-auth runs on every request and cannot carry an executionCondition |
 | malformed fingerprint | `spec.policies[i].params.accept[j].thumbprints[k]` | a fingerprint is the SHA-256 of the certificate as 64 hex characters (colons and a `sha256:` prefix are accepted) |
 | unknown param (`thumbprint`, `mode`, …) | `spec.policies[i].params.thumbprint` | unknown parameter `thumbprint`; the field is `thumbprints` |
 | `mtls-auth` twice at one scope | `spec.policies[k]` | `mtls-auth` may appear once per scope; use several `accept` entries instead |
@@ -1169,8 +1233,9 @@ needs no gateway-side notification machinery.
 | `code` | Raised when | `field` |
 |---|---|---|
 | `MTLS_ACCEPT_INHERITS_POOL` | `accept` omitted while the pool holds >1 authority | `spec.policies[i].params.accept` |
-| `MTLS_ACCEPT_UNNARROWED` | an entry has neither `match` nor `thumbprints` while the pool holds >1 authority | `spec.policies[i].params.accept[j]` |
+| `MTLS_ACCEPT_UNNARROWED` | an explicit `accept` entry has neither `match` nor `thumbprints`, whatever the pool size — the risk depends on the authority's issuance, not on how many authorities are pooled. An omitted `accept` is covered by `MTLS_ACCEPT_INHERITS_POOL` instead | `spec.policies[i].params.accept[j]` |
 | `MTLS_AUTH_NOT_FIRST` | an auth policy precedes `mtls-auth` in the chain (§3.1.6) | `spec.policies[k]` |
+| `MTLS_ACCEPT_NAMES_RELAY_AUTHORITY` | an `accept` entry's authority is also pooled as a `role: relay` entry; this API authenticates the relay itself and never evaluates a relayed certificate (§3.1.3) | `spec.policies[i].params.accept[j].ca` |
 | `MTLS_THUMBPRINT_NORMALISED` | a fingerprint was rewritten to canonical form; `message` carries the canonical value | `spec.policies[i].params.accept[j].thumbprints[k]` |
 | `TLS_IDENTITY_EXPIRED` | `tls.identity` names an identity whose certificate has expired since upload | `spec.upstreamDefinitions[d].tls.identity` |
 | `TLS_VERIFY_HOSTNAME_DISABLED` | `verifyHostName: false` | `spec.upstreamDefinitions[d].tls.verifyHostName` |
@@ -1401,8 +1466,8 @@ each one.
 | S17 | A private key is never returned by any read operation **for any role**, including `admin`. Write-only, as `upstreamAuth.value` already is. | GO-AUTH-003 |
 | S18 | A dangling reference — `accept` naming an authority absent from the pool, or `tls.identity` naming a missing identity — is refused at deploy time. Silently denying one partner is worse than refusing the change. | GO-AUTH-017 |
 | S19 | Removing a certificate or an identity that a deployed API **names** (`accept[].ca`, `tls.trustedCAs[k]` or `tls.identity`) is **refused with `409`** listing the referencing APIs — the delete-time mirror of S18. APIs that merely inherit the pool are not references. `DELETE /certificates/{id}` checks no references today; with `trustedCAs` and `accept` it must, for both usages. | GO-AUTH-001 |
-| S20 | `X-Forwarded-Client-Cert` reaches a backend **only** on a route whose chain contains `mtls-auth` and whose policy accepted the certificate (D11). Every other route removes it with route-level `request_headers_to_remove`; a presented-but-untrusted or valid-but-irrelevant certificate never reaches a public backend as an XFCC identity. | N1 / GO-AUTH-017 |
-| S21 | A client certificate carried in a header is believed **only** when the connection's own certificate chains to a pool entry marked `role: relay`, or when `trust_any` is explicitly true — never because the connection's certificate is merely valid against the pool, and never by default. An ignored header changes nothing about the request's identity. The relayed certificate is parsed, date-checked and path-verified by the policy before `accept` runs, since no handshake did. The header is deleted before every backend unless `forward_to_backend` is on and the header was believed. `trust_any` produces a startup `WARN` and a deploy warning while on. | GO-AUTH-001 / GO-AUTH-017 / N1 |
+| S20 | `X-Forwarded-Client-Cert` reaches a backend **only** on a route whose chain contains `mtls-auth`, whose policy allowed the request, and whose `forwardCertificate` is true (D11, D14). Every other route removes it with route-level `request_headers_to_remove`; a presented-but-untrusted or valid-but-irrelevant certificate never reaches a public backend as an XFCC identity. The header always describes the TLS connection Envoy terminated. | N1 / GO-AUTH-017 |
+| S21 | The connection's own certificate is judged before any header. A certificate carried in a header is believed **only** when the connection did not pass `accept` and either chains to a pool entry marked `role: relay` or `trust_any` is explicitly true — never because the connection's certificate is merely valid against the pool, and never by default. Under `trust_any` the header is believed only from a connection that presented no certificate; a connection whose certificate Envoy rejected is denied outright. An ignored header changes nothing about the request's identity. The relayed certificate is parsed, date-checked and path-verified by the policy before `accept` runs, since no handshake did. The header is deleted before every backend unless `forward_to_backend` is on, the header was believed, and `forwardCertificate` is true. `trust_any` produces a startup `WARN` and a deploy warning while on. | GO-AUTH-001 / GO-AUTH-017 / N1 |
 
 ---
 
@@ -1576,6 +1641,11 @@ test states its blast radius and its propagation time.
 - Non-`CERTIFICATE` PEM blocks in an identity upload are **rejected**, not silently skipped as
   `certstore.go:269` does for trust bundles — silently dropping a key means "your key vanished".
 
+- Pool delivery (D15): the parsed set is rebuilt exactly once per store version under concurrent
+  requests (run with `-race`); readers during a rebuild see the previous complete set, never a
+  partial one; a name absent from the store denies with `authority_not_accepted`; `accept` omitted
+  resolves to the store's current non-relay entries; a chain carries no PEM.
+
 ### 8.7 Security and abuse
 
 The tests that would catch a regression into a vulnerability. Not optional.
@@ -1695,8 +1765,8 @@ means the `POST /rest-apis` response; **request-time** means what a caller sees.
 | `accept` omitted, pool has >1 authority | `201` **with warning** (unnarrowed inheritance) | any cert from any pooled authority authenticates |
 | `accept` omitted, pool **empty** | **`400`** — nothing could validate (S8) | — |
 | `accept: []` | **`400`** — ambiguous between inherit and deny-all; "omit to inherit, or list ≥1 entry" | — |
-| `- ca: X` only, X in pool | `201` | any cert issued by X |
-| `- ca: X` only, pool has >1 authority | `201` with warning (unnarrowed entry) | as above |
+| `- ca: X` only, X in pool | `201` **with warning** (unnarrowed entry) | any cert issued by X |
+| `- ca: X` only, pool has >1 authority | `201` with the same warning | as above |
 | `- ca: X`, X **not** in pool | **`400`** naming X (S18) | — |
 | `- ca: X`, X has `role: relay` | **`400`** — a relay cannot be accepted as a client | — |
 | entry missing `ca` | **`400`** — `ca` required | — |
@@ -1726,6 +1796,14 @@ means the `POST /rest-apis` response; **request-time** means what a caller sees.
 | `mtls-auth` on a gateway with `router.https_enabled: false`, `trust_any` **true** | `201` **with `HEADER_CERT_BYPASS_ACTIVE`** — the header arrives over the plaintext port from the trusted network | header believed (§3.1.3 step 3); no header → `401 no_certificate` |
 | `mtls-auth` API called over the plaintext `listener_port` (HTTPS enabled) | `201` (nothing to refuse) | `401` — no certificate can exist on that connection; fail-closed, not an error condition. Exception: with `trust_any` true and the header present, the header is believed (§8.18 H14) |
 | `jwt-auth` listed **before** `mtls-auth` | `201` **with warning** (§3.1.6) | both enforced, in listed order |
+| `accept` given as an object, or an entry as a bare string | **`400`** naming the path | — |
+| `thumbprints` or `match.uriSANs` given as a scalar | **`400`** — "must be a list" | — |
+| `match: {}` or `match` as a scalar | **`400`** | — |
+| `executionCondition` on `mtls-auth` | **`400`** — the policy runs on every request | — |
+| pool holds only `role: relay` entries | **`400`** — no client authority (S8) | — |
+| `- ca: X` where X's authority is also pooled as a relay | `201` **with `MTLS_ACCEPT_NAMES_RELAY_AUTHORITY`** | the relay authenticates as itself; its header is never evaluated on this API |
+| `forwardCertificate: false` | `201` | allowed requests reach the backend with no certificate header |
+| `forwardCertificate: "no"` | **`400`** — must be true or false | — |
 
 ### 8.12 Input matrix — upstream `tls` block
 
@@ -2037,6 +2115,11 @@ the `mtls_auth.source` and subject columns.
 | H18 | relay, `forward_to_backend` | present | `client-a` valid, public API | none | `200`; header **deleted** — not believed | — |
 | H19 | relay | deploy `accept: [{ca: edge-lb-ca}]` | — | — | `400` (§5.2.1) | — |
 | H20 | relay | delete `edge-lb-ca`, `trust_any` false | — | — | `204`; header mode off; H7 now behaves as H6 | — |
+| H21 | relay | present (`client-a`) | `edge-lb` valid, **API accepts `edge-lb` as a client** (second pool entry) | **`edge-lb`** — the connection passes, header ignored | `200` as the load balancer; deploy carried `MTLS_ACCEPT_NAMES_RELAY_AUTHORITY` | `handshake` |
+| H22 | relay | absent | `edge-lb` valid, API accepts `edge-lb` as a client | `edge-lb` | `200` as the load balancer | `handshake` |
+| H23 | bypass | present (`client-a`) | **rejected** by Envoy (wrong CA or expired) | — (header ignored) | `401` with Envoy's reason — a bad connection certificate is never rescued | `handshake` |
+| H24 | relay, `forwardCertificate: false` | present (`client-a`) | `edge-lb` valid | `client-a` | `200`; neither certificate header reaches the backend | `header` |
+| H25 | off, `forwardCertificate: false` | absent | `client-a` valid | `client-a` | `200`; `X-Forwarded-Client-Cert` absent at the backend | `handshake` |
 
 Unit tests the matrix implies: header parsing accepts URL-encoded PEM, PEM and bare base64 and
 rejects everything else; the relay path check uses the same `x509.Verify` parameters as `accept`
@@ -2092,6 +2175,12 @@ capability negotiation (§6, deferred).
    own `vhosts.main`. Options, preconditions, verified platform facts, example API YAML and the
    target Envoy configuration are in [`sni-scoped-asking.md`](./sni-scoped-asking.md). Decide
    whether to adopt it, and if so in M3 or M4. Nothing in M1–M3 as specified depends on the answer.
+2. **Q-X — what `X-Forwarded-Client-Cert` says for a relayed identity.** The header always describes
+   the TLS connection, so when the policy believed a relayed certificate the backend sees the
+   proxy's certificate while the accepted identity is the relayed client. Options: remove the header
+   when `source` is `header` or `bypass`; leave it and document the difference; or synthesise it
+   from the accepted certificate. `forwardCertificate: false` (D14) already lets an API opt out of
+   the header entirely; this question is about what `true` should mean for relayed traffic.
 
 ---
 
@@ -2279,3 +2368,38 @@ connection (APIM's gap); a source-IP rung in this increment (N5 — it sits betw
 options and can be added later); a separate policy (the original N1, withdrawn); an `enabled` flag
 with no statement of who is trusted. The relayed certificate is validated by the policy because
 Envoy's verdict covers only the connection's certificate, which under relay is the proxy's.
+
+### A.13 D13 — Connection first, header second
+
+The header-first order (APIM's) fails a common topology: one load balancer with one certificate in
+front of an API that accepts the load balancer itself and an API that accepts the clients it
+relays. Header first makes the relayed certificate override the load balancer's on both APIs, so
+the "load balancer is the caller" API refuses every end user who presented a certificate and admits
+every one who did not. Judging the connection first lets each API's `accept` decide which party it
+authenticates: the API that accepts the load balancer's authority gets the load balancer, the API
+that accepts partner authorities gets the relayed client, from the same connection. The cost is that
+an API accepting both never sees the relayed identity, which the deploy-time warning names. With the
+same review the `trust_any` scope was narrowed: the bypass exists for proxies that cannot present a
+certificate at all, so it applies to a connection with no certificate and never to one whose
+certificate Envoy rejected — the only case in which the previous behaviour was more permissive than
+APIM, which refuses such a connection in the handshake.
+
+### A.14 D14 — `forwardCertificate` on the policy
+
+`X-Forwarded-Client-Cert` exists on a route only because `mtls-auth` is there, so whether the backend
+receives it is a property of that authentication, not of header hygiene in general. A parameter on
+the policy keeps the decision next to `accept`, works without a second policy in the chain, and
+gives the open question Q-X a single place to land. The generic `remove-headers` policy still
+works and remains the answer for every other header.
+
+### A.15 D15 — Pool material as shared lazy resources
+
+Copying the pool into every route's chain was the smallest correct delivery when the feature was
+first built, but it scales as pool size × operations × APIs and it forces a re-push of every mTLS
+chain on every certificate change. The engine already has a per-gateway resource channel with a
+process-wide store that policies read directly, so the pool moves there. Reading the shared,
+already-parsed set on every request rather than copying it into each instance at bind is what makes
+the move worthwhile: instances hold no certificate material, so a pool change is visible on the
+next request everywhere with no push, and a chain that arrives ahead of its entries denies until
+the snapshot lands instead of being dropped. The parse cache keyed by store version keeps the
+per-request cost to a version compare and a few map reads.

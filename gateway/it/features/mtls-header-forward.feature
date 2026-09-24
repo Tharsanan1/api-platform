@@ -97,3 +97,35 @@ Feature: Forwarding a believed relayed certificate to the backend
     When I send a GET request to "https://localhost:8443/fwd/v1.0/anything" with client certificate "client-valid" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-wrong-ca"
     Then the response status code should be 200
     And the response should not contain echoed header "x-wso2-client-certificate"
+
+  Scenario: An API that opts out of the certificate header receives neither header even with forwarding on
+    Given I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: fwd-nofwd-api
+      spec:
+        displayName: Forward Opt-out API
+        version: v1.0
+        context: /fwd-nofwd/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        policies:
+          - name: mtls-auth
+            version: v1
+            params:
+              accept:
+                - ca: fwd-partner-a
+              forwardCertificate: false
+        operations:
+          - method: GET
+            path: /anything
+      """
+    And the response should be successful
+    And I wait for the endpoint "http://localhost:8080/fwd-nofwd/v1.0/anything" to respond with status 401
+    When I send a GET request to "https://localhost:8443/fwd-nofwd/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
+    Then the response status code should be 200
+    And the response should not contain echoed header "x-wso2-client-certificate"
+    And the response should not contain echoed header "x-forwarded-client-cert"

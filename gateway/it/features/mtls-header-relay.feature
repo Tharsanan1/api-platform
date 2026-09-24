@@ -179,6 +179,52 @@ Feature: Client certificates relayed in a header by a front proxy
     Then the response status should be 400
     And the response should list a validation error for field "spec.policies[0].params.accept[0].ca" with message "relay-edge-lb is a relay (front proxy) entry and cannot be accepted as a client"
 
+  Scenario: One load balancer serves an API that accepts it and an API that accepts the clients it relays
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    And the response status should be 201
+    And the certificate fixture "edge-lb-ca" is pooled as "relay-edge-lb-client" with usage "client"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: relay-lb-api
+      spec:
+        displayName: Relay LB API
+        version: v1.0
+        context: /relay-lb/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        policies:
+          - name: mtls-auth
+            version: v1
+            params:
+              accept:
+                - ca: relay-edge-lb-client
+        operations:
+          - method: GET
+            path: /anything
+      """
+    Then the response should be successful
+    And the response should include a warning with code "MTLS_ACCEPT_NAMES_RELAY_AUTHORITY" for field "spec.policies[0].params.accept[0].ca"
+    And I wait for the endpoint "http://localhost:8080/relay-lb/v1.0/anything" to respond with status 401
+    Given I reset the analytics collector
+    When I send a GET request to "https://localhost:8443/relay-lb/v1.0/anything" with client certificate "edge-lb"
+    Then the response status code should be 200
+    When I send a GET request to "https://localhost:8443/relay-lb/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
+    Then the response status code should be 200
+    And I wait 5 seconds for analytics to be published
+    And the analytics collector should have received at least 2 events
+    And the latest analytics event should have the user id of fixture "edge-lb"
+    Given I reset the analytics collector
+    When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
+    Then the response status code should be 200
+    And I wait 5 seconds for analytics to be published
+    And the latest analytics event should have the user id of fixture "client-valid"
+    When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb"
+    Then the response status code should be 401
+
   Scenario: Removing the last relay entry turns header mode off again
     Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
     And the response status should be 201

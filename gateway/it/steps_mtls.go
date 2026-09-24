@@ -186,6 +186,7 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	// ---- HTTPS listener probing ----
 	ctx.Step(`^the HTTPS listener should request a client certificate$`, m.httpsListenerShouldRequestClientCertificate)
 	ctx.Step(`^the HTTPS listener should not request a client certificate$`, m.httpsListenerShouldNotRequestClientCertificate)
+	ctx.Step(`^the HTTPS listener should present the certificate in "([^"]*)"$`, m.httpsListenerShouldPresentCertificateFile)
 
 	// ---- Requests carrying (or omitting) a client certificate ----
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and its chain$`, m.getWithClientCertificateAndChain)

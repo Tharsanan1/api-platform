@@ -203,6 +203,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     And the response body should contain "tls_certificate_sds_secret_configs"
     And the response body should not contain "private_key"
     And the response body should not contain "tls_certificates"
+    And the HTTPS listener should present the certificate in "../gateway-controller/listener-certs/default-listener.crt"
 
   # ==================== DEPLOYMENTS THAT COULD NEVER AUTHENTICATE ANYONE ARE REFUSED ====================
 
@@ -275,6 +276,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
       | accept: [{ ca: listener-partner-a, thumbprints: ["zz"] }]           | spec.policies[0].params.accept[0].thumbprints[0]     | a thumbprint is the SHA-256 of the certificate as 64 hex characters (colons and a sha256: prefix are accepted)  |
       | accept: [{ ca: listener-partner-a, thumbprint: "9f86d081" }]        | spec.policies[0].params.accept[0].thumbprint         | unknown parameter thumbprint; the field is thumbprints                                                            |
       | mode: strict                                                        | spec.policies[0].params.mode                         | unknown parameter mode                                                                                            |
+      | forwardCertificate: "no"                                            | spec.policies[0].params.forwardCertificate           | forwardCertificate must be true or false                                                         |
       | accept: { ca: listener-partner-a }                                  | spec.policies[0].params.accept                       | accept must be a list of entries; omit it to inherit every pooled authority                      |
       | accept: [listener-partner-a]                                        | spec.policies[0].params.accept[0]                    | each accept entry must be an object naming ca                                                    |
       | accept: [{ ca: listener-partner-a, thumbprints: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" }] | spec.policies[0].params.accept[0].thumbprints | thumbprints must be a list                                                              |
@@ -449,9 +451,39 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     And the JSON response array field "spec.policies[0].params.accept" should have 2 items
     When I delete the API "mtls-warned-api"
 
-  Scenario: An entry with neither match nor thumbprints warns while the pool holds several authorities
+  Scenario: An entry with neither match nor thumbprints warns
     Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
     And the certificate fixture "ca-b" is pooled as "listener-partner-b" with usage "client"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: mtls-warned-api
+      spec:
+        displayName: mTLS Warned API
+        version: v1.0
+        context: /mtls-warned/$version
+        upstream:
+          main:
+            url: http://sample-backend:9080/api/v1
+        policies:
+          - name: mtls-auth
+            version: v1
+            params:
+              accept:
+                - ca: listener-partner-a
+        operations:
+          - method: GET
+            path: /health
+      """
+    Then the response should be successful
+    And the response should include a warning with code "MTLS_ACCEPT_UNNARROWED" for field "spec.policies[0].params.accept[0]"
+    When I delete the API "mtls-warned-api"
+
+  Scenario: An explicit entry is warned as unnarrowed even when the pool holds one authority
+    Given the client authority pool is empty
+    And the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1

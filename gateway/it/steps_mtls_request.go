@@ -22,9 +22,12 @@
 package it
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/pem"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -223,4 +226,36 @@ func (m *mtlsSteps) getWithJWTTokenAndNoClientCertificate(url string) error {
 	restore := m.useHeaderForOneRequest("Authorization", "Bearer "+m.jwtSteps.currentToken)
 	defer restore()
 	return m.getWithNoClientCertificate(url)
+}
+
+// httpsListenerShouldPresentCertificateFile completes a TLS handshake with
+// the HTTPS listener and checks that the leaf certificate it presented is
+// byte-for-byte the certificate in the given PEM file — the file the
+// controller is configured with and serves to Envoy as the listener secret.
+func (m *mtlsSteps) httpsListenerShouldPresentCertificateFile(path string) error {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read expected listener certificate %q: %w", path, err)
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return fmt.Errorf("%q does not start with a PEM certificate", path)
+	}
+	expected := sha256.Sum256(block.Bytes)
+
+	conn, err := tls.Dial("tcp", httpsListenerAddr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		return fmt.Errorf("failed to complete a TLS handshake against %s: %w", httpsListenerAddr, err)
+	}
+	defer conn.Close()
+	peers := conn.ConnectionState().PeerCertificates
+	if len(peers) == 0 {
+		return fmt.Errorf("the HTTPS listener presented no certificate")
+	}
+	got := sha256.Sum256(peers[0].Raw)
+	if got != expected {
+		return fmt.Errorf("the HTTPS listener presented %q (sha256 %x), expected the certificate in %q (sha256 %x)",
+			peers[0].Subject.String(), got, path, expected)
+	}
+	return nil
 }

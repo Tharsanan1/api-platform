@@ -828,9 +828,9 @@ func TestSQLiteStorage_ListCertificatesByUsage(t *testing.T) {
 	assert.Equal(t, upstreamResults[0].UUID, upstreamCert.UUID)
 }
 
-// A schema version 4 database is migrated in place: its row reads back with
-// the column defaults and a new row saves with explicit usage and role.
-// Version 4 is a literal on purpose.
+// A database at the previous schema version is migrated in place: its row
+// reads back with the column defaults and a new row saves with explicit usage
+// and role.
 func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
 	const preMigrationSchemaVersion = previousSchemaVersion
 

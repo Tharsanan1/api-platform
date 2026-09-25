@@ -944,3 +944,44 @@ func TestGetPolicy_MalformedNarrowingFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestGetPolicy_EmptyNarrowingFailsClosed(t *testing.T) {
+	entries := []entrySpec{{ca: "auth-ca-a"}}
+
+	for name, tc := range map[string]struct {
+		mutate  func(entry map[string]interface{})
+		message string
+	}{
+		"empty match": {
+			mutate:  func(e map[string]interface{}) { e["match"] = map[string]interface{}{} },
+			message: "accept[0].match must list uriSANs or dnsSANs",
+		},
+		"empty uriSANs": {
+			mutate:  func(e map[string]interface{}) { e["match"] = map[string]interface{}{"uriSANs": []interface{}{}} },
+			message: "accept[0].match must list uriSANs or dnsSANs",
+		},
+		"empty uriSANs and dnsSANs": {
+			mutate: func(e map[string]interface{}) {
+				e["match"] = map[string]interface{}{"uriSANs": []interface{}{}, "dnsSANs": []interface{}{}}
+			},
+			message: "accept[0].match must list uriSANs or dnsSANs",
+		},
+		"empty thumbprints": {
+			mutate:  func(e map[string]interface{}) { e["thumbprints"] = []interface{}{} },
+			message: "accept[0].thumbprints must list at least one thumbprint",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			params := buildParams(entries)
+			entry := params[acceptParam].([]interface{})[0].(map[string]interface{})
+			tc.mutate(entry)
+			_, err := GetPolicy(policy.PolicyMetadata{}, params)
+			if err == nil {
+				t.Fatalf("expected GetPolicy to refuse an empty narrowing, got nil error")
+			}
+			if !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("GetPolicy error = %q, want it to contain %q", err.Error(), tc.message)
+			}
+		})
+	}
+}

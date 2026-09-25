@@ -3049,6 +3049,24 @@ func TestTranslator_CreateDownstreamTLSContext_ListenerCertViaSDS(t *testing.T) 
 		"the listener certificate/key must never be inlined into the LDS resource")
 }
 
+// A listener that requests a client certificate never resumes a session, so
+// every connection presents its certificate to mtls-auth; one that does not
+// request a certificate keeps resumption.
+func TestTranslator_CreateDownstreamTLSContext_SessionResumptionOnlyWithoutClientCertificate(t *testing.T) {
+	translator, err := NewTranslator(createTestLogger(), testRouterConfig(), nil, testConfig())
+	require.NoError(t, err)
+
+	requesting, err := translator.createDownstreamTLSContext(true)
+	require.NoError(t, err)
+	assert.True(t, requesting.GetDisableStatelessSessionResumption())
+	assert.True(t, requesting.GetDisableStatefulSessionResumption())
+
+	plain, err := translator.createDownstreamTLSContext(false)
+	require.NoError(t, err)
+	assert.False(t, plain.GetDisableStatelessSessionResumption())
+	assert.False(t, plain.GetDisableStatefulSessionResumption())
+}
+
 func TestTranslator_CreateRoute_Basic(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()

@@ -1212,6 +1212,41 @@ func TestUploadCertificate_DNSSANsElementEmpty_RejectedAtIndexZero(t *testing.T)
 	assert.Equal(t, "list at least one non-empty SAN", entry["message"])
 }
 
+func TestUploadCertificate_PrivateKeyInCertificateField_RejectedForEveryUsage(t *testing.T) {
+	const certificateFieldCarriesKey = "the certificate field takes certificates only; the private key belongs in privateKey"
+	for _, tc := range []struct {
+		usage      string
+		privateKey bool
+		message    string
+	}{
+		{usage: models.CertificateUsageClient, message: "the upload contains a private key; a client-CA entry accepts certificates only"},
+		{usage: models.CertificateUsageUpstream, message: certificateFieldCarriesKey},
+		{usage: models.CertificateUsageIdentity, privateKey: true, message: certificateFieldCarriesKey},
+	} {
+		t.Run(tc.usage, func(t *testing.T) {
+			mockDB := NewMockStorage()
+			mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
+			server := createTestAPIServerWithIdentitySupport(t, mockDB)
+
+			leaf := gatewayIdentityLeaf(t, "key-in-certificate-"+tc.usage)
+			req := UploadCertificateRequest{
+				Name:        "key-in-certificate-" + tc.usage,
+				Usage:       tc.usage,
+				Certificate: string(leaf.PEM()) + string(leaf.KeyPEM()),
+			}
+			if tc.privateKey {
+				req.PrivateKey = string(leaf.KeyPEM())
+			}
+			w := uploadCertificateBody(t, server, req)
+
+			require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+			entry := firstFieldError(t, w.Body.Bytes(), "certificate")
+			assert.Equal(t, tc.message, entry["message"])
+			assert.Empty(t, certificateEvents(t, server))
+		})
+	}
+}
+
 // A relay entry's match appears in the upload response and the listing.
 func TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList(t *testing.T) {
 	mockDB := NewMockStorage()
@@ -1538,6 +1573,76 @@ func TestDeleteCertificate_IdentityNamedInUpstreamTLS_Returns409(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// agentConfigWithUpstreamTLS builds a deployed Agent whose single upstream
+// definition names identity and trustedCAs in its tls block.
+func agentConfigWithUpstreamTLS(handle, identity string, trustedCAs ...string) *models.StoredConfig {
+	rest := restAPIConfigWithUpstreamTLS(handle, identity, trustedCAs...).Configuration.(management.RestAPI)
+	agent := management.AgentConfiguration{
+		Kind:     management.AgentConfigurationKindAgent,
+		Metadata: management.Metadata{Name: handle},
+		Spec: management.AgentConfigData{
+			DisplayName:         handle,
+			Version:             "v1.0",
+			Context:             stringPtr("/" + handle),
+			UpstreamDefinitions: rest.Spec.UpstreamDefinitions,
+			Upstream:            management.AgentConfigData_Upstream{Ref: stringPtr("partner")},
+		},
+	}
+	return &models.StoredConfig{
+		UUID:          handle,
+		Kind:          models.KindAgent,
+		Handle:        handle,
+		DisplayName:   handle,
+		Version:       "v1.0",
+		DesiredState:  models.StateDeployed,
+		Configuration: agent,
+	}
+}
+
+func TestDeleteCertificate_NamedByDeployedAgent_Returns409(t *testing.T) {
+	identity := gatewayIdentityLeaf(t, "agent-identity")
+	identityRow := &models.StoredCertificate{
+		UUID: "agent-identity-1", Name: "out-identity-a", Certificate: identity.PEM(),
+		Usage: models.CertificateUsageIdentity, KeyAlgorithm: "ECDSA", NotAfter: time.Now().Add(365 * 24 * time.Hour),
+	}
+	trustRow := &models.StoredCertificate{
+		UUID: "agent-backend-ca-1", Name: "out-backend-ca", Usage: models.CertificateUsageUpstream,
+		Certificate: pki.NewRootCA(t, "Agent Backend CA").PEM(), NotAfter: time.Now().Add(365 * 24 * time.Hour),
+	}
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{identityRow, trustRow, seedUpstreamCert(t)}
+	server := createTestAPIServerWithCertStore(t, mockDB)
+	require.NoError(t, server.db.SaveConfig(agentConfigWithUpstreamTLS("out-partner-agent", "out-identity-a", "out-backend-ca")))
+
+	for _, tc := range []struct {
+		row     *models.StoredCertificate
+		field   string
+		message string
+	}{
+		{identityRow, "spec.upstreamDefinitions[0].tls.identity", "gateway identity 'out-identity-a' is named by 1 deployed API; remove those references first"},
+		{trustRow, "spec.upstreamDefinitions[0].tls.trustedCAs[0]", "certificate 'out-backend-ca' is named by 1 deployed API; remove those references first"},
+	} {
+		t.Run(tc.row.Name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			newDeleteCertHandler(server, tc.row.UUID).ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/certificates/"+tc.row.UUID, nil))
+			require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.Equal(t, tc.message, resp["message"])
+			errs, ok := resp["errors"].([]any)
+			require.True(t, ok)
+			require.Len(t, errs, 1)
+			entry := errs[0].(map[string]any)
+			assert.Equal(t, tc.field, entry["field"])
+			assert.Equal(t, "referenced by API 'out-partner-agent'", entry["message"])
+
+			_, err := mockDB.GetCertificate(tc.row.UUID)
+			assert.NoError(t, err)
+		})
+	}
+}
+
 func TestDeleteCertificate_IdentityRow_AllowedWhenUnreferenced_DespiteMtlsAuthAPIDeployed(t *testing.T) {
 	clientAuth := clientAuthorityCert("ref-only-authority")
 	identity := gatewayIdentityLeaf(t, "unreferenced-identity")
@@ -1737,7 +1842,7 @@ func TestDeleteCertificate_PublishesCertificateDeleteEvent(t *testing.T) {
 	requireOneCertificateEvent(t, server, "DELETE", target.UUID)
 }
 
-func TestReloadCertificates_PublishesCertificateReloadEvent(t *testing.T) {
+func TestReloadCertificates_PublishesCertificateUpdateEvent(t *testing.T) {
 	mockDB := NewMockStorage()
 	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
 	server := createTestAPIServerWithCertStore(t, mockDB)
@@ -1747,5 +1852,5 @@ func TestReloadCertificates_PublishesCertificateReloadEvent(t *testing.T) {
 		ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/certificates/reload", nil))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
-	requireOneCertificateEvent(t, server, "RELOAD", "")
+	requireOneCertificateEvent(t, server, "UPDATE", "")
 }

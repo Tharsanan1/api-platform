@@ -2655,6 +2655,13 @@ func (t *Translator) createDownstreamTLSContext(requireDownstreamClientCA bool) 
 		// Request, never require: a caller with no or a bad certificate must
 		// still reach mtls-auth rather than have the connection closed.
 		downstreamTLSContext.RequireClientCertificate = wrapperspb.Bool(false)
+		// A resumed session presents no client certificate to mtls-auth, so
+		// an accepted caller would be refused on its next connection. Every
+		// connection runs a full handshake instead.
+		downstreamTLSContext.SessionTicketKeysType = &tlsv3.DownstreamTlsContext_DisableStatelessSessionResumption{
+			DisableStatelessSessionResumption: true,
+		}
+		downstreamTLSContext.DisableStatefulSessionResumption = true
 	}
 
 	return downstreamTLSContext, nil

@@ -304,7 +304,9 @@ func NewClient(
 		store,
 		db,
 		config.NewParser(),
-		config.NewAgentValidator().WithPolicyValidator(policyValidator),
+		config.NewAgentValidator().
+			WithPolicyValidator(policyValidator).
+			WithUpstreamTLSValidator(config.NewUpstreamTLSValidator(db, systemConfig.Router.Upstream.TLS.DisableSslVerification)),
 		logger,
 		eventHubInstance,
 		secretResolver,

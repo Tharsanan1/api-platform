@@ -800,11 +800,19 @@ func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 			if entry.dnsSANs, err = stringListParam(matchObj, "dnsSANs", matchPath); err != nil {
 				return nil, err
 			}
+			// A match that names no SAN would narrow nothing, so it is
+			// refused rather than read as "accept the whole authority".
+			if len(entry.uriSANs) == 0 && len(entry.dnsSANs) == 0 {
+				return nil, fmt.Errorf("%s must list uriSANs or dnsSANs", matchPath)
+			}
 		}
 
 		thumbs, err := stringListParam(obj, "thumbprints", fmt.Sprintf("%s[%d]", acceptParam, i))
 		if err != nil {
 			return nil, err
+		}
+		if thumbsRaw, ok := obj["thumbprints"]; ok && thumbsRaw != nil && len(thumbs) == 0 {
+			return nil, fmt.Errorf("%s[%d].thumbprints must list at least one thumbprint", acceptParam, i)
 		}
 		for _, t := range thumbs {
 			entry.thumbprints = append(entry.thumbprints, normalizeThumbprint(t))

@@ -69,7 +69,7 @@ func (s snapshotManagerCertificates) UpdateSnapshot(ctx context.Context, correla
 // upstream trust.
 func (l *EventListener) processCertificateEvent(event eventhub.Event) {
 	switch event.Action {
-	case "CREATE", "UPDATE", "DELETE", "RELOAD":
+	case "CREATE", "UPDATE", "DELETE":
 	default:
 		l.logger.Warn("Unknown certificate event action",
 			slog.String("action", event.Action),

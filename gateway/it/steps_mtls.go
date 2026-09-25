@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -69,6 +70,10 @@ type mtlsSteps struct {
 	// uploadedIdentityNames tracks gateway identities this scenario attempted
 	// to upload. Cleanup deletes them before uploadedNames.
 	uploadedIdentityNames []string
+
+	// resumingClient keeps a TLS session cache across requests so a later
+	// request on a new connection offers any session the gateway let it cache.
+	resumingClient *http.Client
 }
 
 // RegisterMTLSSteps registers the mTLS step definitions and returns the
@@ -79,6 +84,7 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Before(func(c context.Context, sc *godog.Scenario) (context.Context, error) {
 		m.uploadedNames = nil
 		m.uploadedIdentityNames = nil
+		m.resumingClient = nil
 		return c, nil
 	})
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
@@ -89,6 +95,7 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 			return c, nil
 		}
 		cleanupDeployedAPIs(m.state, m.httpSteps)
+		cleanupDeployedAgents(m.state, m.httpSteps)
 		m.cleanupTrackedCertificates()
 		return c, nil
 	})
@@ -147,6 +154,9 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and header "([^"]*)" carrying certificate "([^"]*)" encoded as "([^"]*)"$`, m.getWithClientCertificateAndHeaderCertificateEncoded)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and header "([^"]*)" carrying certificate "([^"]*)"$`, m.getWithClientCertificateAndHeaderCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)"$`, m.getWithClientCertificate)
+	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" on a resumable TLS session$`, m.getWithClientCertificateOnResumableSession)
+	ctx.Step(`^I send a GET request to "([^"]*)" on a new connection from the same TLS session cache$`, m.getWithCachedTLSSession)
+	ctx.Step(`^the gateway should have run a full TLS handshake$`, m.gatewayShouldHaveRunFullTLSHandshake)
 	ctx.Step(`^I send a GET request to "([^"]*)" with no client certificate and header "([^"]*)" carrying certificate "([^"]*)"$`, m.getWithNoClientCertificateAndHeaderCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with no client certificate$`, m.getWithNoClientCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with header "([^"]*)" carrying certificate "([^"]*)"$`, m.getWithHeaderCertificate)

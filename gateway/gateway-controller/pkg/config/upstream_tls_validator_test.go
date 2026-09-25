@@ -279,3 +279,89 @@ func TestUpstreamTLSValidator_TrustRefusedWhileVerificationDisabled(t *testing.T
 		t.Errorf("an identity alone must deploy while verification is disabled, got %v", errs)
 	}
 }
+
+// ============ ValidateAgent ============
+
+// agentWithUpstreamDefs attaches defs to a minimal valid Agent, pointing its
+// upstream at the first one by ref.
+func agentWithUpstreamDefs(defs ...api.UpstreamDefinition) *api.AgentConfiguration {
+	cfg := validAgent()
+	cfg.Spec.UpstreamDefinitions = &defs
+	if len(defs) > 0 {
+		cfg.Spec.Upstream = api.AgentConfigData_Upstream{Ref: stringPtr(defs[0].Name)}
+	}
+	return &cfg
+}
+
+func TestUpstreamTLSValidator_ValidateAgent_ChecksTheTlsBlock(t *testing.T) {
+	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"), upstreamCA("out-backend-ca"))
+	validator := NewUpstreamTLSValidator(store, false)
+
+	tests := []struct {
+		name    string
+		agent   *api.AgentConfiguration
+		field   string
+		message string
+	}{
+		{
+			name:    "identity naming a missing certificate",
+			agent:   agentWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{"identity": "out-missing"}, "https://mtls-backend-a:8443")),
+			field:   "spec.upstreamDefinitions[0].tls.identity",
+			message: "no gateway identity named out-missing exists on this gateway",
+		},
+		{
+			name:    "trustedCAs naming a gateway identity",
+			agent:   agentWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{"trustedCAs": []interface{}{"out-identity-a"}}, "https://mtls-backend-a:8443")),
+			field:   "spec.upstreamDefinitions[0].tls.trustedCAs[0]",
+			message: "out-identity-a is a gateway identity (usage: identity); trustedCAs takes usage: upstream certificates",
+		},
+		{
+			name:    "tls on an http target",
+			agent:   agentWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{"identity": "out-identity-a"}, "http://echo-backend:80")),
+			field:   "spec.upstreamDefinitions[0].upstreams[0].url",
+			message: "tls is configured but this target is http://; every target of a definition with tls must be https://",
+		},
+		{
+			name: "tls on the inline upstream",
+			agent: func() *api.AgentConfiguration {
+				cfg := validAgent()
+				tls := map[string]interface{}{"identity": "out-identity-a"}
+				cfg.Spec.Upstream.Tls = &tls
+				return &cfg
+			}(),
+			field:   "spec.upstream.tls",
+			message: "tls is not supported on an inline upstream; move it to upstreamDefinitions and reference it",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := validator.ValidateAgent(tt.agent)
+			if !hasError(errs, tt.field, tt.message) {
+				t.Fatalf("expected error field=%q message=%q, got %+v", tt.field, tt.message, errs)
+			}
+		})
+	}
+}
+
+func TestUpstreamTLSValidator_ValidateAgent_ValidTlsBlock(t *testing.T) {
+	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"), upstreamCA("out-backend-ca"))
+	validator := NewUpstreamTLSValidator(store, false)
+
+	agent := agentWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
+		"identity": "out-identity-a", "trustedCAs": []interface{}{"out-backend-ca"},
+	}, "https://mtls-backend-a:8443"))
+	if errs := validator.ValidateAgent(agent); len(errs) != 0 {
+		t.Fatalf("expected no errors, got %+v", errs)
+	}
+}
+
+func TestAgentValidator_WithUpstreamTLSValidator_RefusesAMissingIdentity(t *testing.T) {
+	validator := NewAgentValidator().WithUpstreamTLSValidator(NewUpstreamTLSValidator(newFakeMtlsCertStore(), false))
+
+	agent := agentWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{"identity": "out-missing"}, "https://mtls-backend-a:8443"))
+	errs := validator.Validate(agent)
+	if !hasError(errs, "spec.upstreamDefinitions[0].tls.identity", "no gateway identity named out-missing exists on this gateway") {
+		t.Fatalf("expected the missing identity to be refused, got %+v", errs)
+	}
+}

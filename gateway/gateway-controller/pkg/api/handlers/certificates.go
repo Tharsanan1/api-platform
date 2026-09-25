@@ -651,7 +651,10 @@ func (s *APIServer) ReloadCertificates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info("Certificates reloaded and SDS snapshot updated")
-	s.publishCertificateEvent("RELOAD", "", correlationID, log)
+	// A reload names no single row; the events table admits only CREATE,
+	// UPDATE and DELETE, and every replica rebuilds from the database for
+	// any certificate action.
+	s.publishCertificateEvent("UPDATE", "", correlationID, log)
 
 	if err := s.publishClientAuthorities(correlationID); err != nil {
 		log.Error("Failed to publish client certificate authorities", slog.Any("error", err))
@@ -928,30 +931,45 @@ func (s *APIServer) encryptPrivateKey(privateKeyPEM string) (string, error) {
 // read failed; delete paths must treat that as a refusal, never as "no
 // references". A nil database yields no configs.
 func (s *APIServer) deployedRestAPIConfigs() ([]*models.StoredConfig, error) {
+	return s.deployedConfigs(models.KindRestApi)
+}
+
+// deployedUpstreamTLSConfigs returns every deployed configuration whose
+// upstreamDefinitions can carry a tls block, on the same terms as
+// deployedRestAPIConfigs.
+func (s *APIServer) deployedUpstreamTLSConfigs() ([]*models.StoredConfig, error) {
+	return s.deployedConfigs(models.KindRestApi, models.KindAgent)
+}
+
+// deployedConfigs returns every deployed configuration of the given kinds
+// from both the database and the in-memory store.
+func (s *APIServer) deployedConfigs(kinds ...string) ([]*models.StoredConfig, error) {
 	seen := make(map[string]*models.StoredConfig)
 
-	if s.db != nil {
-		configs, err := s.db.GetAllConfigsByKind(string(models.KindRestApi))
-		if err != nil {
-			return nil, err
-		}
-		for _, cfg := range configs {
-			if cfg.DesiredState == models.StateDeployed {
-				seen[cfg.UUID] = cfg
+	for _, kind := range kinds {
+		if s.db != nil {
+			configs, err := s.db.GetAllConfigsByKind(kind)
+			if err != nil {
+				return nil, err
+			}
+			for _, cfg := range configs {
+				if cfg.DesiredState == models.StateDeployed {
+					seen[cfg.UUID] = cfg
+				}
 			}
 		}
-	}
 
-	// The in-memory store converges from the database asynchronously, so a
-	// reference found in either source counts as live. Reading only one
-	// lets a delete through while the other still uses the certificate.
-	if s.store != nil {
-		for _, cfg := range s.store.GetAllByKind(string(models.KindRestApi)) {
-			if cfg.DesiredState != models.StateDeployed {
-				continue
-			}
-			if _, ok := seen[cfg.UUID]; !ok {
-				seen[cfg.UUID] = cfg
+		// The in-memory store converges from the database asynchronously, so a
+		// reference found in either source counts as live. Reading only one
+		// lets a delete through while the other still uses the certificate.
+		if s.store != nil {
+			for _, cfg := range s.store.GetAllByKind(kind) {
+				if cfg.DesiredState != models.StateDeployed {
+					continue
+				}
+				if _, ok := seen[cfg.UUID]; !ok {
+					seen[cfg.UUID] = cfg
+				}
 			}
 		}
 	}
@@ -961,6 +979,18 @@ func (s *APIServer) deployedRestAPIConfigs() ([]*models.StoredConfig, error) {
 		deployed = append(deployed, cfg)
 	}
 	return deployed, nil
+}
+
+// upstreamDefinitionsOf returns the upstreamDefinitions of a RestApi or
+// Agent configuration, or nil for any other kind.
+func upstreamDefinitionsOf(cfg *models.StoredConfig) *[]api.UpstreamDefinition {
+	switch c := cfg.Configuration.(type) {
+	case api.RestAPI:
+		return c.Spec.UpstreamDefinitions
+	case api.AgentConfiguration:
+		return c.Spec.UpstreamDefinitions
+	}
+	return nil
 }
 
 // countClientCertificateReferences counts the deployed RestApi configurations
@@ -1090,21 +1120,17 @@ func (s *APIServer) checkClientAuthorityDeletable(cert *models.StoredCertificate
 // certificate can be removed. It refuses while a deployed API names it in
 // upstreamDefinitions[].tls.trustedCAs, and refuses with a 500 on a failed read.
 func (s *APIServer) checkUpstreamCertificateDeletable(cert *models.StoredCertificate) (api.ErrorResponse, int, bool) {
-	restAPIs, err := s.deployedRestAPIConfigs()
+	deployed, err := s.deployedUpstreamTLSConfigs()
 	if err != nil {
-		s.logger.Error("Failed to read deployed RestApi configurations for upstream-certificate referential-integrity check",
+		s.logger.Error("Failed to read deployed configurations for upstream-certificate referential-integrity check",
 			slog.String("certificate", cert.Name), slog.Any("error", err))
 		return api.ErrorResponse{Status: "error", Message: "Failed to verify certificate references"},
 			http.StatusInternalServerError, true
 	}
 
 	var refs []clientAuthorityReference
-	for _, cfg := range restAPIs {
-		restCfg, ok := cfg.Configuration.(api.RestAPI)
-		if !ok {
-			continue
-		}
-		paths := config.NamedTLSTrustedCAFieldPaths(&restCfg, cert.Name)
+	for _, cfg := range deployed {
+		paths := config.NamedTLSTrustedCAFieldPaths(upstreamDefinitionsOf(cfg), cert.Name)
 		if len(paths) == 0 {
 			continue
 		}
@@ -1126,20 +1152,16 @@ func (s *APIServer) checkUpstreamCertificateDeletable(cert *models.StoredCertifi
 	return api.ErrorResponse{Status: "error", Message: message, Errors: &errs}, http.StatusConflict, true
 }
 
-// countGatewayIdentityReferences counts the deployed RestApi configurations
-// whose upstreamDefinitions[].tls.identity explicitly names identityName.
+// countGatewayIdentityReferences counts the deployed configurations whose
+// upstreamDefinitions[].tls.identity explicitly names identityName.
 func (s *APIServer) countGatewayIdentityReferences(identityName string) (int, error) {
-	restAPIs, err := s.deployedRestAPIConfigs()
+	deployed, err := s.deployedUpstreamTLSConfigs()
 	if err != nil {
 		return 0, err
 	}
 	count := 0
-	for _, cfg := range restAPIs {
-		restCfg, ok := cfg.Configuration.(api.RestAPI)
-		if !ok {
-			continue
-		}
-		if len(config.NamedTLSIdentityFieldPaths(&restCfg, identityName)) > 0 {
+	for _, cfg := range deployed {
+		if len(config.NamedTLSIdentityFieldPaths(upstreamDefinitionsOf(cfg), identityName)) > 0 {
 			count++
 		}
 	}
@@ -1150,21 +1172,17 @@ func (s *APIServer) countGatewayIdentityReferences(identityName string) (int, er
 // can be removed. It refuses while a deployed API names it in
 // upstreamDefinitions[].tls.identity, and refuses with a 500 on a failed read.
 func (s *APIServer) checkGatewayIdentityDeletable(cert *models.StoredCertificate) (api.ErrorResponse, int, bool) {
-	restAPIs, err := s.deployedRestAPIConfigs()
+	deployed, err := s.deployedUpstreamTLSConfigs()
 	if err != nil {
-		s.logger.Error("Failed to read deployed RestApi configurations for gateway-identity referential-integrity check",
+		s.logger.Error("Failed to read deployed configurations for gateway-identity referential-integrity check",
 			slog.String("identity", cert.Name), slog.Any("error", err))
 		return api.ErrorResponse{Status: "error", Message: "Failed to verify gateway identity references"},
 			http.StatusInternalServerError, true
 	}
 
 	var refs []clientAuthorityReference
-	for _, cfg := range restAPIs {
-		restCfg, ok := cfg.Configuration.(api.RestAPI)
-		if !ok {
-			continue
-		}
-		paths := config.NamedTLSIdentityFieldPaths(&restCfg, cert.Name)
+	for _, cfg := range deployed {
+		paths := config.NamedTLSIdentityFieldPaths(upstreamDefinitionsOf(cfg), cert.Name)
 		if len(paths) == 0 {
 			continue
 		}
@@ -1428,7 +1446,8 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 			} else {
 				bundle = b
 			}
-		case effectiveUsage == models.CertificateUsageIdentity && certProvided && keyProvided && pemCarriesPrivateKey([]byte(req.Certificate)):
+		case certProvided && pemCarriesPrivateKey([]byte(req.Certificate)):
+			// clientca.Inspect refuses a key for usage: client with its own message.
 			v.addFieldError("certificate", msgCertificateFieldCarriesKey)
 		case effectiveUsage == models.CertificateUsageIdentity && certProvided && keyProvided:
 			ib, err := gatewayidentity.Inspect([]byte(req.Certificate), []byte(req.PrivateKey), time.Now())

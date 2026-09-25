@@ -316,6 +316,39 @@ Feature: Authenticating API callers with a client certificate
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-valid"
     Then the response status code should be 200
 
+  Scenario: A client that caches its TLS session is accepted again on a new connection
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: mtls-resume-api
+      spec:
+        displayName: mTLS Resume API
+        version: v1.0
+        context: /mtls-resume/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        policies:
+          - name: mtls-auth
+            version: v1
+            params:
+              accept:
+                - ca: auth-ca-a
+        operations:
+          - method: GET
+            path: /anything
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/mtls-resume/v1.0/anything" to respond with status 401
+    When I send a GET request to "https://localhost:8443/mtls-resume/v1.0/anything" with client certificate "client-valid" on a resumable TLS session
+    Then the response status code should be 200
+    When I send a GET request to "https://localhost:8443/mtls-resume/v1.0/anything" on a new connection from the same TLS session cache
+    Then the gateway should have run a full TLS handshake
+    And the response status code should be 200
+
   Scenario: Adding an authority to the pool grants no access to an API that does not accept it
     Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
     When I deploy this API configuration:

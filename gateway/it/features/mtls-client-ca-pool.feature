@@ -159,6 +159,21 @@ Feature: Client certificate authority pool
     When I send a GET request to the "gateway-controller" service at "/certificates"
     Then the certificate list should not contain "pool-leaky-ca"
 
+  Scenario: A backend trust certificate that carries a private key is rejected and nothing is stored
+    When I upload to the certificates endpoint the body:
+      """
+      {
+        "name": "pool-leaky-backend-ca",
+        "usage": "upstream",
+        "certificate": "{{pem "backend-ca"}}\n{{key "backend-ca"}}"
+      }
+      """
+    Then the response status should be 400
+    And the response should list a validation error for field "certificate" with message "the certificate field takes certificates only; the private key belongs in privateKey"
+    And the response body should not contain "PRIVATE KEY"
+    When I send a GET request to the "gateway-controller" service at "/certificates"
+    Then the certificate list should not contain "pool-leaky-backend-ca"
+
   Scenario Outline: A relay upload with a narrowing the gateway does not understand is rejected
     When I upload to the certificates endpoint the body:
       """

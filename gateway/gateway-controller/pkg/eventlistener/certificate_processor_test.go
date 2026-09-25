@@ -70,7 +70,7 @@ func certificateSyncListener(t *testing.T, record *certificateSyncCalls, reloadE
 }
 
 func TestHandleEvent_Certificate_ReloadsPublishesAndSnapshots(t *testing.T) {
-	for _, action := range []string{"CREATE", "UPDATE", "DELETE", "RELOAD"} {
+	for _, action := range []string{"CREATE", "UPDATE", "DELETE"} {
 		t.Run(action, func(t *testing.T) {
 			record := &certificateSyncCalls{}
 			listener := certificateSyncListener(t, record, nil, nil)

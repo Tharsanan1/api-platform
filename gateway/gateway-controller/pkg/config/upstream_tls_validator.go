@@ -146,12 +146,25 @@ func (v *UpstreamTLSValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validat
 	if apiConfig.Spec.Upstream.Sandbox != nil {
 		errs = append(errs, v.validateInlineUpstreamTLS("spec.upstream.sandbox", apiConfig.Spec.Upstream.Sandbox.Tls)...)
 	}
+	return append(errs, v.validateUpstreamDefinitionsTLS(apiConfig.Spec.UpstreamDefinitions)...)
+}
 
-	if apiConfig.Spec.UpstreamDefinitions == nil {
+// ValidateAgent reports every deploy-blocking problem with the tls blocks on
+// an Agent, which shares the upstreamDefinitions shape with a REST API.
+func (v *UpstreamTLSValidator) ValidateAgent(agentConfig *api.AgentConfiguration) []ValidationError {
+	errs := v.validateInlineUpstreamTLS("spec.upstream", agentConfig.Spec.Upstream.Tls)
+	return append(errs, v.validateUpstreamDefinitionsTLS(agentConfig.Spec.UpstreamDefinitions)...)
+}
+
+// validateUpstreamDefinitionsTLS reports every deploy-blocking problem with
+// the tls blocks on defs.
+func (v *UpstreamTLSValidator) validateUpstreamDefinitionsTLS(defs *[]api.UpstreamDefinition) []ValidationError {
+	var errs []ValidationError
+	if defs == nil {
 		return errs
 	}
 
-	for d, def := range *apiConfig.Spec.UpstreamDefinitions {
+	for d, def := range *defs {
 		if def.Tls == nil {
 			continue
 		}
@@ -299,13 +312,13 @@ func ResolveUpstreamTLSFromParams(params map[string]interface{}) (identity strin
 }
 
 // NamedTLSIdentityFieldPaths returns, in document order, the field path of
-// every upstreamDefinitions[].tls.identity on apiConfig naming identityName.
-func NamedTLSIdentityFieldPaths(apiConfig *api.RestAPI, identityName string) []string {
+// every upstreamDefinitions[].tls.identity in defs naming identityName.
+func NamedTLSIdentityFieldPaths(defs *[]api.UpstreamDefinition, identityName string) []string {
 	var paths []string
-	if apiConfig.Spec.UpstreamDefinitions == nil {
+	if defs == nil {
 		return paths
 	}
-	for d, def := range *apiConfig.Spec.UpstreamDefinitions {
+	for d, def := range *defs {
 		if def.Tls == nil {
 			continue
 		}
@@ -322,13 +335,13 @@ func NamedTLSIdentityFieldPaths(apiConfig *api.RestAPI, identityName string) []s
 }
 
 // NamedTLSTrustedCAFieldPaths returns, in document order, the field path of
-// every upstreamDefinitions[].tls.trustedCAs[k] on apiConfig naming certName.
-func NamedTLSTrustedCAFieldPaths(apiConfig *api.RestAPI, certName string) []string {
+// every upstreamDefinitions[].tls.trustedCAs[k] in defs naming certName.
+func NamedTLSTrustedCAFieldPaths(defs *[]api.UpstreamDefinition, certName string) []string {
 	var paths []string
-	if apiConfig.Spec.UpstreamDefinitions == nil {
+	if defs == nil {
 		return paths
 	}
-	for d, def := range *apiConfig.Spec.UpstreamDefinitions {
+	for d, def := range *defs {
 		if def.Tls == nil {
 			continue
 		}

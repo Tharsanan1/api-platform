@@ -158,6 +158,42 @@ func (m *mtlsSteps) getWithClientCertificate(url, name string) error {
 	return m.httpSteps.SendRequestWithClient(client, http.MethodGet, url)
 }
 
+// getWithClientCertificateOnResumableSession sends a request with the named
+// certificate from a client that caches its TLS session. Keep-alives stay off,
+// so the next request through the same client opens a new connection and
+// offers whatever session the gateway let it cache.
+func (m *mtlsSteps) getWithClientCertificateOnResumableSession(url, name string) error {
+	client, err := m.tlsClientWithCertificate(name, false)
+	if err != nil {
+		return err
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		return fmt.Errorf("client certificate transport is %T, expected *http.Transport", client.Transport)
+	}
+	transport.TLSClientConfig.ClientSessionCache = tls.NewLRUClientSessionCache(1)
+	m.resumingClient = client
+	return m.httpSteps.SendRequestWithClient(client, http.MethodGet, url)
+}
+
+func (m *mtlsSteps) getWithCachedTLSSession(url string) error {
+	if m.resumingClient == nil {
+		return fmt.Errorf("no TLS session cache - send a request on a resumable TLS session first")
+	}
+	return m.httpSteps.SendRequestWithClient(m.resumingClient, http.MethodGet, url)
+}
+
+func (m *mtlsSteps) gatewayShouldHaveRunFullTLSHandshake() error {
+	resp := m.httpSteps.LastResponse()
+	if resp == nil || resp.TLS == nil {
+		return fmt.Errorf("the last response did not arrive over TLS")
+	}
+	if resp.TLS.DidResume {
+		return fmt.Errorf("the gateway resumed the cached TLS session instead of running a full handshake")
+	}
+	return nil
+}
+
 func (m *mtlsSteps) getWithClientCertificateAndChain(url, name string) error {
 	client, err := m.tlsClientWithCertificate(name, true)
 	if err != nil {

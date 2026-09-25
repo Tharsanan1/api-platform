@@ -589,7 +589,8 @@ func main() {
 		cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny, config.MtlsAuthParameterSchema(policyDefinitions))
 	policyValidator := config.NewPolicyValidator(policyDefinitions, mtlsAuthValidator)
 	validator.SetPolicyValidator(policyValidator)
-	validator.SetUpstreamTLSValidator(config.NewUpstreamTLSValidator(db, cfg.Router.Upstream.TLS.DisableSslVerification))
+	upstreamTLSValidator := config.NewUpstreamTLSValidator(db, cfg.Router.Upstream.TLS.DisableSslVerification)
+	validator.SetUpstreamTLSValidator(upstreamTLSValidator)
 
 	// Build the single shared outbound *http.Client used by every control-plane /
 	// platform-API / on-prem-APIM call this process makes. Built once, here, and injected
@@ -654,7 +655,9 @@ func main() {
 	)
 	agentSvc := agent.NewAgentService(
 		configStore, db, config.NewParser(),
-		config.NewAgentValidator().WithPolicyValidator(config.NewPolicyValidator(policyDefinitions, nil)),
+		config.NewAgentValidator().
+			WithPolicyValidator(config.NewPolicyValidator(policyDefinitions, nil)).
+			WithUpstreamTLSValidator(upstreamTLSValidator),
 		log, eventHubInstance, secretsService, cfg.Controller.Server.GatewayID,
 	)
 	// The DP->CP push is wired for Agents on the same terms as the LLM and MCP

@@ -45,18 +45,32 @@ type apiConfigMetadata struct {
 	} `yaml:"metadata"`
 }
 
+// deployedAgentNamesContextKey holds the Agent names this scenario deployed,
+// on the same terms as deployedAPINamesContextKey.
+const deployedAgentNamesContextKey = "deployedAgentNames"
+
 // recordDeployedAPIName records the configuration's metadata.name for
 // end-of-scenario cleanup. A body without a parseable name created nothing,
 // so it is skipped.
 func recordDeployedAPIName(state *TestState, body string) {
+	recordDeployedName(state, deployedAPINamesContextKey, body)
+}
+
+// recordDeployedAgentName records an Agent configuration's metadata.name for
+// end-of-scenario cleanup.
+func recordDeployedAgentName(state *TestState, body string) {
+	recordDeployedName(state, deployedAgentNamesContextKey, body)
+}
+
+func recordDeployedName(state *TestState, key, body string) {
 	var cfg apiConfigMetadata
 	if err := yaml.Unmarshal([]byte(body), &cfg); err != nil || cfg.Metadata.Name == "" {
 		return
 	}
-	existing, _ := state.GetContextValue(deployedAPINamesContextKey)
+	existing, _ := state.GetContextValue(key)
 	names, _ := existing.([]string)
 	names = append(names, cfg.Metadata.Name)
-	state.SetContextValue(deployedAPINamesContextKey, names)
+	state.SetContextValue(key, names)
 }
 
 // deployAPIConfiguration POSTs a RestApi configuration to the gateway
@@ -96,7 +110,17 @@ func updateAPIConfiguration(httpSteps *steps.HTTPSteps, apiName, body string) er
 // cleanupDeployedAPIs deletes, as admin, every API this scenario recorded.
 // It is best-effort: an API already deleted or never created just gets a 404.
 func cleanupDeployedAPIs(state *TestState, httpSteps *steps.HTTPSteps) {
-	raw, ok := state.GetContextValue(deployedAPINamesContextKey)
+	cleanupDeployed(state, httpSteps, deployedAPINamesContextKey, "/rest-apis/")
+}
+
+// cleanupDeployedAgents deletes, as admin, every Agent this scenario
+// recorded, on the same best-effort terms as cleanupDeployedAPIs.
+func cleanupDeployedAgents(state *TestState, httpSteps *steps.HTTPSteps) {
+	cleanupDeployed(state, httpSteps, deployedAgentNamesContextKey, "/agents/")
+}
+
+func cleanupDeployed(state *TestState, httpSteps *steps.HTTPSteps, key, pathPrefix string) {
+	raw, ok := state.GetContextValue(key)
 	if !ok {
 		return
 	}
@@ -113,7 +137,7 @@ func cleanupDeployedAPIs(state *TestState, httpSteps *steps.HTTPSteps) {
 	httpSteps.SetHeader("Authorization", "Basic "+creds)
 
 	for _, name := range names {
-		_ = httpSteps.SendDELETEToService("gateway-controller", "/rest-apis/"+name)
+		_ = httpSteps.SendDELETEToService("gateway-controller", pathPrefix+name)
 	}
 }
 

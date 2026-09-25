@@ -395,6 +395,67 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     Then the response status code should be 200
     And the response header "X-Client-Subject" should contain "gateway-b"
 
+  Scenario: Two APIs to the same backend each present their own identity
+    Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
+    And the certificate fixture "backend-ca" is pooled as "out-backend-ca"
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: out-partner-api
+      spec:
+        displayName: Outbound Partner API
+        version: v1.0
+        context: /out-partner/$version
+        upstreamDefinitions:
+          - name: partner-a
+            upstreams:
+              - url: https://mtls-backend-a:8443
+            tls:
+              identity: out-identity-a
+              trustedCAs: [out-backend-ca]
+        upstream:
+          main:
+            ref: partner-a
+        operations:
+          - method: GET
+            path: /anything
+      """
+    Then the response should be successful
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: out-anonymous-api
+      spec:
+        displayName: Outbound Anonymous API
+        version: v1.0
+        context: /out-anonymous/$version
+        upstreamDefinitions:
+          - name: partner-a
+            upstreams:
+              - url: https://mtls-backend-a:8443
+            tls:
+              trustedCAs: [out-backend-ca]
+        upstream:
+          main:
+            ref: partner-a
+        operations:
+          - method: GET
+            path: /anything
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/out-partner/v1.0/anything" to be ready
+    And I wait for the endpoint "http://localhost:8080/out-anonymous/v1.0/anything" to respond with status 400
+    When I send a GET request to "http://localhost:8080/out-partner/v1.0/anything"
+    Then the response status code should be 200
+    And the response header "X-Client-Subject" should contain "gateway-a"
+    When I send a GET request to "http://localhost:8080/out-anonymous/v1.0/anything"
+    Then the response status code should be 400
+    And the response header "X-Client-Subject" should not exist
+
   Scenario: Per-upstream trust replaces the gateway bundle for that upstream only
     Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
     And the certificate fixture "backend-ca-b" is pooled as "out-backend-ca-b"
@@ -536,3 +597,76 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     When I delete the certificate named "out-backend-ca"
     Then the response status should be 409
     And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.trustedCAs[0]" containing "out-partner-api"
+
+  Scenario: An Agent whose tls block names a missing identity is refused with the offending path
+    When I deploy this Agent configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: Agent
+      metadata:
+        name: out-refused-agent
+      spec:
+        displayName: Outbound Refused Agent
+        version: v1.0
+        context: /out-refused-agent
+        upstreamDefinitions:
+          - name: partner-a
+            upstreams:
+              - url: https://mtls-backend-a:8443
+            tls:
+              identity: out-missing
+        upstream:
+          ref: partner-a
+        a2a:
+          protocolVersion: "1.0"
+          operationConfigs:
+            transports:
+              - protocolBinding: JSONRPC
+                pathPrefix: /
+          agentCard:
+            public:
+              mode: passthrough
+      """
+    Then the response status should be 400
+    And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.identity" with message "no gateway identity named out-missing exists on this gateway"
+
+  Scenario: An identity or trust certificate named by a deployed Agent cannot be removed
+    Given the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
+    And the certificate fixture "backend-ca" is pooled as "out-backend-ca"
+    When I deploy this Agent configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: Agent
+      metadata:
+        name: out-partner-agent
+      spec:
+        displayName: Outbound Partner Agent
+        version: v1.0
+        context: /out-partner-agent
+        upstreamDefinitions:
+          - name: partner-a
+            upstreams:
+              - url: https://mtls-backend-a:8443
+            tls:
+              identity: out-identity-a
+              trustedCAs: [out-backend-ca]
+        upstream:
+          ref: partner-a
+        a2a:
+          protocolVersion: "1.0"
+          operationConfigs:
+            transports:
+              - protocolBinding: JSONRPC
+                pathPrefix: /
+          agentCard:
+            public:
+              mode: passthrough
+      """
+    Then the response should be successful
+    When I delete the gateway identity named "out-identity-a"
+    Then the response status should be 409
+    And the JSON response field "message" should contain "gateway identity 'out-identity-a' is named by 1 deployed API"
+    And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.identity" containing "out-partner-agent"
+    When I delete the certificate named "out-backend-ca"
+    Then the response status should be 409
+    And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.trustedCAs[0]" containing "out-partner-agent"

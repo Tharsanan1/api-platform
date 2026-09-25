@@ -19,9 +19,13 @@
 package transform
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -552,12 +556,12 @@ func addUpstreamCluster(
 		connectTimeout = ct
 	}
 
-	clusterKey := fmt.Sprintf("upstream_%s_%s_%d", upstreamName, parsedURL.Hostname(), port)
-
 	var tls *map[string]interface{}
 	if refDef != nil {
 		tls = refDef.Tls
 	}
+	upstreamTLS := upstreamTLSFromParams(tls, parsedURL.Scheme == "https")
+	clusterKey := upstreamClusterKey(upstreamName, parsedURL.Hostname(), port, parsedURL.Scheme, upstreamTLS)
 
 	// The definition name keys the per-upstream trust secret, so it must
 	// match the one the definitions loop uses.
@@ -573,7 +577,7 @@ func addUpstreamCluster(
 			Host: parsedURL.Hostname(),
 			Port: port,
 		}},
-		TLS:            upstreamTLSFromParams(tls, parsedURL.Scheme == "https"),
+		TLS:            upstreamTLS,
 		ConnectTimeout: connectTimeout,
 	}
 
@@ -583,6 +587,29 @@ func addUpstreamCluster(
 		BasePath:         basePath,
 		URL:              fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host),
 	}, nil
+}
+
+// upstreamClusterKey names the Envoy cluster for an API's main or sandbox
+// upstream. Envoy keeps one cluster per name across every deployed API, so an
+// upstream without a tls block is named by host and port alone, while one with
+// a tls block also carries a suffix derived from its TLS settings: two APIs
+// reach the same host:port through one cluster only when they present the same
+// identity and trust the same authorities.
+func upstreamClusterKey(upstreamName, host string, port int, scheme string, tls *models.UpstreamTLS) string {
+	key := fmt.Sprintf("upstream_%s_%s_%d", upstreamName, host, port)
+	if tls == nil || !tls.HasTLSBlock {
+		return key
+	}
+	trustedCAs := append([]string{}, tls.TrustedCANames...)
+	sort.Strings(trustedCAs)
+	settings, _ := json.Marshal(struct {
+		Scheme         string   `json:"scheme"`
+		Identity       string   `json:"identity"`
+		TrustedCAs     []string `json:"trustedCAs"`
+		VerifyHostName bool     `json:"verifyHostName"`
+	}{scheme, tls.IdentityName, trustedCAs, tls.VerifyHostName})
+	sum := sha256.Sum256(settings)
+	return key + "_" + hex.EncodeToString(sum[:4])
 }
 
 // sanitizeEnvoyClusterName computes the Envoy cluster name from a URL host and scheme,

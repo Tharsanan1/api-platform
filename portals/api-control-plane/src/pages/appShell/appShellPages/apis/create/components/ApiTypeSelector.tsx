@@ -17,7 +17,6 @@
  */
 
 import { alpha, Box, Chip, Form, Stack, Tooltip, Typography } from '@wso2/oxygen-ui';
-import { CircleCheck } from '@wso2/oxygen-ui-icons-react';
 import { useState } from 'react';
 import { defineMessages, FormattedMessage, useIntl } from 'react-intl';
 
@@ -140,11 +139,11 @@ export const ApiTypeSelector = ({ onChange, value }: ApiTypeSelectorProps) => {
                     p: 2,
                     width: CARD_WIDTH,
                     '& > *': { width: '100%' },
-                    ...(selected && {
-                      backgroundColor: alpha(theme.palette.primary.main, 0.1),
-                    }),
                     ...(disabled && {
-                      borderColor: alpha(theme.palette.text.primary, 0.55),
+                      borderColor: alpha(
+                        theme.palette.text.primary,
+                        theme.palette.mode === 'dark' ? 0.7 : 0.35,
+                      ),
                       cursor: 'default',
                       pointerEvents: 'none',
                     }),
@@ -154,34 +153,19 @@ export const ApiTypeSelector = ({ onChange, value }: ApiTypeSelectorProps) => {
                 >
                   <Stack
                     direction="row"
+                    spacing={1}
                     sx={{ alignItems: 'flex-start', justifyContent: 'space-between' }}
                   >
                     {apiType.icon}
-                    <Chip
-                      color={disabled ? 'default' : 'primary'}
-                      label={
-                        <FormattedMessage
-                          {...(disabled ? messages.comingSoon : messages.available)}
-                        />
-                      }
-                      size="small"
-                      variant="outlined"
-                    />
+                    {disabled ? (
+                      <Chip label={<FormattedMessage {...messages.comingSoon} />} size="small" />
+                    ) : null}
                   </Stack>
                   <Stack spacing={0.25} sx={{ textAlign: 'left' }}>
                     <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
                       <Form.Body sx={{ fontWeight: 700 }}>
                         <FormattedMessage {...apiType.title} />
                       </Form.Body>
-                      {selected ? (
-                        <Box
-                          aria-label={intl.formatMessage(messages.selected)}
-                          role="img"
-                          sx={{ color: 'primary.main', display: 'flex' }}
-                        >
-                          <CircleCheck size={16} />
-                        </Box>
-                      ) : null}
                     </Stack>
                     <Typography color="text.secondary" variant="caption">
                       <FormattedMessage {...apiType.description} />

@@ -61,10 +61,10 @@ func (m *mtlsSteps) encodeCertificateForHeader(name, encoding string) (string, e
 // function that restores the previous value, so it never leaks into a later
 // request.
 func (m *mtlsSteps) useHeaderForOneRequest(name, value string) func() {
-	previous, had := m.httpSteps.Header(name)
+	previous := m.httpSteps.Header(name)
 	m.httpSteps.SetHeader(name, value)
 	return func() {
-		if had {
+		if previous != "" {
 			m.httpSteps.SetHeader(name, previous)
 		} else {
 			m.httpSteps.RemoveHeader(name)

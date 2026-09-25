@@ -30,7 +30,7 @@ Feature: Upstream and downstream timeouts
     Given I generate a unique value from "timeout-rest-api" and store it as "apiName1"
     And I generate a unique API context from "/timeout-rest-api" and store it as "apiContext1"
     When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion                    | gateway.api-platform.wso2.com/v1                                                                      |
+      | apiVersion                    | ${CTX:gatewaySpecVersion}                                                                      |
       | name                          | ${CTX:apiName1}                                                                                     |
       | spec.displayName              | Timeout API                                                                                            |
       | spec.version                  | v1.0                                                                                                   |
@@ -39,9 +39,7 @@ Feature: Upstream and downstream timeouts
       | spec.upstream.main.ref        | timeout-upstream                                                                                      |
       | spec.operations               | [{"method":"GET","path":"/"}]                                                                  |
     Then the response should be successful
-    And I wait for policy snapshot sync
-    When I send a "GET" request to "${CTX:apiContext1}/v1.0/" until status 503
-    And the gateway should have timed out after "8" seconds with status 503
+    When I send a "GET" request to "${CTX:apiContext1}/v1.0/" until it times out after "8" seconds with status 503
     When I delete the API "${CTX:apiName1}"
     Then the response should be successful
 
@@ -49,7 +47,7 @@ Feature: Upstream and downstream timeouts
     Given I generate a unique value from "timeout-global-api" and store it as "apiName2"
     And I generate a unique API context from "/timeout-global-api" and store it as "apiContext2"
     When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion                    | gateway.api-platform.wso2.com/v1                                                                     |
+      | apiVersion                    | ${CTX:gatewaySpecVersion}                                                                     |
       | name                          | ${CTX:apiName2}                                                                                     |
       | spec.displayName              | Global Timeout API                                                                                   |
       | spec.version                  | v1.0                                                                                                  |
@@ -58,9 +56,7 @@ Feature: Upstream and downstream timeouts
       | spec.upstream.main.ref        | global-timeout-upstream                                                                              |
       | spec.operations               | [{"method":"GET","path":"/"}]                                                                 |
     Then the response should be successful
-    And I wait for policy snapshot sync
-    When I send a "GET" request to "${CTX:apiContext2}/v1.0/" until status 503
-    And the gateway should have timed out after "5" seconds with status 503
+    When I send a "GET" request to "${CTX:apiContext2}/v1.0/" until it times out after "5" seconds with status 503
     When I delete the API "${CTX:apiName2}"
     Then the response should be successful
 
@@ -68,7 +64,7 @@ Feature: Upstream and downstream timeouts
     Given I generate a unique value from "headers-timeout-api" and store it as "apiName3"
     And I generate a unique API context from "/headers-timeout-api" and store it as "apiContext3"
     When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion                    | gateway.api-platform.wso2.com/v1                                                        |
+      | apiVersion                    | ${CTX:gatewaySpecVersion}                                                        |
       | name                          | ${CTX:apiName3}                                                                        |
       | spec.displayName              | Headers Timeout API                                                                      |
       | spec.version                  | v1.0                                                                                     |
@@ -77,7 +73,6 @@ Feature: Upstream and downstream timeouts
       | spec.upstream.main.ref        | headers-timeout-upstream                                                               |
       | spec.operations               | [{"method":"GET","path":"/"}]                                                     |
     Then the response should be successful
-    And I wait for policy snapshot sync
     And I send a "GET" request to "${CTX:apiContext3}/v1.0/" until status 200
     When I send an incomplete HTTP request to "${CTX:apiContext3}/v1.0/"
     Then the response status code should be 408
@@ -89,7 +84,7 @@ Feature: Upstream and downstream timeouts
     Given I generate a unique resource name from "llm-connect-timeout-provider" and store it as "providerName4"
     And I generate a unique API context from "/llm-connect-timeout" and store it as "providerContext4"
     When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
-      | apiVersion                    | gateway.api-platform.wso2.com/v1                                      |
+      | apiVersion                    | ${CTX:gatewaySpecVersion}                                      |
       | name                          | ${CTX:providerName4}                                                  |
       | displayName                   | LLM Connect Timeout Provider                                           |
       | version                       | v1.0                                                                   |
@@ -99,9 +94,7 @@ Feature: Upstream and downstream timeouts
       | spec.upstream.ref             | llm-timeout-upstream                                                   |
       | accessControl.mode            | allow_all                                                               |
     Then the response status code should be 201
-    And I wait for policy snapshot sync
-    When I send a "GET" request to "${CTX:providerContext4}/get" until status 503
-    And the gateway should have timed out after "8" seconds with status 503
+    When I send a "GET" request to "${CTX:providerContext4}/get" until it times out after "8" seconds with status 503
     When I delete the LLM provider "${CTX:providerName4}"
     Then the response should be successful
 
@@ -109,7 +102,7 @@ Feature: Upstream and downstream timeouts
     Given I generate a unique resource name from "mcp-connect-timeout" and store it as "mcpName5"
     And I generate a unique API context from "/mcp-connect-timeout" and store it as "mcpContext5"
     When I create MCP proxy from "resources/templates/mcp.yaml" with values:
-      | apiVersion                 | gateway.api-platform.wso2.com/v1                                                                                         |
+      | apiVersion                 | ${CTX:gatewaySpecVersion}                                                                                         |
       | name                       | ${CTX:mcpName5}                                                                                                          |
       | displayName                | MCP Connect Timeout                                                                                                     |
       | version                    | v1.0                                                                                                                     |
@@ -118,8 +111,6 @@ Feature: Upstream and downstream timeouts
       | spec.upstreamDefinitions   | [{"name":"mcp-timeout-upstream","timeout":{"connect":"8000ms"},"upstreams":[{"url":"http://192.0.2.1:3001"}]}] |
       | spec.upstream.ref          | mcp-timeout-upstream                                                                                                     |
     Then the response should be successful
-    And I wait for policy snapshot sync
-    When I send a "GET" request to "${CTX:mcpContext5}/mcp" until status 503
-    And the gateway should have timed out after "8" seconds with status 503
+    When I send a "GET" request to "${CTX:mcpContext5}/mcp" until it times out after "8" seconds with status 503
     When I delete the MCP proxy "${CTX:mcpName5}"
     Then the response should be successful

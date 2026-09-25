@@ -59,6 +59,7 @@ func PlatformGateway() *components.Definition {
 				"aesgcm-keys/default-aesgcm256-v1.bin": "gateway/it/it-aesgcm-keys/default-aesgcm256-v1.bin",
 				"listener-certs":                       "gateway/gateway-controller/listener-certs",
 				"certificates":                         "gateway/gateway-controller/certificates",
+				"llm-pricing/model_prices.json":        "gateway/configs/llm-pricing/model_prices.json",
 			},
 			Env: env,
 
@@ -86,6 +87,7 @@ func PlatformGateway() *components.Definition {
 			ExpectStatus: 200,
 			Timeout:      3 * time.Minute, Interval: 2 * time.Second,
 		},
+		VersionedHealth: gatewayVersionedHealthChecks(),
 
 		DB: &components.DBContract{
 			Supported: []components.DBType{components.SQLite, components.Postgres, components.SQLServer},
@@ -105,6 +107,7 @@ func PlatformGateway() *components.Definition {
 			},
 			ContainerPath: "/config.toml",
 			Format:        components.TOML,
+			Versioned:     gatewayConfigProfiles(),
 		},
 
 		Wiring: components.TypedWiring[PlatformGatewayWiring](),

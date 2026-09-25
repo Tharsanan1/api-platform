@@ -28,6 +28,21 @@ import (
 	"sync"
 )
 
+// NormalizeMethod normalizes the request method before dispatching to a handler
+// that uses method-qualified ServeMux patterns.
+func NormalizeMethod(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if upper := strings.ToUpper(r.Method); upper != r.Method {
+			// A rewrite means a caller sent a non-canonical method. Harmless here, but it is
+			// the kind of thing that silently misses a case-sensitive matcher elsewhere.
+			ServiceLogger(r.Context()).Debug("testbench normalized the request method",
+				"received", r.Method, "normalized", upper)
+			r.Method = upper
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Service is a mock service hosted by the testbench.
 type Service interface {
 	// Name identifies the service.

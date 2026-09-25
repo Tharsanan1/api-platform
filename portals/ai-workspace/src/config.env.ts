@@ -42,6 +42,11 @@ export const DEBUG = getEnvOrDefault('APIP_AIW_LOGGING_BROWSER_DEBUG', false);
 // Default region used when auto-registering an organization on first login.
 export const DEFAULT_ORG_REGION = getEnvOrDefault('APIP_AIW_DEFAULT_ORG_REGION', 'us');
 
+// Whether the BFF has a billing upstream, proxied same-origin at <base>/proxy/billing.
+// Set only where one is configured, which is what keeps a standalone deployment from
+// calling a route that does not exist. The billing URL itself never reaches the browser.
+export const BILLING_PROXY_ENABLED = getEnvOrDefault('APIP_AIW_BILLING_PROXY_ENABLED', false);
+
 // Auth mode: 'basic' (default) posts credentials to /api/portal/v0.9/auth/login; 'oidc' uses react-oidc-context.
 export const AUTH_MODE = getEnvOrDefault('APIP_AIW_AUTH_MODE', 'basic') as 'oidc' | 'basic';
 
@@ -52,6 +57,7 @@ export const AUTH_MODE = getEnvOrDefault('APIP_AIW_AUTH_MODE', 'basic') as 'oidc
 export const ORG_ID_CLAIM     = getEnvOrDefault('APIP_AIW_AUTH_CLAIM_MAPPINGS_ORGANIZATION', 'organization');
 export const ORG_NAME_CLAIM   = getEnvOrDefault('APIP_AIW_AUTH_CLAIM_MAPPINGS_ORG_NAME',     'org_name');
 export const ORG_HANDLE_CLAIM = getEnvOrDefault('APIP_AIW_AUTH_CLAIM_MAPPINGS_ORG_HANDLE',   'org_handle');
+export const ORG_IDS_CLAIM = getEnvOrDefault('APIP_AIW_AUTH_CLAIM_MAPPINGS_ORGANIZATIONS', 'organizations');
 // JWT claim names for user display — configure to match your IDP's token structure.
 // The defaults mirror the BFF's [auth.claim_mappings] defaults, so both sides read
 // the same claim when the key is left unset.
@@ -111,6 +117,17 @@ export const DEV_PORTAL_BASE_URL = getEnvOrDefault(
   'APIP_AIW_DEV_PORTAL_BASE_URL',
   ''
 );
+
+// Whether MCP proxy publish/unpublish to the API Portal (MCP Hub) is enabled.
+// See configs/config-template.toml.
+export const API_PORTAL_ENABLED = getEnvOrDefault(
+  'APIP_AIW_API_PORTAL_ENABLED',
+  false
+);
+
+// The single API Portal MCP proxies publish to. Hardcoded stand-in until
+// proper Dev Portal selection support is added — not yet operator-configurable.
+export const DEFAULT_API_PORTAL_ID = 'default';
 
 export const API_BASE_URLS = {
   policyHubApi: getEnvOrDefault(

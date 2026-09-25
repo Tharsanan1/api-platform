@@ -73,11 +73,11 @@ func newSQLiteStorage(dbPath string, logger *slog.Logger) (*SQLiteStorage, error
 	return storage, nil
 }
 
-const currentSchemaVersion = 5
+const currentSchemaVersion = 6
 
 // previousSchemaVersion is the only older schema version this binary migrates
 // in place. Any other stored version is refused rather than skipped.
-const previousSchemaVersion = 4
+const previousSchemaVersion = 5
 
 // initSchema creates the database schema if it doesn't exist
 func (s *SQLiteStorage) initSchema() error {
@@ -110,8 +110,8 @@ func (s *SQLiteStorage) initSchema() error {
 }
 
 // migrateSchemaV4ToV5 adds the certificates usage, role, match_json,
-// private_key_ciphertext and key_algorithm columns to a version 4 database
-// and sets user_version to 5. usage and role are defaulted; the rest are
+// private_key_ciphertext and key_algorithm columns to a version 5 database
+// and sets user_version to 6. usage and role are defaulted; the rest are
 // nullable. No existing column changes.
 func (s *SQLiteStorage) migrateSchemaV4ToV5() error {
 	tx, err := s.db.Begin()

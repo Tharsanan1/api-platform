@@ -145,6 +145,18 @@ func TestDefinitionValidationEdges(t *testing.T) {
 		require.ErrorContains(t, err, "not in the services list")
 		require.ErrorContains(t, err, "still needs endpoints")
 	})
+
+	t.Run("negative boot attempts are rejected", func(t *testing.T) {
+		d := &Definition{
+			Name: "stack", Alias: "stack",
+			Endpoints: []Endpoint{{Name: "api", Port: 8080, Scheme: "http"}},
+			Compose: &ComposeSpec{
+				ComposeFile: "compose/stack.yaml", Services: []string{"api"}, PrimaryService: "api",
+				BootAttempts: -1,
+			},
+		}
+		require.ErrorContains(t, d.Validate(), "boot attempts must not be negative")
+	})
 }
 
 func TestHealthCheckValidation(t *testing.T) {
@@ -576,6 +588,34 @@ func TestInstanceURLs(t *testing.T) {
 	})
 }
 
+func TestExternalInstanceURLs(t *testing.T) {
+	definition := &Definition{
+		Name:  "external",
+		Alias: "external",
+		External: &ExternalSpec{Endpoints: []ExternalEndpoint{
+			{Name: "api"}, {Name: "auth"},
+		}},
+	}
+	inst, err := NewExternalInstance(definition, 0, 1, map[string]string{
+		"api":  "https://api.example.com/v1",
+		"auth": "https://auth.example.com/token",
+	})
+	require.NoError(t, err)
+	got, err := inst.URL("api")
+	require.NoError(t, err)
+	require.Equal(t, "https://api.example.com/v1", got)
+	require.Equal(t, []string{"api", "auth"}, inst.EndpointNames())
+	_, err = inst.MappedPort("api")
+	require.ErrorContains(t, err, "no mapped container port")
+	_, err = inst.InternalURL("api")
+	require.ErrorContains(t, err, "no internal network URL")
+	_, err = inst.URL("missing")
+	require.ErrorContains(t, err, "available: api, auth")
+
+	_, err = NewExternalInstance(definition, 0, 1, map[string]string{"api": "https://api.example.com/v1"})
+	require.ErrorContains(t, err, "returned 1 endpoint URLs, want 2")
+}
+
 func TestInstanceIdentity(t *testing.T) {
 	t.Run("a nil definition is rejected", func(t *testing.T) {
 		_, err := NewInstance(nil, 0, 1, "127.0.0.1", nil)
@@ -592,6 +632,22 @@ func TestInstanceIdentity(t *testing.T) {
 	t.Run("a host is required", func(t *testing.T) {
 		_, err := NewInstance(runtimeLike(), 0, 1, "  ", nil)
 		require.ErrorContains(t, err, "host is required")
+	})
+
+	t.Run("localhost uses the IPv4 loopback address for mapped ports", func(t *testing.T) {
+		inst, err := NewInstance(runtimeLike(), 0, 1, "localhost", map[int]int{8080: 49153})
+		require.NoError(t, err)
+		require.Equal(t, "127.0.0.1", inst.Host())
+
+		endpoint, err := inst.URL("http")
+		require.NoError(t, err)
+		require.Equal(t, "http://127.0.0.1:49153", endpoint)
+	})
+
+	t.Run("a configured non-local host is preserved", func(t *testing.T) {
+		inst, err := NewInstance(runtimeLike(), 0, 1, "192.168.64.2", map[int]int{8080: 49153})
+		require.NoError(t, err)
+		require.Equal(t, "192.168.64.2", inst.Host())
 	})
 
 	t.Run("the mapping is copied, so a later caller mutation cannot corrupt it", func(t *testing.T) {
@@ -1018,6 +1074,66 @@ listenPort = 9090
 	})
 }
 
+func TestConfigInjectionForVersion(t *testing.T) {
+	injection := &ConfigInjection{
+		BaseConfigPath:    "config/current.toml",
+		SharedOverlayPath: "overlays/current.toml",
+		ExtraOverlays:     []string{"overlays/extra.toml"},
+		Versioned: map[string]ConfigProfile{
+			"1.1.0": {
+				BaseConfigPath:    "resources/1.1.0/config.toml",
+				SharedOverlayPath: "resources/1.1.0/storage.toml",
+			},
+			"1.2.0": {
+				BaseConfigPath:    "resources/1.2.0/config.toml",
+				SharedOverlayPath: "resources/1.2.0/storage.toml",
+			},
+		},
+	}
+
+	t.Run("source builds retain the current configuration", func(t *testing.T) {
+		selected, err := injection.ForVersion("")
+		require.NoError(t, err)
+		require.Same(t, injection, selected)
+	})
+
+	t.Run("released images select their exact profile without mutating defaults", func(t *testing.T) {
+		selected, err := injection.ForVersion(" 1.1.0 ")
+		require.NoError(t, err)
+		require.Equal(t, "resources/1.1.0/config.toml", selected.BaseConfigPath)
+		require.Equal(t, "resources/1.1.0/storage.toml", selected.SharedOverlayPath)
+		require.Equal(t, []string{"overlays/extra.toml"}, selected.ExtraOverlays)
+		require.Equal(t, injection.Versioned, selected.Versioned)
+
+		selected.ExtraOverlays[0] = "changed"
+		selected.Versioned["1.1.0"] = ConfigProfile{BaseConfigPath: "changed"}
+		require.Equal(t, "config/current.toml", injection.BaseConfigPath)
+		require.Equal(t, "overlays/current.toml", injection.SharedOverlayPath)
+		require.Equal(t, []string{"overlays/extra.toml"}, injection.ExtraOverlays)
+		require.Equal(t, "resources/1.1.0/config.toml", injection.Versioned["1.1.0"].BaseConfigPath)
+	})
+
+	t.Run("a selected profile can be superseded by another explicit version", func(t *testing.T) {
+		selected, err := injection.ForVersion("1.1.0")
+		require.NoError(t, err)
+		superseded, err := selected.ForVersion("1.2.0")
+		require.NoError(t, err)
+		require.Equal(t, "resources/1.2.0/config.toml", superseded.BaseConfigPath)
+		require.Equal(t, "resources/1.2.0/storage.toml", superseded.SharedOverlayPath)
+	})
+
+	t.Run("an unsupported released version is rejected", func(t *testing.T) {
+		_, err := injection.ForVersion("1.3.0")
+		require.ErrorContains(t, err, `no profile for version "1.3.0"`)
+	})
+
+	t.Run("a nil injection is rejected", func(t *testing.T) {
+		var nilInjection *ConfigInjection
+		_, err := nilInjection.ForVersion("1.1.0")
+		require.ErrorContains(t, err, "config injection is required")
+	})
+}
+
 func TestOverlayVariableSubstitution(t *testing.T) {
 	dir := t.TempDir()
 	base := writeTOML(t, dir, "base.toml", "logLevel = \"info\"\n")
@@ -1102,6 +1218,46 @@ func TestDefinitionAndDatabaseAccessors(t *testing.T) {
 	})
 }
 
+func TestExternalDefinitionValidation(t *testing.T) {
+	valid := func() *Definition {
+		return &Definition{
+			Name: "external", Alias: "external",
+			External: &ExternalSpec{
+				Endpoints: []ExternalEndpoint{{Name: "api"}},
+				Resolve: func(string, map[string]string) (map[string]string, error) {
+					return map[string]string{"api": "https://example.com"}, nil
+				},
+			},
+		}
+	}
+
+	t.Run("valid external definition passes", func(t *testing.T) {
+		require.NoError(t, valid().Validate())
+	})
+	t.Run("resolver is required", func(t *testing.T) {
+		d := valid()
+		d.External.Resolve = nil
+		require.ErrorContains(t, d.Validate(), "external spec has no resolver")
+	})
+	t.Run("duplicate endpoint names are rejected", func(t *testing.T) {
+		d := valid()
+		d.External.Endpoints = append(d.External.Endpoints, ExternalEndpoint{Name: "api"})
+		require.ErrorContains(t, d.Validate(), "duplicate external endpoint name")
+	})
+	t.Run("container configuration is rejected", func(t *testing.T) {
+		d := valid()
+		d.Image = ImageRef{Ref: "should-not-exist"}
+		require.ErrorContains(t, d.Validate(), "must not declare an image")
+	})
+	t.Run("required parameters are non-empty and unique", func(t *testing.T) {
+		d := valid()
+		d.External.RequiredParameters = []string{"environment", "environment", " "}
+		err := d.Validate()
+		require.ErrorContains(t, err, "duplicate external required parameter")
+		require.ErrorContains(t, err, "required parameter has no name")
+	})
+}
+
 func TestComposeHelpers(t *testing.T) {
 	t.Run("compose detection and staging name", func(t *testing.T) {
 		empty := Definition{}
@@ -1120,6 +1276,7 @@ func TestComposeHelpers(t *testing.T) {
 				GeneratedFiles:   map[string][]byte{"existing": []byte("value")},
 				Env:              map[string]string{"A": "B"},
 				CoverageServices: []CoverageService{{Name: "gateway", Types: []string{"go"}}},
+				BootAttempts:     3,
 			},
 		}
 		updated := definition.Compose.WithGenerated(map[string][]byte{"generated": []byte("content")})
@@ -1127,6 +1284,7 @@ func TestComposeHelpers(t *testing.T) {
 		require.Equal(t, map[string][]byte{"existing": []byte("value"), "generated": []byte("content")}, updated.GeneratedFiles)
 		require.Equal(t, map[string]string{"A": "B"}, updated.Env)
 		require.Equal(t, []CoverageService{{Name: "gateway", Types: []string{"go"}}}, updated.CoverageServices)
+		require.Equal(t, 3, updated.BootAttempts)
 		require.NotSame(t, definition.Compose, updated)
 		updated.GeneratedFiles["existing"][0] = 'X'
 		require.Equal(t, []byte("value"), definition.Compose.GeneratedFiles["existing"])
@@ -1169,6 +1327,48 @@ func TestDefinitionWithImageVersion(t *testing.T) {
 		definition := &Definition{Image: ImageRef{Ref: "app:current"}}
 		require.Same(t, definition, definition.WithImageVersion(" "))
 	})
+
+	t.Run("does not turn an external component into an image component", func(t *testing.T) {
+		definition := &Definition{
+			Name: "external", Alias: "external",
+			External: &ExternalSpec{Endpoints: []ExternalEndpoint{{Name: "api"}}, Resolve: func(string, map[string]string) (map[string]string, error) {
+				return map[string]string{"api": "https://example.com"}, nil
+			}},
+		}
+		require.Same(t, definition, definition.WithImageVersion("ignored"))
+	})
+}
+
+func TestDefinitionWithConfigVersion(t *testing.T) {
+	definition := &Definition{
+		Name:   "gateway",
+		Image:  ImageRef{Ref: "gateway:current"},
+		Health: &HealthCheck{Endpoint: "admin", Path: "/api/admin/v1/health", ExpectStatus: 200, Timeout: time.Minute, Interval: time.Second},
+		VersionedHealth: map[string]HealthCheck{
+			"1.1.0": {Endpoint: "admin", Path: "/api/admin/v0.9/health", ExpectStatus: 200, Timeout: time.Minute, Interval: time.Second},
+		},
+		Config: &ConfigInjection{
+			BaseConfigPath: "config/current.toml",
+			Versioned: map[string]ConfigProfile{
+				"1.1.0": {BaseConfigPath: "resources/1.1.0/config.toml"},
+			},
+		},
+	}
+
+	updated, err := definition.WithConfigVersion("1.1.0")
+	require.NoError(t, err)
+	require.NotSame(t, definition, updated)
+	require.Equal(t, "resources/1.1.0/config.toml", updated.Config.BaseConfigPath)
+	require.Equal(t, "config/current.toml", definition.Config.BaseConfigPath)
+
+	_, err = definition.WithConfigVersion("1.2.0")
+	require.ErrorContains(t, err, `component "gateway": config injection has no profile for version "1.2.0"`)
+
+	updated, err = definition.WithReleaseVersion("1.1.0")
+	require.NoError(t, err)
+	require.Equal(t, "gateway:1.1.0", updated.Image.Ref)
+	require.Equal(t, "/api/admin/v0.9/health", updated.Health.Path)
+	require.Equal(t, "/api/admin/v1/health", definition.Health.Path)
 }
 
 func TestConfigAndFileValidation(t *testing.T) {
@@ -1197,6 +1397,35 @@ func TestConfigAndFileValidation(t *testing.T) {
 		require.ErrorContains(t, err, "no hostPath")
 		require.ErrorContains(t, err, "two file mounts target")
 	})
+
+	t.Run("invalid versioned profiles are rejected", func(t *testing.T) {
+		d := controllerLike()
+		d.Config = &ConfigInjection{
+			BaseConfigPath: "config/base.toml",
+			ContainerPath:  "/opt/app/config.toml",
+			Format:         TOML,
+			Versioned: map[string]ConfigProfile{
+				"":      {BaseConfigPath: "config/versioned.toml"},
+				"1.1.0": {},
+			},
+		}
+		err := d.Validate()
+		require.ErrorContains(t, err, "empty versioned profile key")
+		require.ErrorContains(t, err, `config profile "1.1.0" has no baseConfigPath`)
+	})
+
+	t.Run("invalid versioned health profiles are rejected", func(t *testing.T) {
+		d := controllerLike()
+		d.VersionedHealth = map[string]HealthCheck{
+			"":      {Endpoint: "missing", Path: "ready", ExpectStatus: 600},
+			"1.1.0": {Endpoint: "admin", Path: "/health", ExpectStatus: 200, Timeout: time.Second, Interval: time.Second},
+		}
+		err := d.Validate()
+		require.ErrorContains(t, err, "empty versioned health profile key")
+		require.ErrorContains(t, err, `health profile "" references unknown endpoint "missing"`)
+		require.ErrorContains(t, err, `health profile "" path "ready" must start with /`)
+		require.ErrorContains(t, err, `health profile "" expectStatus 600 is not a valid HTTP status`)
+	})
 }
 
 func TestRegistryMustRegister(t *testing.T) {
@@ -1222,4 +1451,43 @@ func TestComposeRejectsInvalidCoverageServiceMetadata(t *testing.T) {
 		},
 	}
 	require.ErrorContains(t, definition.Validate(), "unsupported type")
+}
+
+func TestComposeRejectsDuplicateStagedNames(t *testing.T) {
+	base := func() Definition {
+		return Definition{
+			Name:      "stack",
+			Alias:     "stack",
+			Endpoints: []Endpoint{{Name: "http", Port: 8080, Scheme: "http"}},
+			Compose: &ComposeSpec{
+				ComposeFile: "catalog/stack/docker-compose.yaml", PrimaryService: "api",
+				Services: []string{"api"},
+			},
+		}
+	}
+
+	t.Run("override sharing the base file name", func(t *testing.T) {
+		definition := base()
+		definition.Compose.ComposeOverrideFiles = []string{"catalog/overlays/docker-compose.yaml"}
+		require.ErrorContains(t, definition.Validate(), `compose file "docker-compose.yaml" is staged more than once`)
+	})
+
+	t.Run("two overrides sharing a name", func(t *testing.T) {
+		definition := base()
+		definition.Compose.ComposeOverrideFiles = []string{"a/extra.yaml", "b/extra.yaml"}
+		require.ErrorContains(t, definition.Validate(), `compose file "extra.yaml" is staged more than once`)
+	})
+
+	t.Run("staged file colliding with a compose file", func(t *testing.T) {
+		definition := base()
+		definition.Compose.StagedFiles = map[string]string{"docker-compose.yaml": "catalog/stack/other.yaml"}
+		require.ErrorContains(t, definition.Validate(), `staged file "docker-compose.yaml" collides`)
+	})
+
+	t.Run("distinct names are accepted", func(t *testing.T) {
+		definition := base()
+		definition.Compose.ComposeOverrideFiles = []string{"catalog/stack/docker-compose.other-org.yaml"}
+		definition.Compose.StagedFiles = map[string]string{"role-to-scope-mapping.yaml": "resources/roles.yaml"}
+		require.NoError(t, definition.Validate())
+	})
 }

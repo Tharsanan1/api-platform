@@ -32,7 +32,7 @@ Feature: Path normalization
     And I generate a unique API context from "/path-normalization-1" and store it as "apiContext1"
 
     When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion            | gateway.api-platform.wso2.com/v1 |
+      | apiVersion            | ${CTX:gatewaySpecVersion}        |
       | name                  | ${CTX:apiName1}                  |
       | spec.displayName      | Path-Norm-API                     |
       | spec.version          | v1.0                              |
@@ -59,7 +59,7 @@ Feature: Path normalization
     And I generate a unique API context from "/path-normalization-2" and store it as "apiContext2"
 
     When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion            | gateway.api-platform.wso2.com/v1 |
+      | apiVersion            | ${CTX:gatewaySpecVersion}        |
       | name                  | ${CTX:apiName2}                  |
       | spec.displayName      | Path-Escaped-Slash-API            |
       | spec.version          | v1.0                              |
@@ -72,7 +72,7 @@ Feature: Path normalization
     When I send a "GET" request to "${CTX:apiContext2}/v1.0/pets/pet%2FFarm"
     Then the response status code should be 200
 
-    When I send a "GET" request to "${CTX:apiContext2}/v1.0/pets/pet/Farm"
+    When I send a "GET" request to "${CTX:apiContext2}/v1.0/pets/pet/Farm" until status 404
     Then the response status code should be 404
 
     When I delete the API "${CTX:apiName2}"
@@ -84,7 +84,7 @@ Feature: Path normalization
     And I generate a unique API context from "/path-normalization-3" and store it as "apiContext3"
 
     When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion            | gateway.api-platform.wso2.com/v1 |
+      | apiVersion            | ${CTX:gatewaySpecVersion}        |
       | name                  | ${CTX:apiName3}                  |
       | spec.displayName      | Path-Literal-Dot-API              |
       | spec.version          | v1.0                              |

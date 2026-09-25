@@ -21,6 +21,7 @@ package components
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -153,6 +154,26 @@ type Endpoint struct {
 	Service string
 }
 
+// ExternalEndpoint names an endpoint published by an external component.
+// Its URL is resolved when the component is booted, rather than from container ports.
+type ExternalEndpoint struct {
+	// Name identifies the endpoint.
+	Name string
+}
+
+// ExternalSpec describes a component that is reachable outside the test process.
+// External components have no image, container, network, or database lifecycle.
+type ExternalSpec struct {
+	// Endpoints are the named addresses exposed by the component.
+	Endpoints []ExternalEndpoint
+
+	// RequiredParameters are runtime parameters that must be supplied before Resolve runs.
+	RequiredParameters []string
+
+	// Resolve constructs endpoint URLs from the repository root and runtime parameters.
+	Resolve func(repoRoot string, parameters map[string]string) (map[string]string, error)
+}
+
 // HealthCheck describes an application-level readiness probe.
 type HealthCheck struct {
 	// Endpoint names the Endpoint to probe.
@@ -251,6 +272,17 @@ type ConfigInjection struct {
 	ContainerPath string
 	// Format is the merge syntax.
 	Format ConfigFormat
+	// Versioned contains exact released-version configuration profiles. When a
+	// component using versioned profiles is assigned an image version, it must
+	// select one of these profiles instead of using the source-tree defaults.
+	Versioned map[string]ConfigProfile
+}
+
+// ConfigProfile replaces the base and shared configuration layers for a released image.
+// Extra and block-specific overlays retain their usual precedence.
+type ConfigProfile struct {
+	BaseConfigPath    string
+	SharedOverlayPath string
 }
 
 // FileMount describes a file copied into a container before startup.
@@ -276,6 +308,10 @@ type Definition struct {
 	// exclusive with Image.
 	Compose *ComposeSpec
 
+	// External describes a component hosted outside the test process. It is mutually
+	// exclusive with Image and Compose.
+	External *ExternalSpec
+
 	// Alias is the component's DNS name on its network.
 	Alias string
 
@@ -287,6 +323,9 @@ type Definition struct {
 
 	// Health is the application-level readiness gate. Nil disables this gate.
 	Health *HealthCheck
+	// VersionedHealth replaces Health for released image versions whose readiness
+	// contract differs from the source-build contract.
+	VersionedHealth map[string]HealthCheck
 
 	// Config describes configuration assembly, if the component has any.
 	Config *ConfigInjection
@@ -308,7 +347,7 @@ type Definition struct {
 
 	// Provisions returns environment values for dependent components after this component
 	// becomes ready.
-	Provisions func(ctx context.Context, inst *Instance) (map[string]string, error)
+	Provisions func(ctx context.Context, inst *Instance, dependent string) (map[string]string, error)
 
 	// DependsOn lists components that must be ready before this one starts.
 	DependsOn []string
@@ -322,7 +361,7 @@ type Definition struct {
 
 // WithImageVersion returns a copy whose image references use version.
 func (d *Definition) WithImageVersion(version string) *Definition {
-	if d == nil || strings.TrimSpace(version) == "" {
+	if d == nil || d.IsExternal() || strings.TrimSpace(version) == "" {
 		return d
 	}
 	out := *d
@@ -342,6 +381,68 @@ func (d *Definition) WithImageVersion(version string) *Definition {
 		out.Compose = &compose
 	}
 	return &out
+}
+
+// WithConfigVersion returns a copy configured for the supplied released image version.
+func (d *Definition) WithConfigVersion(version string) (*Definition, error) {
+	if d == nil || d.Config == nil || strings.TrimSpace(version) == "" {
+		return d, nil
+	}
+	config, err := d.Config.ForVersion(version)
+	if err != nil {
+		return nil, fmt.Errorf("component %q: %w", d.Name, err)
+	}
+	if config == d.Config {
+		return d, nil
+	}
+	out := *d
+	out.Config = config
+	return &out, nil
+}
+
+// WithReleaseVersion returns a copy whose image, configuration, and readiness
+// contracts match the supplied released image version.
+func (d *Definition) WithReleaseVersion(version string) (*Definition, error) {
+	updated := d.WithImageVersion(version)
+	updated, err := updated.WithConfigVersion(version)
+	if err != nil || updated == nil || strings.TrimSpace(version) == "" {
+		return updated, err
+	}
+	health, ok := updated.VersionedHealth[strings.TrimSpace(version)]
+	if !ok {
+		return updated, nil
+	}
+	out := *updated
+	out.Health = &health
+	return &out, nil
+}
+
+// WithStagedFiles returns a copy with block-scoped sources for declared staged files.
+func (d *Definition) WithStagedFiles(overrides map[string]string) (*Definition, error) {
+	if d == nil || d.Compose == nil {
+		return d, fmt.Errorf("component has no compose resources")
+	}
+	compose := *d.Compose
+	compose.StagedFiles = make(map[string]string, len(d.Compose.StagedFiles))
+	for target, source := range d.Compose.StagedFiles {
+		compose.StagedFiles[target] = source
+	}
+	for target, source := range overrides {
+		if _, ok := compose.StagedFiles[target]; !ok {
+			return nil, fmt.Errorf("staged file %q is not declared by the component", target)
+		}
+		if strings.TrimSpace(source) == "" || filepath.IsAbs(source) {
+			return nil, fmt.Errorf("staged file %q source must be a non-empty repository-relative path", target)
+		}
+		clean := filepath.Clean(source)
+		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("staged file %q source escapes the repository", target)
+		}
+		compose.StagedFiles[target] = source
+	}
+	out := *d
+	out.Compose = &compose
+	return &out, nil
 }
 
 // Endpoint returns the named endpoint.

@@ -79,7 +79,7 @@ func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 	var version int
 	err = storage.db.QueryRow("PRAGMA user_version").Scan(&version)
 	assert.NilError(t, err)
-	assert.Equal(t, version, currentSchemaVersion)
+	assert.Equal(t, version, currentSchemaVersion) // Set by the PRAGMA at the end of the embedded schema
 
 	// Verify tables exist
 	tables := []string{
@@ -90,6 +90,7 @@ func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 		"mcp_proxies",
 		"certificates",
 		"llm_provider_templates",
+		"agents",
 		"api_keys",
 		"subscriptions",
 		"subscription_plans",
@@ -120,18 +121,19 @@ func TestSQLiteStorage_RejectsUnsupportedSchemaVersion(t *testing.T) {
 	assert.NilError(t, err)
 	storage := store.(*sqlStore)
 
-	// A version newer than the binary's own is unsupported.
-	unsupportedVersion := currentSchemaVersion + 1
-	_, err = storage.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", unsupportedVersion))
+	// Set schema version to an unsupported value. Using currentSchemaVersion+1
+	// keeps this test honest across future bumps: a hardcoded number would
+	// eventually become the supported version and the test would stop testing
+	// anything.
+	unsupported := currentSchemaVersion + 1
+	_, err = storage.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", unsupported))
 	assert.NilError(t, err)
 	storage.db.Close()
 
 	// Reopen — should fail with unsupported version error
 	_, err = NewStorage(BackendConfig{Type: "sqlite", SQLitePath: dbPath}, logger)
 	assert.Assert(t, err != nil)
-	assert.ErrorContains(t, err, fmt.Sprintf(
-		"failed to initialize schema: unsupported schema version %d, expected %d; delete the database to recreate",
-		unsupportedVersion, currentSchemaVersion))
+	assert.ErrorContains(t, err, fmt.Sprintf("failed to initialize schema: unsupported schema version %d, expected %d; delete the database to recreate", unsupported, currentSchemaVersion))
 }
 
 func TestSQLiteStorage_DeleteConfig_NotFound(t *testing.T) {
@@ -830,7 +832,7 @@ func TestSQLiteStorage_ListCertificatesByUsage(t *testing.T) {
 // the column defaults and a new row saves with explicit usage and role.
 // Version 4 is a literal on purpose.
 func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
-	const preMigrationSchemaVersion = 4
+	const preMigrationSchemaVersion = previousSchemaVersion
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "upgrade-test.db")

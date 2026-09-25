@@ -447,7 +447,23 @@ func (t *Translator) createRouteFromRDC(routeKey string, rdcRoute *models.Route,
 	contextWithVersion := strings.TrimSuffix(fullPath, operationPath)
 
 	escapedContext := regexp.QuoteMeta(contextWithVersion)
-	if isMCPResourceRoute {
+	if rdcRoute.UpstreamPathOverride != "" {
+		// The route's whole gateway-facing path maps to one fixed upstream path,
+		// under the upstream's base path. The gateway-facing path is the operator's
+		// to choose; the upstream one is fixed by the protocol the route serves (a
+		// proxied Agent Card's /.well-known/agent-card.json), so nothing of the
+		// matched path survives into the substitution.
+		//
+		// The optional trailing slash mirrors the branches below: whatever the path
+		// matcher accepted the rewrite must also match, or Envoy forwards the
+		// request unrewritten.
+		r.GetRoute().RegexRewrite = &matcher.RegexMatchAndSubstitute{
+			Pattern: &matcher.RegexMatcher{
+				Regex: "^" + regexp.QuoteMeta(fullPath) + "/?$",
+			},
+			Substitution: upstreamPath + rdcRoute.UpstreamPathOverride,
+		}
+	} else if isMCPResourceRoute {
 		// MCP "/mcp" resource: the whole gateway-facing path ("<context>/mcp") maps to
 		// exactly the configured upstream URL path. We deliberately do NOT append "/mcp"
 		// to the backend, because some MCP backends serve at a different path (or root)
@@ -730,6 +746,17 @@ func buildGatewayHealthRoutes() ([]*route.Route, error) {
 			},
 			TypedPerFilterConfig: map[string]*anypb.Any{
 				constants.ExtProcFilterName: disabledAny,
+			},
+			// Health probes fire every few seconds per pod (k8s readiness/liveness). Sampling
+			// them produces pure noise in the trace backend, so force the route's effective
+			// sampling to zero — overall_sampling is the final upper bound Envoy applies after
+			// client-directed, forced and random sampling, so this also defeats a probe sent
+			// with x-envoy-force-trace / x-client-trace-id.
+			Tracing: &route.Tracing{
+				OverallSampling: &typev3.FractionalPercent{
+					Numerator:   0,
+					Denominator: typev3.FractionalPercent_HUNDRED,
+				},
 			},
 		}
 	}
@@ -1835,7 +1862,7 @@ func (t *Translator) createRoute(apiId, apiName, apiVersion, context, method, pa
 	}
 
 	// Set host rewrite based on configuration
-	if hostRewrite == nil || *hostRewrite != api.Manual {
+	if hostRewrite == nil || *hostRewrite != api.UpstreamHostRewriteManual {
 		routeAction.Route.HostRewriteSpecifier = &route.RouteAction_AutoHostRewrite{
 			AutoHostRewrite: &wrapperspb.BoolValue{
 				Value: true,
@@ -2886,6 +2913,10 @@ func sanitizeUpstreamDefinitionName(name string) string {
 // The two must stay decoupled: turning off the stdout log line is a log-formatting
 // choice and must not silently starve traffic logging and analytics of their only
 // data source.
+//
+// Both sinks suppress the reserved `/_gateway-health` prefix (see
+// buildReservedHealthPathAccessLogFilter), so kubernetes readiness/liveness probes
+// never reach either the operator's stdout log or the collector's analytics stream.
 func (t *Translator) createAccessLogConfig() ([]*accesslog.AccessLog, error) {
 	var accessLogs []*accesslog.AccessLog
 
@@ -2914,7 +2945,8 @@ func (t *Translator) createAccessLogConfig() ([]*accesslog.AccessLog, error) {
 }
 
 // createFileAccessLog creates the stdout access log sink based on the configured
-// format (JSON or text).
+// format (JSON or text). The sink suppresses the reserved `/_gateway-health`
+// prefix so kubernetes readiness/liveness probes never reach the operator's log.
 func (t *Translator) createFileAccessLog() (*accesslog.AccessLog, error) {
 	var fileAccessLog *fileaccesslog.FileAccessLog
 
@@ -2971,7 +3003,8 @@ func (t *Translator) createFileAccessLog() (*accesslog.AccessLog, error) {
 	}
 
 	return &accesslog.AccessLog{
-		Name: "envoy.access_loggers.file",
+		Name:   "envoy.access_loggers.file",
+		Filter: buildReservedHealthPathAccessLogFilter(), // same suppression as the ALS sink
 		ConfigType: &accesslog.AccessLog_TypedConfig{
 			TypedConfig: fileAccessLogAny,
 		},

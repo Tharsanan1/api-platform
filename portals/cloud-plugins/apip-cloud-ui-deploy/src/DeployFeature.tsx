@@ -19,13 +19,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FC } from 'react';
 import { Box, Button, CircularProgress, PageContent, PageTitle, Typography } from '@wso2/oxygen-ui';
 import DeployPage from './DeployPage';
-import { createDeployClient } from './deployApi';
+import { createDeployClient, takesEndpointUrl, type ArtifactKind } from './deployApi';
 import { isSettling } from './utils/status';
 import type { CloudHostPort } from './hostPort';
 import type { Build, Environment } from './types';
 
 export type DeployFeatureProps = {
   port: CloudHostPort;
+  /**
+   * The artifact kind being deployed. Defaults to REST APIs, which is what the
+   * console's API Deploy page shows.
+   */
+  kind?: ArtifactKind;
+  /**
+   * The artifact's handle, for hosts whose Port does not carry one — the AI
+   * Workspace reads it off the route and passes it in. Falls back to the Port's
+   * `apiHandle`.
+   */
+  artifactHandle?: string;
 };
 
 /** How often to re-read while a deployment is still settling. */
@@ -44,22 +55,27 @@ const errorMessage = (error: unknown, fallback: string) =>
  * assembles a pipeline itself and cannot offer a deployment the server would
  * reject.
  */
-const DeployFeature: FC<DeployFeatureProps> = ({ port }) => {
+const DeployFeature: FC<DeployFeatureProps> = ({ port, kind = 'RestApi', artifactHandle }) => {
   const { apiFetch, projectHandle, apiHandle, notify } = port;
+  const handle = artifactHandle ?? apiHandle;
 
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [builds, setBuilds] = useState<Build[]>([]);
   const [apiEndpointUrl, setApiEndpointUrl] = useState<string | undefined>(undefined);
+  // Whether this kind's deployments carry a backend URL at all. A REST API's does;
+  // an MCP server's and an LLM proxy's upstream belongs to the artifact, so the form
+  // neither asks for one nor sends one.
+  const takesEndpoint = takesEndpointUrl(kind);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const client = useMemo(
     () =>
-      projectHandle && apiHandle
-        ? createDeployClient(apiFetch, projectHandle, apiHandle)
+      projectHandle && handle
+        ? createDeployClient(apiFetch, projectHandle, handle, kind)
         : null,
-    [apiFetch, projectHandle, apiHandle]
+    [apiFetch, projectHandle, handle, kind]
   );
 
   // Kept in a ref so the poll can read the latest state without restarting on
@@ -178,33 +194,10 @@ const DeployFeature: FC<DeployFeatureProps> = ({ port }) => {
     );
   };
 
-  /**
-   * Retrying sends the gateway the build it already has, not a new one: a failed
-   * deployment is retried as it was, so a retry never quietly ships something
-   * else. A later environment can only be reached by promoting into it, so the
-   * retry names the environment before it as its source.
-   */
-  const handleRetry = (environment: Environment, gatewayId: string) => {
-    const gateway = environment.gateways.find((candidate) => candidate.id === gatewayId);
-    if (!client || !gateway) return;
-    const index = environments.findIndex((candidate) => candidate.name === environment.name);
-    void runAction(
-      () =>
-        // Only this gateway: the retry ships the build its peers are already
-        // running, so the environment stays on one build and the backend does not
-        // require them to be redeployed alongside it.
-        client.deploy({
-          environment: environment.name,
-          gateways: [{ gatewayId, endpointUrl: gateway.endpointUrl }],
-          buildId: gateway.buildId,
-          fromEnvironment: index > 0 ? environments[index - 1]?.name : undefined,
-        }),
-      `Retrying ${gateway.name}.`,
-      `Unable to retry ${gateway.name}.`
-    );
-  };
-
-  if (!projectHandle || !apiHandle) {
+  // `handle`, not the Port's apiHandle: the AI Workspace passes the artifact in
+  // rather than carrying it on the Port, and this guard is what decides whether the
+  // page can load at all.
+  if (!projectHandle || !handle) {
     return (
       <PageContent fullWidth sx={{ minWidth: 0 }}>
         <PageTitle sx={{ mb: 2 }}>
@@ -262,10 +255,10 @@ const DeployFeature: FC<DeployFeatureProps> = ({ port }) => {
       environments={environments}
       builds={builds}
       apiEndpointUrl={apiEndpointUrl}
+      takesEndpoint={takesEndpoint}
       busy={busy}
       onDeploy={handleDeploy}
       onStopGateway={handleStop}
-      onRetryGateway={handleRetry}
       onDeleteBuild={handleDeleteBuild}
     />
   );

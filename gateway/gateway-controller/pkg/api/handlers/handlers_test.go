@@ -48,6 +48,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	policybuilder "github.com/wso2/api-platform/gateway/gateway-controller/pkg/policy"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policyxds"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/service/agent"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/service/restapi"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/utils"
@@ -1212,6 +1213,11 @@ func createTestAPIServerWithDB(db storage.Storage) *APIServer {
 	)
 	server.restAPIService = restAPIService
 	server.RestAPIHandler = NewRestAPIHandler(restAPIService, logger)
+
+	// Initialize Agent service and handler
+	agentService := agent.NewAgentService(store, db, parser, config.NewAgentValidator(), logger, hub, nil, gatewayID)
+	server.agentService = agentService
+	server.AgentHandler = NewAgentHandler(agentService, logger)
 
 	return server
 }
@@ -3146,7 +3152,7 @@ func TestGetLLMProxyByIdFound(t *testing.T) {
 		Spec: api.LLMProxyConfigData{
 			DisplayName: "test-llm-proxy",
 			Version:     "v1.0",
-			Provider: api.LLMProxyProvider{
+			Provider: &api.LLMProxyProvider{
 				Id: "test-llm-provider",
 			},
 		},
@@ -3236,7 +3242,7 @@ func TestGetLLMProxyByIdWithDeployedAt(t *testing.T) {
 		Spec: api.LLMProxyConfigData{
 			DisplayName: "test-llm-proxy",
 			Version:     "v1.0",
-			Provider: api.LLMProxyProvider{
+			Provider: &api.LLMProxyProvider{
 				Id: "test-llm-provider",
 			},
 		},
@@ -3403,7 +3409,7 @@ func TestDeleteLLMProxyWithDBAndEventHub(t *testing.T) {
 			Spec: api.LLMProxyConfigData{
 				DisplayName: "test-llm-proxy",
 				Version:     "v1.0.0",
-				Provider: api.LLMProxyProvider{
+				Provider: &api.LLMProxyProvider{
 					Id: "provider-a",
 				},
 			},

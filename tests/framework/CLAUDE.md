@@ -100,6 +100,18 @@ Before adding a helper, step, or dependency:
   structured override, or dotted paths such as `spec.displayName` for a
   focused override. Values may contain JSON objects or arrays when a nested
   policy, operation, upstream, or endpoint must be configured.
+- For Platform Gateway resource templates, supply `apiVersion` as
+  `${CTX:gatewaySpecVersion}`. The Platform Gateway binding publishes that
+  scenario-scoped value before steps run, selecting the resource contract for
+  the Gateway release under test. Do not hard-code a release-specific Gateway
+  resource API version in a feature table unless the scenario is intentionally
+  testing an invalid version.
+- For a negative case that must omit fields from the final resource document,
+  continue to use the canonical template step and provide a complete `spec`
+  override containing only the fields the case requires. Supply harmless values
+  for the template's other placeholders so rendering succeeds; the complete
+  `spec` override replaces the template spec before the request is sent. Do not
+  use inline YAML or JSON documents to express this omission.
 - The renderer must preserve omission semantics. If an optional field is not
   supplied by the table, it must remain absent from the rendered document;
   do not add placeholder defaults merely to simplify a scenario.
@@ -128,6 +140,29 @@ Before adding a helper, step, or dependency:
 - A product-specific binding must retrieve the relevant version from that
   context and support every product version declared as supported by the
   framework.
+- Platform Gateway bindings publish `${CTX:gatewaySpecVersion}` for resource
+  templates. It resolves to `gateway.api-platform.wso2.com/v1alpha1` for
+  Gateway `1.1.0` and `gateway.api-platform.wso2.com/v1` for Gateway `1.2.0`
+  and current source builds. Keep that mapping in the Platform Gateway step
+  package; templates and feature files must consume the context value instead
+  of duplicating release checks.
+- Platform Gateway bindings publish `${CTX:gatewayMCPUpstreamPath}` for
+  testbench MCP fixtures. It is empty for Gateway `1.1.0` and older, which
+  append the request's `/mcp` path to the upstream URL, and `/mcp` for Gateway
+  `1.2.0` and current source builds. Use it where a scenario configures the
+  testbench MCP upstream instead of embedding a release check in a feature.
+- Gateway `1.1.0` and older represent LLM operation policies as
+  `spec.policies`; Gateway `1.2.0` and newer use `spec.operationPolicies`.
+  The Platform Gateway template binding translates the compatible policy shape
+  and the LLM-provider assertion binding selects the returned field. Feature
+  files must describe the attached-policy behavior, not either representation.
+- Gateway `1.1.0` semantic-cache configuration uses the legacy root Redis keys;
+  the semantic-AI overlay and Redis provisioner must keep those keys and the
+  per-topology password available alongside the current vector-store keys.
+  Gateway-version-specific semantic-cache behavior must be isolated in a
+  runner selector: the cross-authenticated-caller isolation scenario is gated
+  to Gateway `>=1.2.0`, where that contract exists. Do not weaken the
+  isolation assertion to make an older Gateway pass.
 - Keep version-specific response or request handling in the relevant product
   step package. Do not make generic JSON assertions silently accept multiple
   data types or response shapes.
@@ -269,6 +304,76 @@ The isolation principle is:
 - Ensure cleanup is safe when scenarios run concurrently and when a resource
   has already been deleted by the scenario that created it.
 
+### Increasing suite concurrency safely
+
+The integration suite uses nested `t.Parallel` subtests: blocks run in parallel
+and runners inside each block also run in parallel. Go's global `-parallel`
+budget applies to both levels. If it is lower than the number of parent and
+nested subtests that must make progress, the run can deadlock after component
+boot instead of reporting a test failure.
+
+- Do not force `go test -parallel` below the framework-computed budget. The suite
+  test main raises the budget when the selected topology requires it; preserve
+  that behavior when adding or increasing `parallel` values in suite YAML.
+- Increase one block's runner concurrency at a time and run one focused
+  iteration first. Inspect failures and elapsed time before running repeated
+  iterations or increasing it again.
+- A green run is not evidence of isolation by itself. Verify every stateful
+  testbench service used by the block—such as event stores, counters, and
+  response records—is addressed by the correct runner- or scenario-scoped
+  partition. Runner-local Go context does not isolate mutable state inside a
+  shared product or testbench process.
+- Partition state at the same granularity as the assertion. If a scenario
+  expects a fresh counter, event stream, webhook history, OAuth token sequence,
+  or response record, use a scenario-scoped partition; a runner-scoped context
+  alone is insufficient when multiple scenarios share the service. Pass the
+  partition explicitly through every fixture and lookup involved in the
+  assertion.
+- Do not assert global absence or an unqualified list while another runner can
+  create the same resource class. Scope the query to the owning organization,
+  project, or generated resource identifier, and select the exact resource by
+  its stored ID where the API or UI exposes one. If the behavior specifically
+  requires an empty global state, place that scenario in a dedicated topology
+  whose components and runner cannot create that state.
+- Resource readiness is separate from resource creation. Before opening a
+  dependent UI page or asserting a dependent control, poll the product's
+  supported list or status endpoint until the exact generated ID is observable.
+  Use a bounded retry deadline; never replace propagation polling with a fixed
+  delay or assume that a successful create response means all read paths are
+  ready.
+- Each UI runner gets its own browser context and page state. Do not share a
+  mutable page, cookies, local storage, or route state between runners. For
+  state-changing actions that trigger SPA navigation, synchronize the action
+  with the expected navigation and wait for the required document or control,
+  rather than relying on a generic load-state wait. Use exact selectors tied to
+  the scenario's generated resource when multiple cards or rows may exist.
+- When a browser or service operation is eventually consistent, poll the
+  observable product condition with `core/util/retry`, bounded by the test
+  context. Do not interpret `net::ERR_ABORTED`, a missing control, or a transient
+  404 as an isolation failure until the relevant navigation, readiness, and
+  partition assumptions have been checked.
+- If a run hangs, stop the test process and its run-owned containers, then
+  inspect the final goroutine stack and service logs. Do not classify a timeout
+  as a passing stress result.
+
+### Measuring and changing concurrency
+
+- Treat concurrency as a measured resource decision, not only a throughput
+  setting. After changing a block's concurrency, run one focused iteration and
+  inspect failures before repeating it or increasing the value. Repeat a green
+  configuration when isolation or timing behavior is important.
+- For a sequential timing pass, record each runner's elapsed time after it has
+  acquired its runner slot. A simple first estimate is
+  `ceil(sum(runner durations) / longest runner duration)`. Include boot,
+  teardown, browser, and service resource limits when choosing the final value;
+  the equation is an upper-bound efficiency estimate, not permission to exceed
+  host capacity.
+- If a sequential run fails, fix or explain that failure before using its
+  timings to justify concurrency. A failure in a sequential run is evidence
+  against attributing the problem solely to load; a failure only at higher
+  concurrency requires comparison of resource state, partitions, browser
+  diagnostics, and product logs before declaring a framework limitation.
+
 ## Capability Map
 
 `docs/capability-map.yml` is the source of truth for the integration suite's
@@ -350,6 +455,25 @@ duplicating it.
 - Create a new block or overlay only when an existing configuration cannot
   express the required behavior. A new block provisions another component
   topology and must be justified.
+- A runner may declare a Platform Gateway release boundary in `tags` with
+  `gateway-version<operator>major.minor.patch`, using one of `>`, `>=`, `<`,
+  `<=`, `=`, or `==`. An optional Godog expression follows exactly one `;`,
+  for example `gateway-version>1.2.0;~@known-issue`. The framework validates
+  and evaluates the release selector before Godog, removes it from the Godog
+  expression, and reports incompatible runners as skipped.
+- Use a Gateway-version selector only for a real release capability boundary.
+  It belongs at runner scope, not in feature tags or scenario steps. Keep
+  release-specific configuration in a dedicated block rather than changing a
+  shared block overlay. Malformed selectors, a missing Godog expression after
+  `;`, or more than one `;` are configuration errors and must not be worked
+  around with looser tags.
+- Use `defaults.components.platform-gateway.dbCompatibility` for Gateway database
+  support boundaries shared by matrix blocks, for example
+  `sqlserver: "gateway-version>=1.2.0"`. Its values use the same strict selector
+  syntax as runner tags. The framework excludes incompatible database variants
+  before boot and reports the skip; an explicitly selected incompatible variant is
+  a configuration error. Do not duplicate a shared database compatibility rule in
+  every block or encode it in scenario tags.
 
 ### Infrastructure level
 

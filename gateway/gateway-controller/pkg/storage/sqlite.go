@@ -97,7 +97,7 @@ func (s *SQLiteStorage) initSchema() error {
 	case version == previousSchemaVersion:
 		s.logger.Info("Migrating database schema",
 			slog.Int("from_version", version), slog.Int("to_version", currentSchemaVersion))
-		if err := s.migrateSchemaV4ToV5(); err != nil {
+		if err := s.migrateSchemaV5ToV6(); err != nil {
 			return fmt.Errorf("failed to migrate schema from version %d to %d: %w", version, currentSchemaVersion, err)
 		}
 		s.logger.Info("Database schema migrated successfully")
@@ -109,11 +109,11 @@ func (s *SQLiteStorage) initSchema() error {
 	return nil
 }
 
-// migrateSchemaV4ToV5 adds the certificates usage, role, match_json,
+// migrateSchemaV5ToV6 adds the certificates usage, role, match_json,
 // private_key_ciphertext and key_algorithm columns to a version 5 database
 // and sets user_version to 6. usage and role are defaulted; the rest are
 // nullable. No existing column changes.
-func (s *SQLiteStorage) migrateSchemaV4ToV5() error {
+func (s *SQLiteStorage) migrateSchemaV5ToV6() error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin migration transaction: %w", err)

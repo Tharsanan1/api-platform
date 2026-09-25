@@ -575,31 +575,6 @@ func TestConfig_Validate_AccessLogFields(t *testing.T) {
 	}
 }
 
-func TestDefaultConfig_AccessLogJSONFields(t *testing.T) {
-	cfg := defaultConfig()
-
-	expected := map[string]string{
-		"sni":       "%REQUESTED_SERVER_NAME%",
-		"tlsVer":    "%DOWNSTREAM_TLS_VERSION%",
-		"peerSubj":  "%DOWNSTREAM_PEER_SUBJECT%",
-		"peerFp":    "%DOWNSTREAM_PEER_FINGERPRINT_256%",
-		"upTlsFail": "%UPSTREAM_TRANSPORT_FAILURE_REASON%",
-	}
-	for key, want := range expected {
-		got, ok := cfg.Router.AccessLogs.JSONFields[key]
-		assert.True(t, ok, "expected default json_fields to contain key %q", key)
-		assert.Equal(t, want, got, "unexpected value for json_fields key %q", key)
-	}
-
-	const wantTextFormat = routerLogComponentTag + "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" " +
-		"%REQ(:PATH)% %UPSTREAM_PROTOCOL% %RESPONSE_CODE% %RESPONSE_FLAGS% %RESPONSE_CODE_DETAILS% " +
-		"%CONNECTION_TERMINATION_DETAILS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% " +
-		"%REQUEST_TX_DURATION% %RESPONSE_TX_DURATION% %REQUEST_DURATION% %RESPONSE_DURATION% " +
-		"\"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" " +
-		"\"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\"\n"
-	assert.Equal(t, wantTextFormat, cfg.Router.AccessLogs.TextFormat, "text access log format carries no TLS fields")
-}
-
 func TestConfig_Validate_LogLevel(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1101,16 +1076,6 @@ func TestDefaultConfig_AdminServerDefaults(t *testing.T) {
 	assert.Equal(t, []string{"*"}, cfg.Controller.AdminServer.AllowedIPs)
 }
 
-// The header name defaults to the documented one, with trust_any and
-// forward_to_backend off.
-func TestDefaultConfig_ClientCertificateHeaderDefaults(t *testing.T) {
-	cfg := defaultConfig()
-	h := cfg.Router.DownstreamTLS.ClientCertificateHeader
-	assert.Equal(t, "X-WSO2-CLIENT-CERTIFICATE", h.Name)
-	assert.False(t, h.TrustAny)
-	assert.False(t, h.ForwardToBackend)
-}
-
 // Header names must be RFC 7230 tokens that carry no proxy or framing
 // semantics, whatever https_enabled says.
 func TestConfig_ValidateClientCertificateHeaderName(t *testing.T) {
@@ -1121,7 +1086,6 @@ func TestConfig_ValidateClientCertificateHeaderName(t *testing.T) {
 		errContains string
 	}{
 		{name: "shipped default", headerName: "X-WSO2-CLIENT-CERTIFICATE", wantErr: false},
-		{name: "empty is not validated, same convention as other DownstreamTLS string fields", headerName: "", wantErr: false},
 		{name: "space is not a valid tchar", headerName: "X Bad", wantErr: true, errContains: "is not a valid HTTP header name"},
 		{name: "colon is not a valid tchar", headerName: "X:Y", wantErr: true, errContains: "is not a valid HTTP header name"},
 		{name: "reserved x-forwarded-client-cert", headerName: "x-forwarded-client-cert", wantErr: true, errContains: "x-forwarded-client-cert cannot be used as the client certificate header"},

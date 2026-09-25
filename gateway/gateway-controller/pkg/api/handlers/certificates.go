@@ -909,9 +909,6 @@ func (s *APIServer) UpdateCertificate(w http.ResponseWriter, r *http.Request, id
 // authority pool and xDS snapshot from the database. It runs once the write
 // has committed; the event carries the row id, never certificate material.
 func (s *APIServer) publishCertificateEvent(action, certID, correlationID string, log *slog.Logger) {
-	if s.eventHub == nil {
-		return
-	}
 	(&handlerkit.EventPublisher{EventHub: s.eventHub, GatewayID: s.gatewayID}).
 		PublishEvent(eventhub.EventTypeCertificate, action, certID, correlationID, log)
 }

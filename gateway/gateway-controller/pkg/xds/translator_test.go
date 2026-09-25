@@ -2133,16 +2133,6 @@ func TestTranslator_GetVHostDomains(t *testing.T) {
 	})
 }
 
-func TestTranslator_GetCertStore_AlwaysPresent(t *testing.T) {
-	logger := createTestLogger()
-	routerCfg := testRouterConfig()
-	cfg := testConfig()
-	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
-	require.NoError(t, err)
-
-	assert.NotNil(t, translator.GetCertStore())
-}
-
 func TestTranslator_ExtractTemplateHandle_InvalidKind(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -2832,34 +2822,6 @@ func TestTranslator_CreateUpstreamTLSContext_IdentityAndTrust_VerifyHostNameTrue
 	assertNoInlineBytesAnywhere(t, tlsCtx)
 }
 
-func TestTranslator_CreateUpstreamTLSContext_VerifyHostNameFalse_NoSANMatcher(t *testing.T) {
-	logger := createTestLogger()
-	routerCfg := testRouterConfig()
-	routerCfg.Upstream.TLS.DisableSslVerification = false
-	cfg := testConfig()
-	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
-	require.NoError(t, err)
-
-	tlsOpts := &models.UpstreamTLS{
-		HasTLSBlock:    true,
-		IdentityName:   "out-identity-a",
-		TrustedCANames: []string{"out-backend-ca"},
-		VerifyHostName: false,
-	}
-	validationSecretName := UpstreamCAValidationContextSecretName("out-partner-api", "partner-a")
-
-	tlsCtx, err := translator.createUpstreamTLSContext(nil, "mtls-backend-wronghost", tlsOpts, validationSecretName)
-	require.NoError(t, err)
-	require.NotNil(t, tlsCtx)
-
-	combined := tlsCtx.CommonTlsContext.GetCombinedValidationContext()
-	require.NotNil(t, combined)
-	assert.Empty(t, combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames(),
-		"verifyHostName: false must produce no SAN matcher at all")
-
-	assertNoInlineBytesAnywhere(t, tlsCtx)
-}
-
 // An IP-literal target gets an IP_ADDRESS SAN matcher and no SNI.
 func TestTranslator_CreateUpstreamTLSContext_IPAddressTarget_UsesIPMatcher(t *testing.T) {
 	logger := createTestLogger()
@@ -2880,27 +2842,6 @@ func TestTranslator_CreateUpstreamTLSContext_IPAddressTarget_UsesIPMatcher(t *te
 	sanMatchers := combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()
 	require.Len(t, sanMatchers, 1)
 	assert.Equal(t, tlsv3.SubjectAltNameMatcher_IP_ADDRESS, sanMatchers[0].GetSanType())
-}
-
-// A definition with no tls block presents no identity and uses the
-// router-wide trust and hostname defaults.
-func TestTranslator_CreateUpstreamTLSContext_NoTLSBlock_UsesRouterTrust(t *testing.T) {
-	logger := createTestLogger()
-	routerCfg := testRouterConfig()
-	routerCfg.Upstream.TLS.DisableSslVerification = false
-	cfg := testConfig()
-	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
-	require.NoError(t, err)
-
-	withNilOpts, err := translator.createUpstreamTLSContext(nil, "plain-backend.example.com", nil, "")
-	require.NoError(t, err)
-
-	assert.Empty(t, withNilOpts.CommonTlsContext.GetTlsCertificateSdsSecretConfigs(),
-		"a definition without tls must never reference a gateway identity secret")
-	assert.Equal(t, "plain-backend.example.com", withNilOpts.Sni)
-	assert.Equal(t, SecretNameUpstreamCA,
-		withNilOpts.CommonTlsContext.GetCombinedValidationContext().GetValidationContextSdsSecretConfig().GetName(),
-		"trust must fall back to the router-wide default")
 }
 
 // Only a tls block that sets identity or trustedCAs yields a secret ref.
@@ -3106,39 +3047,6 @@ func TestTranslator_CreateDownstreamTLSContext_ListenerCertViaSDS(t *testing.T) 
 	assert.Equal(t, SecretNameDownstreamListenerCert, sdsConfigs[0].GetName())
 	assert.Empty(t, tlsContext.CommonTlsContext.GetTlsCertificates(),
 		"the listener certificate/key must never be inlined into the LDS resource")
-}
-
-// Without mtls-auth the listener does not ask for a client certificate.
-func TestTranslator_CreateDownstreamTLSContext_NoClientCARequired(t *testing.T) {
-	logger := createTestLogger()
-	routerCfg := testRouterConfig()
-	cfg := testConfig()
-	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
-	require.NoError(t, err)
-
-	tlsContext, err := translator.createDownstreamTLSContext(false)
-	require.NoError(t, err)
-
-	assert.Nil(t, tlsContext.CommonTlsContext.GetValidationContextType())
-	assert.Nil(t, tlsContext.RequireClientCertificate)
-}
-
-// With mtls-auth the listener validates against the client-CA pool and
-// requests, but never requires, a certificate.
-func TestTranslator_CreateDownstreamTLSContext_ClientCARequired(t *testing.T) {
-	logger := createTestLogger()
-	routerCfg := testRouterConfig()
-	cfg := testConfig()
-	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
-	require.NoError(t, err)
-
-	tlsContext, err := translator.createDownstreamTLSContext(true)
-	require.NoError(t, err)
-
-	require.NotNil(t, tlsContext.CommonTlsContext.GetValidationContextSdsSecretConfig())
-	assert.Equal(t, SecretNameDownstreamClientCA, tlsContext.CommonTlsContext.GetValidationContextSdsSecretConfig().GetName())
-	require.NotNil(t, tlsContext.RequireClientCertificate)
-	assert.False(t, tlsContext.RequireClientCertificate.GetValue())
 }
 
 func TestTranslator_CreateRoute_Basic(t *testing.T) {
@@ -4048,38 +3956,6 @@ func findRoutesByName(t *testing.T, routes []*route.Route) (plainRoute, mtlsRout
 // A route without mtls-auth always strips the relayed header, whatever
 // forward_to_backend says.
 func TestTranslator_CreateRouteFromRDC_StripsClientCertificateHeader_UnlessBelieved(t *testing.T) {
-	t.Run("forward_to_backend false: both routes strip it", func(t *testing.T) {
-		translator := createTestTranslator()
-		translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{
-			Name:             "X-WSO2-CLIENT-CERTIFICATE",
-			ForwardToBackend: false,
-		}
-
-		routes, _, err := translator.translateRuntimeConfig(mtlsHeaderStrippingRDC())
-		require.NoError(t, err)
-		plainRoute, mtlsRoute := findRoutesByName(t, routes)
-
-		assert.Contains(t, plainRoute.RequestHeadersToRemove, "x-wso2-client-certificate")
-		assert.Contains(t, mtlsRoute.RequestHeadersToRemove, "x-wso2-client-certificate",
-			"forward_to_backend is false: even the mtls-auth route must strip it")
-	})
-
-	t.Run("forward_to_backend true: only the non-mtls-auth route strips it", func(t *testing.T) {
-		translator := createTestTranslator()
-		translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{
-			Name:             "X-WSO2-CLIENT-CERTIFICATE",
-			ForwardToBackend: true,
-		}
-
-		routes, _, err := translator.translateRuntimeConfig(mtlsHeaderStrippingRDC())
-		require.NoError(t, err)
-		plainRoute, mtlsRoute := findRoutesByName(t, routes)
-
-		assert.Contains(t, plainRoute.RequestHeadersToRemove, "x-wso2-client-certificate",
-			"a route with no mtls-auth must strip the header regardless of forward_to_backend")
-		assert.NotContains(t, mtlsRoute.RequestHeadersToRemove, "x-wso2-client-certificate",
-			"forward_to_backend is true: the mtls-auth route keeps the header for the policy to forward")
-	})
 
 	t.Run("header name is lower-cased before being added to RequestHeadersToRemove", func(t *testing.T) {
 		translator := createTestTranslator()

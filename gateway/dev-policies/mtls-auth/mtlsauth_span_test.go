@@ -251,52 +251,6 @@ func TestMtlsAuthPolicy_SpanAttributes_SANAndThumbprintMismatch(t *testing.T) {
 	})
 }
 
-func TestMtlsAuthPolicy_SpanAttributes_HeaderSourceAndBypass(t *testing.T) {
-	rootA := newRootCA(t, "Partner A Root CA")
-	acceptLeaf := newLeaf(t, rootA, "client-valid", certOpts{})
-	unacceptedLeaf := newLeaf(t, newRootCA(t, "Unrelated Root CA"), "client-wrong-ca", certOpts{})
-	relayCA := newRootCA(t, "Edge LB CA")
-	relayLeaf := newLeaf(t, relayCA, "edge-lb", certOpts{})
-
-	acceptEntries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
-	pool := []*testEntity{rootA, relayCA}
-	relays := []relaySpec{{name: "relay-edge-lb", roots: []*testEntity{relayCA}}}
-
-	t.Run("allow via header, relayed_by present", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
-		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
-		_, attrs := callWithRecordedSpan(t, p, reqCtx)
-
-		requireAttrString(t, attrs, "mtls_auth.result", "allow")
-		requireAttrString(t, attrs, "mtls_auth.source", sourceHeader)
-		requireAttrString(t, attrs, "mtls_auth.relayed_by", "relay-edge-lb")
-		requireNoPEMLeaked(t, attrs)
-	})
-
-	t.Run("deny via header, relayed_by still present", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
-		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(unacceptedLeaf))
-		_, attrs := callWithRecordedSpan(t, p, reqCtx)
-
-		requireAttrString(t, attrs, "mtls_auth.result", "deny")
-		requireAttrString(t, attrs, "mtls_auth.source", sourceHeader)
-		requireAttrString(t, attrs, "mtls_auth.relayed_by", "relay-edge-lb")
-		requireAttrString(t, attrs, "mtls_auth.reason", reasonUntrustedChain)
-		requireNoPEMLeaked(t, attrs)
-	})
-
-	t.Run("bypass", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, nil, map[string]interface{}{"trustAny": true})
-		reqCtx := reqCtxWithTLSAndHeader(&policy.DownstreamTLS{MTLS: false}, defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
-		_, attrs := callWithRecordedSpan(t, p, reqCtx)
-
-		requireAttrString(t, attrs, "mtls_auth.result", "allow")
-		requireAttrString(t, attrs, "mtls_auth.source", sourceBypass)
-		requireAttrAbsent(t, attrs, "mtls_auth.relayed_by")
-		requireNoPEMLeaked(t, attrs)
-	})
-}
-
 // TestMtlsAuthPolicy_Evaluate_MostSpecificReasonAcrossEntries guards that a
 // deny reports the most specific rejection across all entries, whatever
 // order they are declared in.

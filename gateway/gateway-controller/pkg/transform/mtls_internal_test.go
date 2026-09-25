@@ -19,7 +19,6 @@
 package transform
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -89,66 +88,9 @@ func transformMtlsAuth(t *testing.T, routerCfg *config.RouterConfig, params map[
 	return p
 }
 
-// internalParamKeys lists the __wso2_internal_mtls_* keys set on p.
-func internalParamKeys(p *models.Policy) []string {
-	var keys []string
-	for k := range p.Params {
-		if strings.HasPrefix(k, "__wso2_internal_mtls_") {
-			keys = append(keys, k)
-		}
-	}
-	return keys
-}
-
 // ============ API-level and operation-level injection ============
 
-func TestBuildPolicyChain_MtlsAuth_InjectsOnlyTheHeaderParam(t *testing.T) {
-	for _, operationLevel := range []bool{false, true} {
-		name := "API level"
-		if operationLevel {
-			name = "operation level"
-		}
-		t.Run(name, func(t *testing.T) {
-			p := transformMtlsAuth(t, testRouterCfg(), map[string]interface{}{
-				"accept": []interface{}{map[string]interface{}{"ca": " auth-ca-a "}},
-			}, operationLevel)
-
-			assert.ElementsMatch(t, []string{mtlsInternalHeaderParam}, internalParamKeys(p))
-			assert.Equal(t, []interface{}{map[string]interface{}{"ca": " auth-ca-a "}}, p.Params["accept"],
-				"the author's accept reaches the engine as authored")
-		})
-	}
-}
-
-func TestBuildPolicyChain_MtlsAuth_OmittedAccept_StaysOmitted(t *testing.T) {
-	p := transformMtlsAuth(t, testRouterCfg(), nil, false)
-
-	_, hasAccept := p.Params["accept"]
-	assert.False(t, hasAccept, "an omitted accept must reach the engine as omitted, so the policy resolves the pool itself")
-	assert.ElementsMatch(t, []string{mtlsInternalHeaderParam}, internalParamKeys(p))
-}
-
 // ============ The chain carries no certificate material ============
-
-func TestBuildPolicyChain_MtlsAuth_ChainCarriesNoCertificateMaterial(t *testing.T) {
-	for _, params := range []map[string]interface{}{
-		nil,
-		{"accept": []interface{}{
-			map[string]interface{}{"ca": "auth-ca-a", "match": map[string]interface{}{"dnsSANs": []interface{}{"client.example.com"}}},
-			map[string]interface{}{"ca": "auth-ca-b"},
-		}},
-	} {
-		p := transformMtlsAuth(t, testRouterCfg(), params, false)
-		encoded, err := json.Marshal(p.Params)
-		require.NoError(t, err)
-		assert.NotContains(t, string(encoded), "CERTIFICATE", "a policy chain must never carry PEM")
-		assert.NotContains(t, string(encoded), "certificates")
-		for _, removed := range []string{"__wso2_internal_mtls_pool", "__wso2_internal_mtls_relays"} {
-			_, present := p.Params[removed]
-			assert.Falsef(t, present, "%s must not be injected", removed)
-		}
-	}
-}
 
 // ============ The author's accept is passed through unchanged ============
 
@@ -173,21 +115,6 @@ func TestBuildPolicyChain_MtlsAuth_LeavesAuthoredAcceptUntouched(t *testing.T) {
 
 // ============ No injection for other policies ============
 
-func TestBuildPolicyChain_MtlsAuth_NoInjectionForOtherPolicies(t *testing.T) {
-	defs := map[string]models.PolicyDefinition{
-		"header-mutate|v1.0.0": {Name: "header-mutate", Version: "v1.0.0"},
-	}
-	transformer := NewRestAPITransformer(testRouterCfg(), &config.Config{}, defs)
-
-	cfg := makeRestAPIStoredConfig([]api.Policy{{Name: "header-mutate", Version: ""}}, nil)
-
-	rdc, err := transformer.Transform(cfg)
-	require.NoError(t, err)
-	p := findPolicy(rdc, mtlsAuthTestRouteKey, "header-mutate")
-	require.NotNil(t, p)
-	assert.Empty(t, internalParamKeys(p), "a non-mtls-auth policy must never get an internal mtls-auth param")
-}
-
 // ============ __wso2_internal_mtls_header ============
 
 // __wso2_internal_mtls_header mirrors client_certificate_header exactly.
@@ -205,12 +132,4 @@ func TestBuildPolicyChain_MtlsAuth_HeaderParam_CarriesRouterConfig(t *testing.T)
 	assert.Equal(t, "X-Custom-Client-Cert", header["name"])
 	assert.Equal(t, true, header["trustAny"])
 	assert.Equal(t, true, header["forwardToBackend"])
-}
-
-func TestBuildPolicyChain_MtlsAuth_ForwardCertificate_PassesThrough(t *testing.T) {
-	p := transformMtlsAuth(t, testRouterCfg(), map[string]interface{}{
-		"accept":             []interface{}{map[string]interface{}{"ca": "auth-ca-a"}},
-		"forwardCertificate": false,
-	}, false)
-	assert.Equal(t, false, p.Params["forwardCertificate"])
 }

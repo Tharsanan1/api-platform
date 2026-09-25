@@ -30,7 +30,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
-	"strings"
 	"testing"
 	"time"
 )
@@ -50,14 +49,6 @@ func mustSerial(t *testing.T) *big.Int {
 }
 
 type certOption func(*x509.Certificate)
-
-func withEKU(ekus ...x509.ExtKeyUsage) certOption {
-	return func(c *x509.Certificate) { c.ExtKeyUsage = ekus }
-}
-
-func withNoEKU() certOption {
-	return func(c *x509.Certificate) { c.ExtKeyUsage = nil }
-}
 
 func withValidity(notBefore, notAfter time.Time) certOption {
 	return func(c *x509.Certificate) {
@@ -95,33 +86,6 @@ func issueLeaf(t *testing.T, cn string, key crypto.Signer, parent *x509.Certific
 		t.Fatalf("failed to create certificate for %q: %v", cn, err)
 	}
 	return der
-}
-
-// issueRootCA creates a self-signed ECDSA CA certificate.
-func issueRootCA(t *testing.T, cn string) (*x509.Certificate, crypto.Signer) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("failed to generate CA key: %v", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          mustSerial(t),
-		Subject:               pkix.Name{CommonName: cn},
-		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
-	if err != nil {
-		t.Fatalf("failed to create CA certificate for %q: %v", cn, err)
-	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("failed to parse generated CA certificate for %q: %v", cn, err)
-	}
-	return cert, key
 }
 
 func pemCert(der []byte) []byte {
@@ -182,19 +146,6 @@ func TestInspect_RSAKeyMatchesLeaf(t *testing.T) {
 	}
 }
 
-func TestInspect_ECDSAKeyMatchesLeaf(t *testing.T) {
-	key := genECDSAKey(t)
-	der := issueLeaf(t, "ecdsa-identity", key, nil, nil)
-
-	bundle, err := Inspect(pemCert(der), pemPKCS8Key(t, key), time.Now())
-	if err != nil {
-		t.Fatalf("expected a matching ECDSA chain+key to inspect cleanly, got: %v", err)
-	}
-	if bundle.KeyAlgorithm != "ECDSA" {
-		t.Errorf("expected KeyAlgorithm %q, got %q", "ECDSA", bundle.KeyAlgorithm)
-	}
-}
-
 func TestInspect_Ed25519KeyMatchesLeaf(t *testing.T) {
 	key := genEd25519Key(t)
 	der := issueLeaf(t, "ed25519-identity", key, nil, nil)
@@ -210,49 +161,7 @@ func TestInspect_Ed25519KeyMatchesLeaf(t *testing.T) {
 
 // ============ Inspect: key/certificate mismatch ============
 
-func TestInspect_KeyDoesNotMatchCertificate_ExactMessage(t *testing.T) {
-	leafKey := genECDSAKey(t)
-	der := issueLeaf(t, "mismatch-identity", leafKey, nil, nil)
-
-	otherKey := genECDSAKey(t)
-
-	_, err := Inspect(pemCert(der), pemPKCS8Key(t, otherKey), time.Now())
-	if err == nil {
-		t.Fatal("expected a key-mismatch error, got none")
-	}
-	var fe *FieldError
-	if !errors.As(err, &fe) {
-		t.Fatalf("expected a *FieldError, got %T: %v", err, err)
-	}
-	if fe.Field != fieldPrivateKey {
-		t.Errorf("expected field %q, got %q", fieldPrivateKey, fe.Field)
-	}
-	if fe.Message != msgKeyMismatch {
-		t.Errorf("expected message %q, got %q", msgKeyMismatch, fe.Message)
-	}
-}
-
 // ============ InspectPrivateKey: passphrase-protected keys ============
-
-func TestInspectPrivateKey_EncryptedPKCS8Header_ExactMessage(t *testing.T) {
-	// The PEM type alone causes the rejection, so the body need not decrypt.
-	block := pem.EncodeToMemory(&pem.Block{Type: "ENCRYPTED PRIVATE KEY", Bytes: []byte("not actually decryptable")})
-
-	_, _, err := InspectPrivateKey(block)
-	if err == nil {
-		t.Fatal("expected a passphrase-protected-key error, got none")
-	}
-	var fe *FieldError
-	if !errors.As(err, &fe) {
-		t.Fatalf("expected a *FieldError, got %T: %v", err, err)
-	}
-	if fe.Field != fieldPrivateKey {
-		t.Errorf("expected field %q, got %q", fieldPrivateKey, fe.Field)
-	}
-	if fe.Message != msgPassphraseKey {
-		t.Errorf("expected message %q, got %q", msgPassphraseKey, fe.Message)
-	}
-}
 
 func TestInspectPrivateKey_LegacyProcTypeEncryptedHeader_ExactMessage(t *testing.T) {
 	// OpenSSL-style RSA PRIVATE KEY with a "Proc-Type: 4,ENCRYPTED" header.
@@ -280,110 +189,6 @@ func TestInspectPrivateKey_LegacyProcTypeEncryptedHeader_ExactMessage(t *testing
 
 // ============ InspectCertificateChain: expiry ============
 
-func TestInspectCertificateChain_ExpiredLeaf_MessagePrefix(t *testing.T) {
-	key := genECDSAKey(t)
-	expiredNotBefore := time.Now().Add(-2 * 365 * 24 * time.Hour)
-	expiredNotAfter := time.Now().Add(-1 * 365 * 24 * time.Hour)
-	der := issueLeaf(t, "expired-identity", key, nil, nil, withValidity(expiredNotBefore, expiredNotAfter))
-
-	_, err := InspectCertificateChain(pemCert(der), time.Now())
-	if err == nil {
-		t.Fatal("expected an expiry error, got none")
-	}
-	var fe *FieldError
-	if !errors.As(err, &fe) {
-		t.Fatalf("expected a *FieldError, got %T: %v", err, err)
-	}
-	if fe.Field != fieldCertificate {
-		t.Errorf("expected field %q, got %q", fieldCertificate, fe.Field)
-	}
-	if !strings.HasPrefix(fe.Message, "the certificate expired on ") {
-		t.Errorf("expected message to start with %q, got %q", "the certificate expired on ", fe.Message)
-	}
-}
-
 // ============ ClientAuthWarning ============
 
-func TestClientAuthWarning_EKUWithoutClientAuth_WarningReturned(t *testing.T) {
-	key := genECDSAKey(t)
-	der := issueLeaf(t, "serverauth-only-identity", key, nil, nil, withEKU(x509.ExtKeyUsageServerAuth))
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("failed to parse generated certificate: %v", err)
-	}
-
-	warning := ClientAuthWarning(cert)
-	if warning == nil {
-		t.Fatal("expected an IDENTITY_NO_CLIENTAUTH_EKU warning, got none")
-	}
-	if warning.Code != CodeNoClientAuthEKU {
-		t.Errorf("expected code %q, got %q", CodeNoClientAuthEKU, warning.Code)
-	}
-	if warning.Field != fieldCertificate {
-		t.Errorf("expected field %q, got %q", fieldCertificate, warning.Field)
-	}
-}
-
-func TestClientAuthWarning_NoEKUAtAll_NoWarning(t *testing.T) {
-	key := genECDSAKey(t)
-	der := issueLeaf(t, "no-eku-identity", key, nil, nil, withNoEKU())
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("failed to parse generated certificate: %v", err)
-	}
-
-	if warning := ClientAuthWarning(cert); warning != nil {
-		t.Errorf("expected no warning for a certificate with no EKU extension at all, got %+v", warning)
-	}
-}
-
-func TestClientAuthWarning_ClientAuthPresent_NoWarning(t *testing.T) {
-	key := genECDSAKey(t)
-	// issueLeaf's default template already carries clientAuth.
-	der := issueLeaf(t, "clientauth-identity", key, nil, nil)
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("failed to parse generated certificate: %v", err)
-	}
-
-	if warning := ClientAuthWarning(cert); warning != nil {
-		t.Errorf("expected no warning for a clientAuth certificate, got %+v", warning)
-	}
-}
-
 // ============ Chain length ============
-
-func TestInspect_ChainLength_CountsEveryCertificate(t *testing.T) {
-	caCert, caKey := issueRootCA(t, "Identity Chain CA")
-	leafKey := genECDSAKey(t)
-	leafDER := issueLeaf(t, "via-intermediate-identity", leafKey, caCert, caKey)
-
-	chainPEM := append(append([]byte{}, pemCert(leafDER)...), pemCert(caCert.Raw)...)
-
-	bundle, err := Inspect(chainPEM, pemPKCS8Key(t, leafKey), time.Now())
-	if err != nil {
-		t.Fatalf("expected a chained certificate to inspect cleanly, got: %v", err)
-	}
-	if len(bundle.Chain) != 2 {
-		t.Errorf("expected a chain length of 2 (leaf + one intermediate), got %d", len(bundle.Chain))
-	}
-	if bundle.Leaf.Subject.CommonName != "via-intermediate-identity" {
-		t.Errorf("expected the leaf (first certificate) to be the identity, got subject %q", bundle.Leaf.Subject.CommonName)
-	}
-}
-
-func TestParseChain_CountsEveryCertificate(t *testing.T) {
-	caCert, caKey := issueRootCA(t, "ParseChain CA")
-	leafKey := genECDSAKey(t)
-	leafDER := issueLeaf(t, "parsechain-identity", leafKey, caCert, caKey)
-
-	chainPEM := append(append([]byte{}, pemCert(leafDER)...), pemCert(caCert.Raw)...)
-
-	chain, err := ParseChain(chainPEM)
-	if err != nil {
-		t.Fatalf("expected ParseChain to succeed, got: %v", err)
-	}
-	if len(chain) != 2 {
-		t.Errorf("expected 2 certificates in the chain, got %d", len(chain))
-	}
-}

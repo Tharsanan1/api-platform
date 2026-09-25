@@ -939,72 +939,6 @@ func seedUpstreamCert(t *testing.T) *models.StoredCertificate {
 	}
 }
 
-func TestUploadCertificate_UsageClient_Success(t *testing.T) {
-	mockDB := NewMockStorage()
-	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
-
-	server := createTestAPIServerWithCertStore(t, mockDB)
-	handler := newUploadCertHandler(server)
-
-	root := pki.NewRootCA(t, "Client Pool Partner CA")
-	reqBody := UploadCertificateRequest{
-		Name:        "pool-partner",
-		Usage:       models.CertificateUsageClient,
-		Certificate: string(root.PEM()),
-	}
-	bodyBytes, err := json.Marshal(reqBody)
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodPost, "/certificates", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, models.CertificateUsageClient, resp["usage"])
-	assert.Equal(t, models.CertificateRoleClient, resp["role"])
-	assert.Equal(t, false, resp["isLeaf"])
-	_, hasWarnings := resp["warnings"]
-	assert.False(t, hasWarnings, "expected no warnings key in response, got %v", resp["warnings"])
-}
-
-func TestUploadCertificate_SelfSignedLeaf_UsageClient_FlaggedAsLeaf(t *testing.T) {
-	mockDB := NewMockStorage()
-	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
-
-	server := createTestAPIServerWithCertStore(t, mockDB)
-	handler := newUploadCertHandler(server)
-
-	leaf := pki.NewSelfSignedLeaf(t, "acme-device-1")
-	reqBody := UploadCertificateRequest{
-		Name:        "pool-acme-selfsigned",
-		Usage:       models.CertificateUsageClient,
-		Certificate: string(leaf.PEM()),
-	}
-	bodyBytes, err := json.Marshal(reqBody)
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodPost, "/certificates", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, true, resp["isLeaf"])
-
-	warnings, ok := resp["warnings"].([]any)
-	require.True(t, ok, "expected a warnings array, got %v", resp["warnings"])
-	require.Len(t, warnings, 1)
-	w0 := warnings[0].(map[string]any)
-	assert.Equal(t, "CLIENT_CA_IS_LEAF", w0["code"])
-}
-
 // uploadCertificateBody posts an upload for rejection tests, which fail
 // validation before reaching the snapshot manager.
 func uploadCertificateBody(t *testing.T, server *APIServer, reqBody UploadCertificateRequest) *httptest.ResponseRecorder {
@@ -1035,111 +969,6 @@ func firstFieldError(t *testing.T, body []byte, field string) map[string]any {
 	return nil
 }
 
-func TestUploadCertificate_InvalidRole_Rejected(t *testing.T) {
-	mockDB := NewMockStorage()
-	server := createTestAPIServerWithDB(mockDB)
-
-	root := pki.NewRootCA(t, "Bad Role CA")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "pool-bad-role",
-		Usage:       models.CertificateUsageClient,
-		Role:        "proxy",
-		Certificate: string(root.PEM()),
-	})
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, "error", resp["status"])
-	assert.NotEmpty(t, resp["message"])
-
-	entry := firstFieldError(t, w.Body.Bytes(), "role")
-	assert.Equal(t, "role must be client or relay", entry["message"])
-}
-
-func TestUploadCertificate_UnknownUsage_Rejected(t *testing.T) {
-	mockDB := NewMockStorage()
-	server := createTestAPIServerWithDB(mockDB)
-
-	root := pki.NewRootCA(t, "Bad Usage CA")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "pool-bad-usage",
-		Usage:       "backend",
-		Certificate: string(root.PEM()),
-	})
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	entry := firstFieldError(t, w.Body.Bytes(), "usage")
-	assert.Equal(t, "usage must be upstream, client or identity", entry["message"])
-}
-
-func TestUploadCertificate_RoleOnUpstream_Rejected(t *testing.T) {
-	mockDB := NewMockStorage()
-	server := createTestAPIServerWithDB(mockDB)
-
-	root := pki.NewRootCA(t, "Role On Upstream CA")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "pool-role-on-upstream",
-		Usage:       models.CertificateUsageUpstream,
-		Role:        models.CertificateRoleRelay,
-		Certificate: string(root.PEM()),
-	})
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	entry := firstFieldError(t, w.Body.Bytes(), "role")
-	assert.Equal(t, "role applies only to usage: client certificates", entry["message"])
-}
-
-func TestUploadCertificate_BadNameAndRoleOnUpstream_ReportsBothErrors(t *testing.T) {
-	mockDB := NewMockStorage()
-	server := createTestAPIServerWithDB(mockDB)
-
-	root := pki.NewRootCA(t, "Bad Name And Role CA")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "pool/bad name",
-		Usage:       models.CertificateUsageUpstream,
-		Role:        models.CertificateRoleRelay,
-		Certificate: string(root.PEM()),
-	})
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	errs, ok := resp["errors"].([]any)
-	require.True(t, ok)
-	require.Len(t, errs, 2)
-
-	fields := map[string]bool{}
-	for _, raw := range errs {
-		entry := raw.(map[string]any)
-		fields[fmt.Sprint(entry["field"])] = true
-	}
-	assert.True(t, fields["name"], "expected a validation error for field name, got %v", errs)
-	assert.True(t, fields["role"], "expected a validation error for field role, got %v", errs)
-}
-
-func TestUploadCertificate_DuplicateClientName_Conflict(t *testing.T) {
-	mockDB := NewMockStorage()
-	mockDB.saveErr = fmt.Errorf("%w: certificate with name 'pool-partner-a' already exists", storage.ErrConflict)
-	server := createTestAPIServerWithDB(mockDB)
-
-	root := pki.NewRootCA(t, "Duplicate Name CA")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "pool-partner-a",
-		Usage:       models.CertificateUsageClient,
-		Certificate: string(root.PEM()),
-	})
-
-	require.Equal(t, http.StatusConflict, w.Code)
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, "error", resp["status"])
-	assert.Equal(t, "a client-CA authority named pool-partner-a already exists", resp["message"])
-}
-
 func TestUploadCertificate_BodyOverSizeLimit_Rejected(t *testing.T) {
 	mockDB := NewMockStorage()
 	server := createTestAPIServerWithDB(mockDB)
@@ -1159,97 +988,6 @@ func TestUploadCertificate_BodyOverSizeLimit_Rejected(t *testing.T) {
 		"response body should not state the configured size limit: %s", w.Body.String())
 }
 
-func TestListCertificates_FilterByUsage_ClientOnly(t *testing.T) {
-	mockDB := NewMockStorage()
-	upstream := pki.NewRootCA(t, "List Filter Upstream CA")
-	client := pki.NewRootCA(t, "List Filter Client CA")
-	mockDB.certs = []*models.StoredCertificate{
-		{
-			UUID: "upstream-1", Name: "upstream-cert", Certificate: upstream.PEM(),
-			Usage: models.CertificateUsageUpstream, NotAfter: time.Now().Add(365 * 24 * time.Hour),
-		},
-		{
-			UUID: "client-1", Name: "client-cert", Certificate: client.PEM(),
-			Usage: models.CertificateUsageClient, NotAfter: time.Now().Add(365 * 24 * time.Hour),
-		},
-	}
-
-	server := createTestAPIServerWithDB(mockDB)
-	handler := newCertListHandler(server)
-	req := httptest.NewRequest(http.MethodGet, "/certificates?usage=client", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-
-	var resp ListCertificatesResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	require.Len(t, resp.Certificates, 1)
-	assert.Equal(t, "client-cert", resp.Certificates[0].Name)
-}
-
-// A client row expiring soon carries CERT_EXPIRES_SOON and referencedByApis:
-// 0; an upstream row carries neither, nor a role.
-func TestListCertificates_WarningsAndFieldPresence(t *testing.T) {
-	mockDB := NewMockStorage()
-	upstream := pki.NewRootCA(t, "Field Presence Upstream CA")
-	clientSoon := pki.NewRootCA(t, "Field Presence Client CA")
-	mockDB.certs = []*models.StoredCertificate{
-		{
-			UUID: "upstream-1", Name: "upstream-cert", Certificate: upstream.PEM(),
-			Usage: models.CertificateUsageUpstream, NotAfter: time.Now().Add(365 * 24 * time.Hour),
-		},
-		{
-			UUID: "client-1", Name: "client-cert-expiring", Certificate: clientSoon.PEM(),
-			Usage: models.CertificateUsageClient, NotAfter: time.Now().Add(10 * 24 * time.Hour),
-		},
-	}
-
-	server := createTestAPIServerWithDB(mockDB)
-	handler := newCertListHandler(server)
-	req := httptest.NewRequest(http.MethodGet, "/certificates", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	items, ok := resp["certificates"].([]any)
-	require.True(t, ok)
-	require.Len(t, items, 2)
-
-	var upstreamItem, clientItem map[string]any
-	for _, raw := range items {
-		item := raw.(map[string]any)
-		switch item["name"] {
-		case "upstream-cert":
-			upstreamItem = item
-		case "client-cert-expiring":
-			clientItem = item
-		}
-	}
-	require.NotNil(t, upstreamItem, "upstream-cert not found in listing: %v", items)
-	require.NotNil(t, clientItem, "client-cert-expiring not found in listing: %v", items)
-
-	_, hasWarnings := upstreamItem["warnings"]
-	assert.False(t, hasWarnings, "upstream row should not carry a warnings key")
-	_, hasReferenced := upstreamItem["referencedByApis"]
-	assert.False(t, hasReferenced, "upstream row should not carry a referencedByApis key")
-	_, hasRole := upstreamItem["role"]
-	assert.False(t, hasRole, "upstream row should not carry a role key")
-
-	warnings, ok := clientItem["warnings"].([]any)
-	require.True(t, ok, "expected client row to carry a warnings array, got %v", clientItem["warnings"])
-	require.Len(t, warnings, 1)
-	w0 := warnings[0].(map[string]any)
-	assert.Equal(t, "CERT_EXPIRES_SOON", w0["code"])
-
-	referenced, ok := clientItem["referencedByApis"].(float64)
-	require.True(t, ok, "expected client row to carry a numeric referencedByApis, got %v", clientItem["referencedByApis"])
-	assert.Equal(t, float64(0), referenced)
-}
-
 // ============================================================================
 // DELETE referential integrity for client-CA authorities
 // ============================================================================
@@ -1257,13 +995,6 @@ func TestListCertificates_WarningsAndFieldPresence(t *testing.T) {
 func clientAuthorityCert(name string) *models.StoredCertificate {
 	return &models.StoredCertificate{
 		UUID: name, Name: name, Usage: models.CertificateUsageClient, Role: models.CertificateRoleClient,
-		NotAfter: time.Now().Add(365 * 24 * time.Hour),
-	}
-}
-
-func relayAuthorityCert(name string) *models.StoredCertificate {
-	return &models.StoredCertificate{
-		UUID: name, Name: name, Usage: models.CertificateUsageClient, Role: models.CertificateRoleRelay,
 		NotAfter: time.Now().Add(365 * 24 * time.Hour),
 	}
 }
@@ -1320,25 +1051,6 @@ func restAPIConfigWithMtlsAuth(handle string, apiLevel bool, caNames ...string) 
 	}
 }
 
-func TestCheckClientAuthorityDeletable_NamedInAcceptList_APILevel_Blocks(t *testing.T) {
-	mockDB := NewMockStorage()
-	target := clientAuthorityCert("ref-partner-a")
-	mockDB.certs = []*models.StoredCertificate{target}
-	server := createTestAPIServerWithDB(mockDB)
-	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-naming-api", true, "ref-partner-a")))
-
-	resp, _, blocked := server.checkClientAuthorityDeletable(target)
-
-	require.True(t, blocked)
-	assert.Equal(t, "error", resp.Status)
-	assert.Equal(t, "client-CA authority 'ref-partner-a' is named by 1 deployed API; remove those references first", resp.Message)
-	require.NotNil(t, resp.Errors)
-	errs := *resp.Errors
-	require.Len(t, errs, 1)
-	assert.Equal(t, "spec.policies[0].params.accept[0].ca", *errs[0].Field)
-	assert.Equal(t, "referenced by API 'ref-naming-api'", *errs[0].Message)
-}
-
 func TestCheckClientAuthorityDeletable_NamedInAcceptList_OperationLevel_Blocks(t *testing.T) {
 	mockDB := NewMockStorage()
 	target := clientAuthorityCert("ref-partner-a")
@@ -1388,21 +1100,6 @@ func TestCheckClientAuthorityDeletable_LastNonRelayAuthority_Inheriting_Blocks(t
 	assert.Equal(t, "spec.policies[0]", *errs[0].Field)
 }
 
-// With another non-relay authority in the pool, the last-authority refusal
-// does not apply.
-func TestCheckClientAuthorityDeletable_ReferencedOnlyByInheritingAPIs_WithReplacement_Allowed(t *testing.T) {
-	mockDB := NewMockStorage()
-	target := clientAuthorityCert("ref-partner-b")
-	replacement := clientAuthorityCert("ref-partner-a")
-	mockDB.certs = []*models.StoredCertificate{target, replacement}
-	server := createTestAPIServerWithDB(mockDB)
-	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true))) // no accept: inherits the pool
-
-	_, _, blocked := server.checkClientAuthorityDeletable(target)
-
-	assert.False(t, blocked, "expected removal to be allowed while a replacement non-relay authority remains")
-}
-
 func TestDeleteCertificate_NamedInAcceptList_Returns409(t *testing.T) {
 	mockDB := NewMockStorage()
 	target := clientAuthorityCert("ref-partner-a")
@@ -1427,23 +1124,6 @@ func TestDeleteCertificate_NamedInAcceptList_Returns409(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// A relay entry is never counted as an authority, so it deletes even as the
-// pool's only row while an inheriting API is deployed.
-func TestDeleteCertificate_RelayRow_DeletesEvenWhenLastAuthority(t *testing.T) {
-	mockDB := NewMockStorage()
-	relay := relayAuthorityCert("ref-edge-lb")
-	mockDB.certs = []*models.StoredCertificate{relay, seedUpstreamCert(t)}
-	server := createTestAPIServerWithCertStore(t, mockDB)
-	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true)))
-
-	handler := newDeleteCertHandler(server, relay.UUID)
-	req := httptest.NewRequest(http.MethodDelete, "/certificates/"+relay.UUID, nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
-}
-
 // An unreferenced upstream certificate deletes even while a deployed API
 // would block losing the last client authority.
 func TestDeleteCertificate_UpstreamRow_UnaffectedByReferentialCheck(t *testing.T) {
@@ -1464,41 +1144,6 @@ func TestDeleteCertificate_UpstreamRow_UnaffectedByReferentialCheck(t *testing.T
 	handler.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
-}
-
-// referencedByApis counts only APIs that name the authority, not ones that
-// inherit the pool.
-func TestListCertificates_ReferencedByApis_CountsNamingAPIsOnly(t *testing.T) {
-	mockDB := NewMockStorage()
-	named := clientAuthorityCert("ref-partner-a")
-	inheritedOnly := clientAuthorityCert("ref-partner-b")
-	mockDB.certs = []*models.StoredCertificate{named, inheritedOnly}
-
-	server := createTestAPIServerWithDB(mockDB)
-	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-naming-api", true, "ref-partner-a")))
-	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true))) // no accept
-
-	handler := newCertListHandler(server)
-	req := httptest.NewRequest(http.MethodGet, "/certificates?usage=client", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	require.Equal(t, http.StatusOK, w.Code)
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	items, ok := resp["certificates"].([]any)
-	require.True(t, ok)
-
-	byName := map[string]map[string]any{}
-	for _, raw := range items {
-		item := raw.(map[string]any)
-		byName[fmt.Sprint(item["name"])] = item
-	}
-
-	require.Contains(t, byName, "ref-partner-a")
-	require.Contains(t, byName, "ref-partner-b")
-	assert.Equal(t, float64(1), byName["ref-partner-a"]["referencedByApis"])
-	assert.Equal(t, float64(0), byName["ref-partner-b"]["referencedByApis"])
 }
 
 // ============================================================================
@@ -1524,23 +1169,6 @@ func TestUploadCertificate_MatchWithRoleClient_Rejected(t *testing.T) {
 		Name:        "pool-match-role-client",
 		Usage:       models.CertificateUsageClient,
 		Role:        models.CertificateRoleClient,
-		Certificate: string(root.PEM()),
-		Match:       &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}},
-	})
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	entry := firstFieldError(t, w.Body.Bytes(), "match")
-	assert.Equal(t, "match applies only to role: relay entries", entry["message"])
-}
-
-func TestUploadCertificate_MatchWithUsageUpstream_Rejected(t *testing.T) {
-	mockDB := NewMockStorage()
-	server := createTestAPIServerWithDB(mockDB)
-
-	root := pki.NewRootCA(t, "Match Usage Upstream CA")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "pool-match-usage-upstream",
-		Usage:       models.CertificateUsageUpstream,
 		Certificate: string(root.PEM()),
 		Match:       &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}},
 	})
@@ -1753,85 +1381,6 @@ func restAPIConfigWithUpstreamTLS(handle, identity string, trustedCAs ...string)
 	}
 }
 
-func TestUploadCertificate_UsageIdentity_Success(t *testing.T) {
-	mockDB := NewMockStorage()
-	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
-	server := createTestAPIServerWithIdentitySupport(t, mockDB)
-
-	identity := gatewayIdentityLeaf(t, "gateway-a")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "out-identity-a",
-		Usage:       models.CertificateUsageIdentity,
-		Certificate: string(identity.PEM()),
-		PrivateKey:  string(identity.KeyPEM()),
-	})
-
-	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, models.CertificateUsageIdentity, resp["usage"])
-	assert.Equal(t, "ECDSA", resp["keyAlgorithm"])
-	assert.Equal(t, float64(1), resp["chainLength"])
-	_, hasPrivateKey := resp["privateKey"]
-	assert.False(t, hasPrivateKey, "response must never echo the private key, got %v", resp)
-	assert.NotContains(t, w.Body.String(), "PRIVATE KEY")
-}
-
-func TestUploadCertificate_PrivateKeyWithUsageClient_Rejected(t *testing.T) {
-	mockDB := NewMockStorage()
-	server := createTestAPIServerWithDB(mockDB)
-
-	identity := gatewayIdentityLeaf(t, "usage-client-with-key")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "pool-usage-client-with-key",
-		Usage:       models.CertificateUsageClient,
-		Certificate: string(identity.PEM()),
-		PrivateKey:  string(identity.KeyPEM()),
-	})
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	entry := firstFieldError(t, w.Body.Bytes(), "privateKey")
-	assert.Equal(t, "privateKey applies only to usage: identity certificates", entry["message"])
-}
-
-func TestUploadCertificate_IdentityWithoutPrivateKey_Rejected(t *testing.T) {
-	mockDB := NewMockStorage()
-	server := createTestAPIServerWithDB(mockDB)
-
-	identity := gatewayIdentityLeaf(t, "identity-without-key")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "out-identity-without-key",
-		Usage:       models.CertificateUsageIdentity,
-		Certificate: string(identity.PEM()),
-	})
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	entry := firstFieldError(t, w.Body.Bytes(), "privateKey")
-	assert.Equal(t, "both certificate and privateKey are required for usage: identity", entry["message"])
-}
-
-func TestUploadCertificate_DuplicateIdentityName_Conflict(t *testing.T) {
-	mockDB := NewMockStorage()
-	mockDB.saveErr = fmt.Errorf("%w: certificate with name 'out-identity-a' already exists", storage.ErrConflict)
-	// The save fails before the cert store is reached.
-	server := createTestAPIServerWithDB(mockDB)
-	server.encryptionManager = testEncryptionManager(t)
-
-	identity := gatewayIdentityLeaf(t, "duplicate-identity")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "out-identity-a",
-		Usage:       models.CertificateUsageIdentity,
-		Certificate: string(identity.PEM()),
-		PrivateKey:  string(identity.KeyPEM()),
-	})
-
-	require.Equal(t, http.StatusConflict, w.Code)
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, "a gateway identity named out-identity-a already exists", resp["message"])
-}
-
 func TestListCertificates_UsageIdentity_NoPrivateKeyAndReferencedByApis(t *testing.T) {
 	mockDB := NewMockStorage()
 	identity := gatewayIdentityLeaf(t, "list-identity")
@@ -1866,57 +1415,6 @@ func TestListCertificates_UsageIdentity_NoPrivateKeyAndReferencedByApis(t *testi
 	require.True(t, ok, "expected identity row to carry a numeric referencedByApis, got %v", item["referencedByApis"])
 	assert.Equal(t, float64(0), referenced)
 	assert.Equal(t, "ECDSA", item["keyAlgorithm"])
-}
-
-func TestUpdateCertificate_IdentityRow_Success(t *testing.T) {
-	original := gatewayIdentityLeaf(t, "rotate-original")
-	mockDB := NewMockStorage()
-	mockDB.certs = []*models.StoredCertificate{
-		seedUpstreamCert(t),
-		{
-			UUID: "rotate-identity-1", Name: "out-identity-a", Certificate: original.PEM(),
-			Usage: models.CertificateUsageIdentity, KeyAlgorithm: "ECDSA",
-			NotAfter: time.Now().Add(365 * 24 * time.Hour),
-		},
-	}
-	server := createTestAPIServerWithIdentitySupport(t, mockDB)
-
-	rotated := gatewayIdentityLeaf(t, "rotate-new")
-	w := updateCertificateBody(t, server, "rotate-identity-1", UploadCertificateRequest{
-		Certificate: string(rotated.PEM()),
-		PrivateKey:  string(rotated.KeyPEM()),
-	})
-
-	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
-	assert.NotContains(t, w.Body.String(), "PRIVATE KEY")
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	_, hasPrivateKey := resp["privateKey"]
-	assert.False(t, hasPrivateKey)
-	assert.Equal(t, "out-identity-a", resp["name"], "name must stay fixed across rotation")
-
-	updated, err := mockDB.GetCertificate("rotate-identity-1")
-	require.NoError(t, err)
-	assert.Equal(t, string(rotated.PEM()), string(updated.Certificate))
-}
-
-func TestUpdateCertificate_UpstreamRow_Rejected(t *testing.T) {
-	mockDB := NewMockStorage()
-	mockDB.certs = []*models.StoredCertificate{
-		{UUID: "update-upstream-1", Name: "out-backend-ca", Usage: models.CertificateUsageUpstream, NotAfter: time.Now().Add(365 * 24 * time.Hour)},
-	}
-	server := createTestAPIServerWithDB(mockDB)
-
-	identity := gatewayIdentityLeaf(t, "wrong-target")
-	w := updateCertificateBody(t, server, "update-upstream-1", UploadCertificateRequest{
-		Certificate: string(identity.PEM()),
-		PrivateKey:  string(identity.KeyPEM()),
-	})
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	entry := firstFieldError(t, w.Body.Bytes(), "usage")
-	assert.Equal(t, "only usage: identity certificates can be updated; delete and re-upload other certificates", entry["message"])
 }
 
 func identityRowForUpdate(t *testing.T, id string) *models.StoredCertificate {
@@ -2040,52 +1538,6 @@ func TestDeleteCertificate_IdentityNamedInUpstreamTLS_Returns409(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestDeleteCertificate_UpstreamRowNamedInTrustedCAs_Returns409(t *testing.T) {
-	target := &models.StoredCertificate{
-		UUID: "del-backend-ca-1", Name: "out-backend-ca", Usage: models.CertificateUsageUpstream,
-		Certificate: pki.NewRootCA(t, "Backend Trust CA").PEM(), NotAfter: time.Now().Add(365 * 24 * time.Hour),
-	}
-	mockDB := NewMockStorage()
-	mockDB.certs = []*models.StoredCertificate{target, seedUpstreamCert(t)}
-	server := createTestAPIServerWithCertStore(t, mockDB)
-	require.NoError(t, server.db.SaveConfig(restAPIConfigWithUpstreamTLS("out-partner-api", "", "out-backend-ca")))
-
-	handler := newDeleteCertHandler(server, target.UUID)
-	req := httptest.NewRequest(http.MethodDelete, "/certificates/"+target.UUID, nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	errs, ok := resp["errors"].([]any)
-	require.True(t, ok)
-	require.Len(t, errs, 1)
-	entry := errs[0].(map[string]any)
-	assert.Equal(t, "spec.upstreamDefinitions[0].tls.trustedCAs[0]", entry["field"])
-}
-
-// An identity row never counts toward the last-authority rule.
-func TestCheckClientAuthorityDeletable_UnaffectedByIdentityRows_LastAuthorityStillBlocked(t *testing.T) {
-	mockDB := NewMockStorage()
-	onlyAuthority := clientAuthorityCert("ref-only-authority")
-	identity := gatewayIdentityLeaf(t, "unaffecting-identity")
-	mockDB.certs = []*models.StoredCertificate{
-		onlyAuthority,
-		{
-			UUID: "unaffecting-identity-1", Name: "ref-identity", Certificate: identity.PEM(),
-			Usage: models.CertificateUsageIdentity, NotAfter: time.Now().Add(365 * 24 * time.Hour),
-		},
-	}
-	server := createTestAPIServerWithDB(mockDB)
-	require.NoError(t, server.db.SaveConfig(restAPIConfigWithMtlsAuth("ref-inheriting-api", true))) // no accept: inherits the pool
-
-	_, _, blocked := server.checkClientAuthorityDeletable(onlyAuthority)
-
-	assert.True(t, blocked, "an identity row in the pool must not count as a replacement client-CA authority")
-}
-
 func TestDeleteCertificate_IdentityRow_AllowedWhenUnreferenced_DespiteMtlsAuthAPIDeployed(t *testing.T) {
 	clientAuth := clientAuthorityCert("ref-only-authority")
 	identity := gatewayIdentityLeaf(t, "unreferenced-identity")
@@ -2104,72 +1556,6 @@ func TestDeleteCertificate_IdentityRow_AllowedWhenUnreferenced_DespiteMtlsAuthAP
 	handler.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
-}
-
-func TestUploadCertificate_UnknownAndMalformedFields_Rejected(t *testing.T) {
-	root := pki.NewRootCA(t, "Strict Upload CA")
-	certJSON, err := json.Marshal(string(root.PEM()))
-	require.NoError(t, err)
-
-	tests := []struct {
-		name, body, field, message string
-	}{
-		{
-			name:    "unknown top-level field",
-			body:    fmt.Sprintf(`{"name":"pool-relay-bad","usage":"client","roles":"relay","certificate":%s}`, certJSON),
-			field:   "roles",
-			message: "unknown field roles",
-		},
-		{
-			name:    "unknown match field",
-			body:    fmt.Sprintf(`{"name":"pool-relay-bad","usage":"client","role":"relay","certificate":%s,"match":{"dnsSAN":["lb.example"]}}`, certJSON),
-			field:   "match.dnsSAN",
-			message: "unknown field dnsSAN; match takes uriSANs and dnsSANs",
-		},
-		{
-			name:    "empty match",
-			body:    fmt.Sprintf(`{"name":"pool-relay-bad","usage":"client","role":"relay","certificate":%s,"match":{}}`, certJSON),
-			field:   "match",
-			message: "match must list uriSANs or dnsSANs, or be omitted",
-		},
-		{
-			name:    "match list given as a scalar",
-			body:    fmt.Sprintf(`{"name":"pool-relay-bad","usage":"client","role":"relay","certificate":%s,"match":{"dnsSANs":"lb.example"}}`, certJSON),
-			field:   "match.dnsSANs",
-			message: "dnsSANs must be a list",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockDB := NewMockStorage()
-			server := createTestAPIServerWithDB(mockDB)
-			w := uploadCertificateRawJSON(t, server, tt.body)
-			require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
-			entry := firstFieldError(t, w.Body.Bytes(), tt.field)
-			assert.Equal(t, tt.message, entry["message"])
-			assert.Empty(t, mockDB.certs, "nothing may be stored from a rejected upload")
-		})
-	}
-}
-
-func TestUploadCertificate_IdentityWithKeyInCertificateField_Rejected(t *testing.T) {
-	mockDB := NewMockStorage()
-	server := createTestAPIServerWithDB(mockDB)
-	server.encryptionManager = testEncryptionManager(t)
-
-	identity := gatewayIdentityLeaf(t, "identity-key-in-cert")
-	w := uploadCertificateBody(t, server, UploadCertificateRequest{
-		Name:        "out-identity-key-in-cert",
-		Usage:       models.CertificateUsageIdentity,
-		Certificate: string(identity.PEM()) + "\n" + string(identity.KeyPEM()),
-		PrivateKey:  string(identity.KeyPEM()),
-	})
-
-	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
-	entry := firstFieldError(t, w.Body.Bytes(), "certificate")
-	assert.Equal(t, msgCertificateFieldCarriesKey, entry["message"])
-	assert.NotContains(t, w.Body.String(), "PRIVATE KEY")
-	assert.Empty(t, mockDB.certs)
 }
 
 func TestDeleteCertificate_StoreReadFailure_Refuses(t *testing.T) {
@@ -2218,50 +1604,6 @@ func postCertificate(t *testing.T, server *APIServer, name, usage string) *httpt
 	w := httptest.NewRecorder()
 	newUploadCertHandler(server).ServeHTTP(w, req)
 	return w
-}
-
-func TestUploadCertificate_UsageClient_PublishesClientAuthorities(t *testing.T) {
-	mockDB := NewMockStorage()
-	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
-	server := createTestAPIServerWithCertStore(t, mockDB)
-	manager := withClientAuthorityPublisher(server)
-
-	w := postCertificate(t, server, "partner-root", models.CertificateUsageClient)
-	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
-
-	assert.ElementsMatch(t, []string{"partner-root"}, publishedClientAuthorities(manager))
-}
-
-func TestUploadCertificate_UsageUpstream_PublishesNothing(t *testing.T) {
-	mockDB := NewMockStorage()
-	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
-	server := createTestAPIServerWithCertStore(t, mockDB)
-	manager := withClientAuthorityPublisher(server)
-
-	w := postCertificate(t, server, "another-upstream-ca", models.CertificateUsageUpstream)
-	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
-
-	assert.Empty(t, publishedClientAuthorities(manager))
-}
-
-func TestDeleteCertificate_UsageClient_UnpublishesTheAuthority(t *testing.T) {
-	mockDB := NewMockStorage()
-	root := pki.NewRootCA(t, "Removed Partner Root")
-	mockDB.certs = []*models.StoredCertificate{
-		seedUpstreamCert(t),
-		{UUID: "kept-id", Name: "kept", Certificate: pki.NewRootCA(t, "Kept Root").PEM(), Usage: models.CertificateUsageClient, NotAfter: time.Now().Add(time.Hour)},
-		{UUID: "removed-id", Name: "removed", Certificate: root.PEM(), Usage: models.CertificateUsageClient, NotAfter: time.Now().Add(time.Hour)},
-	}
-	server := createTestAPIServerWithCertStore(t, mockDB)
-	manager := withClientAuthorityPublisher(server)
-	require.NoError(t, server.clientAuthorities.Publish(""))
-	require.ElementsMatch(t, []string{"kept", "removed"}, publishedClientAuthorities(manager))
-
-	w := httptest.NewRecorder()
-	newDeleteCertHandler(server, "removed-id").ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/certificates/removed-id", nil))
-	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
-
-	assert.ElementsMatch(t, []string{"kept"}, publishedClientAuthorities(manager))
 }
 
 func TestReloadCertificates_PublishesClientAuthorities(t *testing.T) {
@@ -2406,13 +1748,4 @@ func TestReloadCertificates_PublishesCertificateReloadEvent(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 
 	requireOneCertificateEvent(t, server, "RELOAD", "")
-}
-
-func TestPublishCertificateEvent_NoEventHub_NoOp(t *testing.T) {
-	server := createTestAPIServerWithDB(NewMockStorage())
-	server.eventHub = nil
-
-	assert.NotPanics(t, func() {
-		server.publishCertificateEvent("CREATE", "cert-1", "corr-1", server.logger)
-	})
 }

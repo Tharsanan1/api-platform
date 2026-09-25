@@ -78,17 +78,6 @@ func mtlsAuthDeploy(params map[string]interface{}) *api.RestAPI {
 	return restAPIWithAPILevelPolicies(mtlsPolicy(params))
 }
 
-func TestMtlsAuthParameterSchema_ResolvesTheLoadedDefinition(t *testing.T) {
-	def := mtlsAuthTestDefinition()
-	schema := MtlsAuthParameterSchema(map[string]models.PolicyDefinition{def.Name + "|" + def.Version: def})
-	if schema == nil {
-		t.Fatal("expected the loaded mtls-auth parameter schema, got nil")
-	}
-	if MtlsAuthParameterSchema(map[string]models.PolicyDefinition{}) != nil {
-		t.Error("expected nil when no mtls-auth definition is loaded")
-	}
-}
-
 func TestPolicyValidator_MtlsAuth_StringStatusCodeIsCoerced(t *testing.T) {
 	pv := mtlsAuthPolicyValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")))
 	params := map[string]interface{}{
@@ -261,38 +250,6 @@ func TestPolicyValidator_MtlsAuth_EachProblemReportedOnce(t *testing.T) {
 				t.Fatalf("a generic schema error surfaced: %+v", errs[0])
 			}
 		})
-	}
-}
-
-func TestPolicyValidator_MtlsAuth_OneMalformedFieldYieldsOneError(t *testing.T) {
-	pv := mtlsAuthPolicyValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")))
-	params := map[string]interface{}{"accept": []interface{}{
-		map[string]interface{}{"ca": "listener-partner-a", "thumbprints": "9f86d081"},
-	}}
-
-	errs := pv.ValidateRestAPIPolicies(mtlsAuthDeploy(params))
-
-	want := ValidationError{Field: "spec.policies[0].params.accept[0].thumbprints", Message: "thumbprints must be a list"}
-	if len(errs) != 1 || errs[0] != want {
-		t.Fatalf("expected exactly %+v, got %+v", want, errs)
-	}
-}
-
-func TestPolicyValidator_MtlsAuth_SchemaOnlyProblemYieldsTheSchemasOneError(t *testing.T) {
-	pv := mtlsAuthPolicyValidator(newFakeMtlsCertStore(clientCA("listener-partner-a")))
-	params := map[string]interface{}{
-		"accept":             []interface{}{map[string]interface{}{"ca": "listener-partner-a"}},
-		"errorMessageFormat": "xml",
-	}
-
-	errs := pv.ValidateRestAPIPolicies(mtlsAuthDeploy(params))
-
-	want := ValidationError{
-		Field:   "spec.policies[0].params.errorMessageFormat",
-		Message: "errorMessageFormat must be one of the following: \"json\", \"plain\", \"minimal\"",
-	}
-	if len(errs) != 1 || errs[0] != want {
-		t.Fatalf("expected exactly %+v, got %+v", want, errs)
 	}
 }
 

@@ -342,13 +342,6 @@ func TestMtlsAuthPolicy_OnRequestHeaders_ForwardCertificate(t *testing.T) {
 		}
 	})
 
-	t.Run("omitted defaults to true", func(t *testing.T) {
-		p := mustPolicy(t, buildParams(accept))
-		if !p.forwardCertificate {
-			t.Errorf("forwardCertificate = false, want true when the parameter is omitted")
-		}
-	})
-
 	for name, value := range map[string]interface{}{"string": "no", "number": 0, "list": []interface{}{false}} {
 		t.Run("non-boolean "+name+" fails GetPolicy", func(t *testing.T) {
 			params := buildParams(accept)

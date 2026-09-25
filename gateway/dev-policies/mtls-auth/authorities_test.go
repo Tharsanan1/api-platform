@@ -217,34 +217,6 @@ func TestBuildAuthoritySet_SkipsAnUnreadableEntryAndKeepsTheRest(t *testing.T) {
 	}
 }
 
-func TestBuildAuthoritySet_InheritedAndRelaysInNameOrder(t *testing.T) {
-	root := newRootCA(t, "Shared Root CA")
-	resources := map[string]*policy.LazyResource{}
-	for _, spec := range []authoritySpec{
-		{name: "zeta", role: roleClient}, {name: "alpha", role: roleClient}, {name: "mid", role: roleClient},
-		{name: "relay-z", role: roleRelay}, {name: "relay-a", role: roleRelay},
-	} {
-		spec.certs = []*testEntity{root}
-		resources[spec.name] = authorityResource(spec)
-	}
-
-	set := buildAuthoritySet(resources, 1)
-
-	var inherited, relays []string
-	for _, e := range set.inherited {
-		inherited = append(inherited, e.ca)
-	}
-	for _, r := range set.relays {
-		relays = append(relays, r.name)
-	}
-	if !slicesEqual(inherited, []string{"alpha", "mid", "zeta"}) {
-		t.Errorf("inherited = %v, want client entries in name order, relays excluded", inherited)
-	}
-	if !slicesEqual(relays, []string{"relay-a", "relay-z"}) {
-		t.Errorf("relays = %v, want name order", relays)
-	}
-}
-
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

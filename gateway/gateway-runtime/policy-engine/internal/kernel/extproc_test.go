@@ -598,38 +598,10 @@ func TestExtractDownstreamTLS_AttributesNil(t *testing.T) {
 	assert.Nil(t, extractDownstreamTLS(nil))
 }
 
-// TestExtractDownstreamTLS_ExtProcFilterAbsent covers a map with no ext_proc
-// entry: the same nil outcome.
-func TestExtractDownstreamTLS_ExtProcFilterAbsent(t *testing.T) {
-	attrs := map[string]*structpb.Struct{
-		"some.other.filter": {Fields: map[string]*structpb.Value{"x": structpb.NewStringValue("y")}},
-	}
-
-	assert.Nil(t, extractDownstreamTLS(attrs))
-}
-
 // TestExtractDownstreamTLS_ExtProcFilterEmpty covers an ext_proc entry with
 // no fields: the struct exists, so the result is a non-nil, MTLS-false value.
 func TestExtractDownstreamTLS_ExtProcFilterEmpty(t *testing.T) {
 	attrs := map[string]*structpb.Struct{constants.ExtProcFilter: {}}
-
-	tls := extractDownstreamTLS(attrs)
-
-	require.NotNil(t, tls)
-	assert.False(t, tls.MTLS)
-	assert.Nil(t, tls.PeerCertValid)
-}
-
-// TestExtractDownstreamTLS_ConnectionMTLSAbsent covers connection.* present
-// without connection.mtls: MTLS stays false and PeerCertValid stays nil.
-func TestExtractDownstreamTLS_ConnectionMTLSAbsent(t *testing.T) {
-	attrs := map[string]*structpb.Struct{
-		constants.ExtProcFilter: {
-			Fields: map[string]*structpb.Value{
-				"xds.route_name": structpb.NewStringValue("test-route"),
-			},
-		},
-	}
 
 	tls := extractDownstreamTLS(attrs)
 

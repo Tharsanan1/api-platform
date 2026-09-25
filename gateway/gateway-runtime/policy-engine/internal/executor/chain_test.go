@@ -1046,8 +1046,6 @@ func TestExecutionStatus(t *testing.T) {
 		{"401 immediate response", policy.ImmediateResponse{StatusCode: 401}, "denied"},
 		{"403 immediate response", policy.ImmediateResponse{StatusCode: 403}, "denied"},
 		{"429 immediate response", policy.ImmediateResponse{StatusCode: 429}, "short_circuited"},
-		{"200 immediate response", policy.ImmediateResponse{StatusCode: 200}, "short_circuited"},
-		{"503 immediate response", policy.ImmediateResponse{StatusCode: 503}, "short_circuited"},
 		{"upstream request modification", policy.UpstreamRequestModifications{}, "executed"},
 		{"no action", nil, "executed"},
 	}

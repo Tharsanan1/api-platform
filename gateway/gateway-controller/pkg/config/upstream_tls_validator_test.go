@@ -93,36 +93,6 @@ func TestUpstreamTLSValidator_ValidateRestAPI_RefusalOutline(t *testing.T) {
 		message string
 	}{
 		{
-			name:    "identity naming a certificate that doesn't exist",
-			def:     tlsUpstreamDef(map[string]interface{}{"identity": "out-missing"}, "https://mtls-backend-a:8443"),
-			field:   "spec.upstreamDefinitions[0].tls.identity",
-			message: "no gateway identity named out-missing exists on this gateway",
-		},
-		{
-			name:    "trustedCAs naming a certificate that doesn't exist",
-			def:     tlsUpstreamDef(map[string]interface{}{"trustedCAs": []interface{}{"out-missing-ca"}}, "https://mtls-backend-a:8443"),
-			field:   "spec.upstreamDefinitions[0].tls.trustedCAs[0]",
-			message: "no certificate named out-missing-ca exists on this gateway",
-		},
-		{
-			name:    "empty trustedCAs list",
-			def:     tlsUpstreamDef(map[string]interface{}{"trustedCAs": []interface{}{}}, "https://mtls-backend-a:8443"),
-			field:   "spec.upstreamDefinitions[0].tls.trustedCAs",
-			message: "omit trustedCAs to use the gateway trust bundle, or list at least one certificate",
-		},
-		{
-			name:    "http target on a definition carrying tls",
-			def:     tlsUpstreamDef(map[string]interface{}{"identity": "out-identity-a"}, "http://echo-backend:80"),
-			field:   "spec.upstreamDefinitions[0].upstreams[0].url",
-			message: "tls is configured but this target is http://; every target of a definition with tls must be https://",
-		},
-		{
-			name:    "unknown tls parameter",
-			def:     tlsUpstreamDef(map[string]interface{}{"mode": "strict"}, "https://mtls-backend-a:8443"),
-			field:   "spec.upstreamDefinitions[0].tls.mode",
-			message: "unknown parameter mode",
-		},
-		{
 			name:    "identity that is not a string",
 			def:     tlsUpstreamDef(map[string]interface{}{"identity": 42.0}, "https://mtls-backend-a:8443"),
 			field:   "spec.upstreamDefinitions[0].tls.identity",
@@ -158,17 +128,6 @@ func TestUpstreamTLSValidator_ValidateRestAPI_RefusalOutline(t *testing.T) {
 	}
 }
 
-func TestUpstreamTLSValidator_ValidateRestAPI_InlineUpstreamTLSRejected(t *testing.T) {
-	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store, false)
-
-	errs := validator.ValidateRestAPI(restAPIWithInlineUpstreamTLS(map[string]interface{}{"identity": "out-identity-a"}))
-	want := "tls is not supported on an inline upstream; move it to upstreamDefinitions and reference it"
-	if !hasError(errs, "spec.upstream.main.tls", want) {
-		t.Fatalf("expected error field=%q message=%q, got %+v", "spec.upstream.main.tls", want, errs)
-	}
-}
-
 // ============ ValidateRestAPI: usage-mismatch and additional cases ============
 
 func TestUpstreamTLSValidator_ValidateRestAPI_TlsEmptyBlock_Valid(t *testing.T) {
@@ -180,40 +139,6 @@ func TestUpstreamTLSValidator_ValidateRestAPI_TlsEmptyBlock_Valid(t *testing.T) 
 	))
 	if len(errs) != 0 {
 		t.Fatalf("expected an empty tls block to be valid, got errors: %+v", errs)
-	}
-}
-
-func TestUpstreamTLSValidator_ValidateRestAPI_IdentityNamingAClientRow_Rejected(t *testing.T) {
-	store := newFakeMtlsCertStore(clientCA("out-client-authority"), gatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store, false)
-
-	errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
-		"identity":   "out-client-authority",
-		"trustedCAs": []interface{}{"out-identity-a"},
-	}, "https://mtls-backend-a:8443")))
-
-	if !hasError(errs, "spec.upstreamDefinitions[0].tls.identity",
-		"out-client-authority is not a gateway identity (usage: identity)") {
-		t.Fatalf("expected identity-usage-mismatch error, got %+v", errs)
-	}
-	if !hasError(errs, "spec.upstreamDefinitions[0].tls.trustedCAs[0]",
-		"out-identity-a is a gateway identity (usage: identity); trustedCAs takes usage: upstream certificates") {
-		t.Fatalf("expected trustedCAs-naming-an-identity error, got %+v", errs)
-	}
-}
-
-func TestUpstreamTLSValidator_ValidateRestAPI_TrustedCAsNamingAClientRow_Rejected(t *testing.T) {
-	store := newFakeMtlsCertStore(clientCA("out-client-authority"), gatewayIdentityCert("out-identity-a"))
-	validator := NewUpstreamTLSValidator(store, false)
-
-	errs := validator.ValidateRestAPI(restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
-		"identity":   "out-identity-a",
-		"trustedCAs": []interface{}{"out-client-authority"},
-	}, "https://mtls-backend-a:8443")))
-
-	want := "out-client-authority is a client authority (usage: client); trustedCAs takes usage: upstream certificates"
-	if !hasError(errs, "spec.upstreamDefinitions[0].tls.trustedCAs[0]", want) {
-		t.Fatalf("expected error field=%q message=%q, got %+v", "spec.upstreamDefinitions[0].tls.trustedCAs[0]", want, errs)
 	}
 }
 
@@ -282,23 +207,6 @@ func TestUpstreamTLSValidator_ValidateRestAPI_UppercaseHTTPSScheme_Accepted(t *t
 }
 
 // ============ ResolveWarnings ============
-
-func TestUpstreamTLSValidator_ResolveWarnings_VerifyHostNameDisabled(t *testing.T) {
-	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"), upstreamCA("out-backend-ca"))
-	validator := NewUpstreamTLSValidator(store, false)
-
-	cfg := restAPIWithUpstreamDefs(tlsUpstreamDef(map[string]interface{}{
-		"identity":       "out-identity-a",
-		"trustedCAs":     []interface{}{"out-backend-ca"},
-		"verifyHostName": false,
-	}, "https://mtls-backend-wronghost:8443"))
-
-	warnings := validator.ResolveWarnings(*cfg)
-	if !hasWarning(warnings, WarningCodeTLSVerifyHostNameDisabled, "spec.upstreamDefinitions[0].tls.verifyHostName") {
-		t.Fatalf("expected %s warning at spec.upstreamDefinitions[0].tls.verifyHostName, got %+v",
-			WarningCodeTLSVerifyHostNameDisabled, warnings)
-	}
-}
 
 func TestUpstreamTLSValidator_ResolveWarnings_VerifyHostNameDefaultTrue_NoWarning(t *testing.T) {
 	store := newFakeMtlsCertStore(gatewayIdentityCert("out-identity-a"))

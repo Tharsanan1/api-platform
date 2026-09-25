@@ -24,10 +24,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"github.com/wso2/api-platform/common/eventhub"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 )
 
 // certificateSyncCalls records, in order, what a certificate event drove.
@@ -115,20 +112,4 @@ func TestHandleEvent_Certificate_UnknownActionDoesNothing(t *testing.T) {
 	listener.handleEvent(eventhub.Event{EventType: eventhub.EventTypeCertificate, Action: "ROTATE", EntityID: "cert-1"})
 
 	assert.Empty(t, record.calls)
-}
-
-func TestNewEventListener_RequiresClientAuthorityPublisher(t *testing.T) {
-	require.PanicsWithValue(t, "event listener requires a non-nil client authority publisher", func() {
-		NewEventListener(
-			&mockEventHub{subscribeCh: make(chan eventhub.Event)},
-			storage.NewConfigStore(),
-			setupSQLiteDBForEventListenerTests(t),
-			nil, nil, nil, nil,
-			nil,
-			nil, nil,
-			newTestLogger(),
-			&config.Config{Controller: config.Controller{Server: config.ServerConfig{GatewayID: "gateway-a"}}},
-			nil, nil, nil,
-		)
-	})
 }

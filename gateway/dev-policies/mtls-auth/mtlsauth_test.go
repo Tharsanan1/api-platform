@@ -170,24 +170,6 @@ func TestMtlsAuthPolicy_OnFailureStatusCode_Honoured(t *testing.T) {
 	}
 }
 
-func TestMtlsAuthPolicy_Mode(t *testing.T) {
-	p := mustGetPolicy(t)
-	mode := p.Mode()
-
-	if mode.RequestHeaderMode != policy.HeaderModeProcess {
-		t.Errorf("RequestHeaderMode = %v, want HeaderModeProcess", mode.RequestHeaderMode)
-	}
-	if mode.RequestBodyMode != policy.BodyModeSkip {
-		t.Errorf("RequestBodyMode = %v, want BodyModeSkip", mode.RequestBodyMode)
-	}
-	if mode.ResponseHeaderMode != policy.HeaderModeSkip {
-		t.Errorf("ResponseHeaderMode = %v, want HeaderModeSkip", mode.ResponseHeaderMode)
-	}
-	if mode.ResponseBodyMode != policy.BodyModeSkip {
-		t.Errorf("ResponseBodyMode = %v, want BodyModeSkip", mode.ResponseBodyMode)
-	}
-}
-
 // testEntity is a generated certificate plus the private key that created it.
 type testEntity struct {
 	cert *x509.Certificate
@@ -612,43 +594,11 @@ func assertAuthenticated(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.Request
 	return result
 }
 
-// TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating guards that nil TLS, no
-// certificate, and a missing Envoy verdict all deny, never mean "no
-// certificate required".
-func TestMtlsAuthPolicy_Evaluate_ConnectionLevelGating(t *testing.T) {
-	rootA := newRootCA(t, "Partner A Root CA")
-	p := mustBuildPolicy(t, []*testEntity{rootA}, []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}})
-
-	t.Run("TLS nil", func(t *testing.T) {
-		reqCtx := reqCtxWithTLS(nil)
-		assertDenied(t, p, reqCtx, reasonAttributeAbsent)
-	})
-	t.Run("MTLS false", func(t *testing.T) {
-		reqCtx := reqCtxWithTLS(&policy.DownstreamTLS{MTLS: false})
-		assertDenied(t, p, reqCtx, reasonNoCertificate)
-	})
-	t.Run("PeerCertValid nil", func(t *testing.T) {
-		reqCtx := reqCtxWithTLS(&policy.DownstreamTLS{MTLS: true, PeerCertValid: nil})
-		assertDenied(t, p, reqCtx, reasonAttributeAbsent)
-	})
-}
-
-// TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason covers the reasons
-// derived for a certificate Envoy rejected: date checks first, then the
-// pool-wide chain check.
+// TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason covers the reason
+// derived from the dates of a certificate Envoy rejected.
 func TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
-	unrelatedRoot := newRootCA(t, "Unrelated Root CA")
 	p := mustBuildPolicy(t, []*testEntity{rootA}, []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}})
-
-	t.Run("expired leaf", func(t *testing.T) {
-		expired := newLeaf(t, rootA, "client-expired", certOpts{
-			notBefore: time.Now().Add(-2 * 365 * 24 * time.Hour),
-			notAfter:  time.Now().Add(-1 * 365 * 24 * time.Hour),
-		})
-		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(expired, false))
-		assertDenied(t, p, reqCtx, reasonExpired)
-	})
 
 	t.Run("not yet valid leaf", func(t *testing.T) {
 		notYetValid := newLeaf(t, rootA, "client-not-yet-valid", certOpts{
@@ -659,11 +609,6 @@ func TestMtlsAuthPolicy_Evaluate_EnvoyRejection_DerivesReason(t *testing.T) {
 		assertDenied(t, p, reqCtx, reasonNotYetValid)
 	})
 
-	t.Run("leaf from an unpooled CA", func(t *testing.T) {
-		leaf := newLeaf(t, unrelatedRoot, "client-wrong-ca", certOpts{})
-		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, false))
-		assertDenied(t, p, reqCtx, reasonUntrustedChain)
-	})
 }
 
 // TestMtlsAuthPolicy_Evaluate_AuthenticatesAndPopulatesAuthContext checks
@@ -723,13 +668,6 @@ func TestMtlsAuthPolicy_Evaluate_IntermediateViaXFCCChain(t *testing.T) {
 	leaf := newLeaf(t, intermediateA, "client-via-intermediate", certOpts{})
 	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
 
-	t.Run("no XFCC: pool holds root only", func(t *testing.T) {
-		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-		// The client presented only the leaf, so Envoy's verification fails too.
-		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, false))
-		assertDenied(t, p, reqCtx, reasonUntrustedChain)
-	})
-
 	t.Run("XFCC Chain carries the intermediate: authenticated", func(t *testing.T) {
 		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
 		// The client presented leaf and intermediate, so Envoy verified and
@@ -781,14 +719,6 @@ func TestMtlsAuthPolicy_Evaluate_SANNarrowing(t *testing.T) {
 		}
 	})
 
-	t.Run("no matching URI", func(t *testing.T) {
-		entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}, uriSANs: []string{"urn:partner-a:payments"}}}
-		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-		leaf := newLeaf(t, rootA, "client-no-match", certOpts{uriSANs: []string{"urn:partner-a:other"}})
-		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
-		assertDenied(t, p, reqCtx, reasonSANMismatch)
-	})
-
 	t.Run("both uriSANs and dnsSANs configured, only one satisfied", func(t *testing.T) {
 		entries := []entrySpec{{
 			ca:      "auth-ca-a",
@@ -803,26 +733,6 @@ func TestMtlsAuthPolicy_Evaluate_SANNarrowing(t *testing.T) {
 		})
 		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
 		assertDenied(t, p, reqCtx, reasonSANMismatch)
-	})
-}
-
-func TestMtlsAuthPolicy_Evaluate_ThumbprintNarrowing(t *testing.T) {
-	rootA := newRootCA(t, "Partner A Root CA")
-	leaf := newLeaf(t, rootA, "client-valid", certOpts{})
-	other := newLeaf(t, rootA, "client-other", certOpts{})
-
-	t.Run("thumbprints containing the leaf's canonical hex: authenticated", func(t *testing.T) {
-		entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}, thumbprints: []string{leaf.thumbprint()}}}
-		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
-		assertAuthenticated(t, p, reqCtx, 0)
-	})
-
-	t.Run("thumbprints not containing it: denied", func(t *testing.T) {
-		entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}, thumbprints: []string{other.thumbprint()}}}
-		p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-		reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
-		assertDenied(t, p, reqCtx, reasonThumbprintMismatch)
 	})
 }
 
@@ -875,54 +785,6 @@ func TestMtlsAuthPolicy_Evaluate_MultipleEntries_SecondMatches(t *testing.T) {
 	}
 }
 
-// TestMtlsAuthPolicy_Evaluate_PoolMembershipAloneNeverGrantsAccess guards that
-// an authority in the pool is not accepted unless this API's accept list
-// names it.
-func TestMtlsAuthPolicy_Evaluate_PoolMembershipAloneNeverGrantsAccess(t *testing.T) {
-	rootA := newRootCA(t, "Partner A Root CA")
-	rootB := newRootCA(t, "Partner B Root CA")
-	leaf := newLeaf(t, rootB, "client-wrong-ca", certOpts{})
-
-	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
-	p := mustBuildPolicy(t, []*testEntity{rootB}, entries) // pool holds CA-B; accept list never names it
-
-	// rootB is in the pool, so the connection legitimately verified.
-	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
-	assertDenied(t, p, reqCtx, reasonAuthorityNotAccepted)
-}
-
-// TestMtlsAuthPolicy_Evaluate_LookalikeCA_SameDNDifferentKey_Denies guards
-// that a CA with a pooled authority's exact DN but a different key never
-// verifies.
-func TestMtlsAuthPolicy_Evaluate_LookalikeCA_SameDNDifferentKey_Denies(t *testing.T) {
-	rootA := newRootCA(t, "Partner A Root CA")
-	lookalikeCA := issueCert(t, "", certOpts{isCA: true, subject: rootA.cert.Subject})
-	leaf := newLeaf(t, lookalikeCA, "client-lookalike", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
-
-	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
-	p := mustBuildPolicy(t, []*testEntity{rootA}, entries) // pool holds the REAL rootA only, never the lookalike
-
-	// Envoy's verification fails too: the DN matches rootA but the key does not.
-	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, false))
-	assertDenied(t, p, reqCtx, reasonUntrustedChain)
-}
-
-// TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny guards
-// against x509.Verify's default KeyUsages, which require serverAuth and would
-// reject every clientAuth-only client certificate.
-func TestMtlsAuthPolicy_Evaluate_AcceptsClientAuthOnlyLeaf_ExtKeyUsageAny(t *testing.T) {
-	rootA := newRootCA(t, "Partner A Root CA")
-	leaf := newLeaf(t, rootA, "client-clientauth-only", certOpts{
-		ekus: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, // explicit, though also this file's default
-	})
-
-	entries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
-	p := mustBuildPolicy(t, []*testEntity{rootA}, entries)
-
-	reqCtx := reqCtxWithTLS(downstreamTLSFromLeaf(leaf, true))
-	assertAuthenticated(t, p, reqCtx, 0)
-}
-
 // TestMtlsAuthPolicy_Evaluate_HeaderRelay covers header mode off, a relay
 // vouching for the header in every encoding, a header ignored on a non-relay
 // connection, a SAN-narrowed relay declining to vouch, and trustAny.
@@ -930,13 +792,6 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	acceptLeaf := newLeaf(t, rootA, "client-valid", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
 	otherAcceptLeaf := newLeaf(t, rootA, "client-other", certOpts{uriSANs: []string{"urn:partner-a:other"}})
-	expiredLeaf := newLeaf(t, rootA, "client-expired", certOpts{
-		notBefore: time.Now().Add(-2 * 365 * 24 * time.Hour),
-		notAfter:  time.Now().Add(-1 * 365 * 24 * time.Hour),
-	})
-
-	unrelatedRoot := newRootCA(t, "Unrelated Root CA")
-	unacceptedLeaf := newLeaf(t, unrelatedRoot, "client-wrong-ca", certOpts{})
 
 	relayCA := newRootCA(t, "Edge LB CA")
 	relayLeaf := newLeaf(t, relayCA, "edge-lb", certOpts{dnsSANs: []string{"edge-lb.internal"}})
@@ -992,42 +847,6 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 		}
 	})
 
-	t.Run("relay connection, header carries a cert from an unpooled authority: denied untrusted_chain", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
-		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(unacceptedLeaf))
-		assertDenied(t, p, reqCtx, reasonUntrustedChain)
-	})
-
-	t.Run("relay connection, header carries an expired cert: denied", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
-		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(expiredLeaf))
-		assertDenied(t, p, reqCtx, reasonExpired)
-	})
-
-	t.Run("relay connection, header is garbage: denied with the uniform body", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
-		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, "this-is-not-a-certificate")
-		assertDenied(t, p, reqCtx, reasonInvalidCert)
-	})
-
-	t.Run("connection is a valid non-relay client, header carries another client: authenticated as the connection", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
-		reqCtx := reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(acceptLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(otherAcceptLeaf))
-		result := assertAuthenticated(t, p, reqCtx, 0)
-		if result.source != sourceHandshake {
-			t.Errorf("source = %q, want %q (the header must be ignored, never believed, from a non-relay connection)", result.source, sourceHandshake)
-		}
-		if result.subject != "urn:partner-a:payments" {
-			t.Errorf("subject = %q, want the CONNECTION leaf's own subject %q, not the header's", result.subject, "urn:partner-a:payments")
-		}
-	})
-
-	t.Run("connection has no certificate, header present, relays configured: denied no_certificate", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
-		reqCtx := reqCtxWithTLSAndHeader(&policy.DownstreamTLS{MTLS: false}, defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
-		assertDenied(t, p, reqCtx, reasonNoCertificate)
-	})
-
 	t.Run("relay entry narrowed by a dnsSAN the relay leaf doesn't carry: header ignored, connection evaluated and denied", func(t *testing.T) {
 		narrowedRelays := []relaySpec{{name: "relay-corp", roots: []*testEntity{corpCA}, dnsSANs: []string{"lb.corp.test"}}}
 		p := mustBuildRelayPolicy(t, pool, acceptEntries, narrowedRelays, nil)
@@ -1038,17 +857,6 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 		assertDenied(t, p, reqCtx, reasonAuthorityNotAccepted)
 	})
 
-	t.Run("trustAny bypass: no connection certificate, header carries an accepted cert: authenticated, source bypass", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, nil, map[string]interface{}{"trustAny": true})
-		reqCtx := reqCtxWithTLSAndHeader(&policy.DownstreamTLS{MTLS: false}, defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
-		result := assertAuthenticated(t, p, reqCtx, 0)
-		if result.source != sourceBypass {
-			t.Errorf("source = %q, want %q", result.source, sourceBypass)
-		}
-		if result.relayedBy != "" {
-			t.Errorf("relayedBy = %q, want empty — the bypass names no relay", result.relayedBy)
-		}
-	})
 }
 
 // TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend guards that the header

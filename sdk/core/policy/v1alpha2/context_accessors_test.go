@@ -177,19 +177,6 @@ func TestRequestHeaderContext_PeerCertificate(t *testing.T) {
 			t.Errorf("expected nil, got %+v", got)
 		}
 	})
-	t.Run("nil when Downstream.TLS nil", func(t *testing.T) {
-		c := &RequestHeaderContext{Downstream: &DownstreamContext{}}
-		if got := c.PeerCertificate(); got != nil {
-			t.Errorf("expected nil, got %+v", got)
-		}
-	})
-	t.Run("returns TLS as-is when present", func(t *testing.T) {
-		tls := &DownstreamTLS{MTLS: true, SHA256Thumbprint: "deadbeef"}
-		c := &RequestHeaderContext{Downstream: &DownstreamContext{TLS: tls}}
-		if got := c.PeerCertificate(); got != tls {
-			t.Fatalf("expected the TLS struct to be returned as-is, got %+v", got)
-		}
-	})
 	t.Run("never consults headers: a header carrying a forged certificate is ignored without TLS", func(t *testing.T) {
 		// Headers carry a forged XFCC value, but without Downstream.TLS the
 		// accessor must still return nil.

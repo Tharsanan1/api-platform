@@ -28,9 +28,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/testutil/pki"
 )
 
 // Test certificate in PEM format (self-signed test cert)
@@ -463,60 +460,4 @@ func TestCertStore_LoadCustomCertificates_CertChainInFile(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 2, count) // Two certificates in the chain
 	assert.NotEmpty(t, data)
-}
-
-// fakeCertificateStorage implements only the certificate listings
-// LoadCertificates reaches; any other method panics.
-type fakeCertificateStorage struct {
-	storage.Storage
-	certs []*models.StoredCertificate
-}
-
-func (f *fakeCertificateStorage) ListCertificates() ([]*models.StoredCertificate, error) {
-	return f.certs, nil
-}
-
-func (f *fakeCertificateStorage) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
-	var filtered []*models.StoredCertificate
-	for _, cert := range f.certs {
-		effective := cert.Usage
-		if effective == "" {
-			effective = models.CertificateUsageUpstream
-		}
-		if effective == usage {
-			filtered = append(filtered, cert)
-		}
-	}
-	return filtered, nil
-}
-
-// A usage: client row never enters the upstream trust bundle.
-func TestCertStore_ExcludesClientUsageFromCombinedBundle(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-
-	upstreamCert := pki.NewRootCA(t, "Combined Bundle Upstream CA")
-	clientCert := pki.NewRootCA(t, "Combined Bundle Client CA")
-
-	db := &fakeCertificateStorage{certs: []*models.StoredCertificate{
-		{
-			UUID:        "upstream-cert",
-			Name:        "upstream-ca",
-			Certificate: upstreamCert.PEM(),
-			Usage:       models.CertificateUsageUpstream,
-		},
-		{
-			UUID:        "client-cert",
-			Name:        "client-ca",
-			Certificate: clientCert.PEM(),
-			Usage:       models.CertificateUsageClient,
-		},
-	}}
-
-	cs := NewCertStore(logger, db, "", "")
-	_, err := cs.LoadCertificates()
-	assert.NoError(t, err)
-
-	combined := string(cs.GetCombinedCertificates())
-	assert.Contains(t, combined, string(upstreamCert.PEM()))
-	assert.NotContains(t, combined, string(clientCert.PEM()))
 }

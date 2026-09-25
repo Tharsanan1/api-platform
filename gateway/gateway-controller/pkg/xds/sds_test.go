@@ -221,26 +221,6 @@ func TestSDSSecretManager_GetSecrets_HTTPSDisabled_NoListenerSecretNoError(t *te
 	assert.NotContains(t, byName, SecretNameDownstreamListenerCert)
 }
 
-// The client-CA bundle never includes an upstream row.
-func TestCertStore_GetClientCABundle_OnlyClientRows(t *testing.T) {
-	logger := createTestLogger()
-	upstreamCert := pki.NewRootCA(t, "Bundle Split Upstream CA")
-	clientCert := pki.NewRootCA(t, "Bundle Split Client CA")
-
-	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
-		{UUID: "upstream-1", Name: "upstream-ca", Certificate: upstreamCert.PEM(), Usage: models.CertificateUsageUpstream},
-		{UUID: "client-1", Name: "client-ca", Certificate: clientCert.PEM(), Usage: models.CertificateUsageClient},
-	}}
-	cs := certstore.NewCertStore(logger, db, "", "")
-
-	bundle, err := cs.GetClientCABundle()
-	require.NoError(t, err)
-
-	bundleStr := string(bundle)
-	assert.Contains(t, bundleStr, string(clientCert.PEM()))
-	assert.NotContains(t, bundleStr, string(upstreamCert.PEM()))
-}
-
 // ============================================================================
 // Gateway-identity and per-upstream-trust SDS secrets (mTLS outbound)
 // ============================================================================

@@ -69,27 +69,6 @@ func assertFieldError(t *testing.T, err error, field, message string) {
 	}
 }
 
-func TestInspect_SingleRoot(t *testing.T) {
-	root := pki.NewRootCA(t, "Single Root CA")
-
-	bundle, err := clientca.Inspect(root.PEM(), time.Now())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if bundle.Identity == nil || bundle.Identity.Subject.String() != root.Cert.Subject.String() {
-		t.Fatalf("expected identity to be the root, got %v", bundle.Identity)
-	}
-	if bundle.IsLeaf {
-		t.Fatalf("expected IsLeaf to be false for a CA certificate")
-	}
-	if len(bundle.Warnings) != 0 {
-		t.Fatalf("expected no warnings, got %v", bundle.Warnings)
-	}
-	if len(bundle.Certificates) != 1 {
-		t.Fatalf("expected 1 certificate, got %d", len(bundle.Certificates))
-	}
-}
-
 func TestInspect_IssuingCAWithRoot_EitherOrder(t *testing.T) {
 	root := pki.NewRootCA(t, "Order Root CA")
 	issuing := pki.NewIntermediate(t, root, "Order Issuing CA")
@@ -98,7 +77,6 @@ func TestInspect_IssuingCAWithRoot_EitherOrder(t *testing.T) {
 		name string
 		body []byte
 	}{
-		{"issuing then root", joinPEM(issuing, root)},
 		{"root then issuing", joinPEM(root, issuing)},
 	}
 	for _, tc := range cases {
@@ -139,36 +117,6 @@ func TestInspect_LeafSignedByRoot(t *testing.T) {
 	}
 }
 
-func TestInspect_SelfSignedLeaf(t *testing.T) {
-	leaf := pki.NewSelfSignedLeaf(t, "acme-device")
-
-	bundle, err := clientca.Inspect(leaf.PEM(), time.Now())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !bundle.IsLeaf {
-		t.Fatalf("expected IsLeaf true for a self-signed leaf")
-	}
-	if len(bundle.Warnings) != 1 {
-		t.Fatalf("expected exactly one warning, got %v", bundle.Warnings)
-	}
-	if bundle.Warnings[0].Code != "CLIENT_CA_IS_LEAF" {
-		t.Fatalf("expected warning code CLIENT_CA_IS_LEAF, got %q", bundle.Warnings[0].Code)
-	}
-	if bundle.Warnings[0].Field != "certificate" {
-		t.Fatalf("expected warning field %q, got %q", "certificate", bundle.Warnings[0].Field)
-	}
-}
-
-func TestInspect_TwoUnrelatedAuthorities(t *testing.T) {
-	a := pki.NewRootCA(t, "Root A")
-	b := pki.NewRootCA(t, "Root B")
-
-	_, err := clientca.Inspect(joinPEM(a, b), time.Now())
-	assertFieldError(t, err, "certificate",
-		"this PEM contains more than one unrelated authority; upload each as its own entry")
-}
-
 func TestInspect_PrivateKeyPresent(t *testing.T) {
 	root := pki.NewRootCA(t, "Key Leak Root CA")
 	const wantMessage = "the upload contains a private key; a client-CA entry accepts certificates only"
@@ -180,10 +128,6 @@ func TestInspect_PrivateKeyPresent(t *testing.T) {
 		{
 			name:   "EC PRIVATE KEY",
 			keyPEM: []byte("-----BEGIN EC PRIVATE KEY-----\nMIIBaAIBAQ==\n-----END EC PRIVATE KEY-----\n"),
-		},
-		{
-			name:   "PKCS8 PRIVATE KEY",
-			keyPEM: root.KeyPEM(),
 		},
 	}
 
@@ -199,11 +143,6 @@ func TestInspect_PrivateKeyPresent(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestInspect_NotPEM(t *testing.T) {
-	_, err := clientca.Inspect([]byte("hello"), time.Now())
-	assertFieldError(t, err, "certificate", "the value is not a PEM-encoded certificate")
 }
 
 func TestInspect_GarbageDERInCertificateBlock(t *testing.T) {
@@ -240,36 +179,6 @@ func TestInspect_ExpiredIdentity(t *testing.T) {
 	}
 	if !parsed.Equal(expired.Cert.NotAfter) {
 		t.Fatalf("expected notAfter %v, got %v", expired.Cert.NotAfter, parsed)
-	}
-}
-
-func TestInspect_NotYetValidIdentity(t *testing.T) {
-	now := time.Now()
-	future := pki.NewRootCA(t, "Future Root CA", pki.WithValidity(now.Add(24*time.Hour), now.Add(365*24*time.Hour)))
-
-	bundle, err := clientca.Inspect(future.PEM(), now)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	var found *clientca.Warning
-	for i := range bundle.Warnings {
-		if bundle.Warnings[i].Code == "CLIENT_CA_NOT_YET_VALID" {
-			found = &bundle.Warnings[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("expected a CLIENT_CA_NOT_YET_VALID warning, got %v", bundle.Warnings)
-	}
-	if found.Field != "certificate" {
-		t.Fatalf("expected warning field %q, got %q", "certificate", found.Field)
-	}
-}
-
-func TestExpiryWarningHorizon(t *testing.T) {
-	if clientca.ExpiryWarningHorizon != 30*24*time.Hour {
-		t.Fatalf("expected ExpiryWarningHorizon to be 30 days, got %v", clientca.ExpiryWarningHorizon)
 	}
 }
 

@@ -310,7 +310,7 @@ Feature: Authenticating API callers with a client certificate
             path: /anything
       """
     Then the response should be successful
-    And I wait for 3 seconds
+    And I wait for policy snapshot sync
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-no-san"
     Then the response status code should be 401
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-valid"
@@ -379,7 +379,7 @@ Feature: Authenticating API callers with a client certificate
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
     Given the certificate fixture "ca-b" is pooled as "auth-ca-b" with usage "client"
-    And I wait for 3 seconds
+    And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-valid"
@@ -414,7 +414,7 @@ Feature: Authenticating API callers with a client certificate
     When I send a GET request to "https://localhost:8443/mtls-pool/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
     Given the certificate fixture "ca-b" is pooled as "auth-ca-b" with usage "client"
-    And I wait for 3 seconds
+    And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/mtls-pool/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 200
 

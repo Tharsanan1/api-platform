@@ -172,7 +172,7 @@ func (h *HealthSteps) iWaitForEndpointToBeReady(url string) error {
 		resp, err := h.state.HTTPClient.Get(url)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
-			return h.waitForPolicySnapshotSync()
+			return h.settleAfterEndpointResponds()
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -205,7 +205,7 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithHost(url, host string) error 
 		resp, err := h.state.HTTPClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
-			return h.waitForPolicySnapshotSync()
+			return h.settleAfterEndpointResponds()
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -230,7 +230,7 @@ func (h *HealthSteps) iWaitForEndpointToReturnStatus(url string, status int) err
 		resp, err := h.state.HTTPClient.Get(url)
 		if err == nil && resp.StatusCode == status {
 			resp.Body.Close()
-			return h.waitForPolicySnapshotSync()
+			return h.settleAfterEndpointResponds()
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -253,7 +253,7 @@ func (h *HealthSteps) iWaitForEndpointToReturn403(url string) error {
 		resp, err := h.state.HTTPClient.Get(url)
 		if err == nil && resp.StatusCode == http.StatusForbidden {
 			resp.Body.Close()
-			return h.waitForPolicySnapshotSync()
+			return h.settleAfterEndpointResponds()
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -283,7 +283,7 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithMethodAndBody(url, method, bo
 		resp, err := h.state.HTTPClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
-			return h.waitForPolicySnapshotSync()
+			return h.settleAfterEndpointResponds()
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -295,6 +295,24 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithMethodAndBody(url, method, bo
 	}
 
 	return fmt.Errorf("endpoint %s did not become ready with %s method after %d attempts", url, method, maxAttempts)
+}
+
+// settleAfterEndpointResponds runs once a polled endpoint has answered as
+// expected. It waits for the policy snapshot to sync and, when this scenario
+// changed the client authority pool, for the gateway to apply the pool. The
+// pending propagation the endpoint just observed is then released, so the
+// next gateway request does not wait for it again.
+func (h *HealthSteps) settleAfterEndpointResponds() error {
+	if err := h.waitForPolicySnapshotSync(); err != nil {
+		return err
+	}
+	if clientAuthorityPoolChanged(h.state) {
+		if err := waitForClientAuthorityPool(h.state); err != nil {
+			return err
+		}
+	}
+	releaseObservedPropagation(h.state)
+	return nil
 }
 
 func (h *HealthSteps) waitForPolicySnapshotSync() error {

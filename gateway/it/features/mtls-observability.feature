@@ -57,10 +57,11 @@ Feature: Seeing what client and backend certificates did
     Given I reset the analytics collector
     When I send a GET request to "https://localhost:8443/obs/v1.0/anything" with client certificate "client-valid"
     Then the response status code should be 200
-    And the "gateway-runtime" container log should contain "\"peerSubj\":\"CN=client-valid\"" within 10 seconds
-    And the "gateway-runtime" container log should contain the thumbprint of fixture "client-valid" within 10 seconds
-    And the "gateway-runtime" container log should contain "\"tlsVer\":\"TLSv1.3\"" within 10 seconds
-    And the "gateway-runtime" container log should contain "\"sni\":\"localhost\"" within 10 seconds
+    And the "gateway-runtime" access log should show within 10 seconds:
+      | "peerSubj":"CN=client-valid" |
+      | thumbprint of "client-valid" |
+      | "tlsVer":"TLSv1.3"           |
+      | "sni":"localhost"            |
     And I wait 5 seconds for analytics to be published
     And the analytics collector should have received at least 1 event
     And the latest analytics event should have response status 200
@@ -73,17 +74,19 @@ Feature: Seeing what client and backend certificates did
     Then the response status code should be 401
     When I send a GET request to "https://localhost:8443/obs/v1.0/anything" with client certificate "client-expired"
     Then the response status code should be 401
-    And the "gateway-runtime" container log should contain "\"peerSubj\":\"CN=client-wrong-ca\"" within 10 seconds
-    And the "gateway-runtime" container log should contain the thumbprint of fixture "client-expired" within 10 seconds
-    And I wait 5 seconds for analytics to be published
+    And the "gateway-runtime" access log should show within 10 seconds:
+      | "peerSubj":"CN=client-wrong-ca" |
+      | thumbprint of "client-expired"  |
+    And the analytics collector should receive at least 2 events within 5 seconds
     And the analytics collector should have received at least 2 events
     And the latest analytics event should have response status 401
 
   Scenario: A request without a certificate logs the certificate fields empty
     When I send a GET request to "http://localhost:8080/obs/v1.0/anything"
     Then the response status code should be 401
-    And the "gateway-runtime" container log should contain "\"peerSubj\":null" within 10 seconds
-    And the "gateway-runtime" container log should contain "\"tlsVer\":null" within 10 seconds
+    And the "gateway-runtime" access log should show within 10 seconds:
+      | "peerSubj":null |
+      | "tlsVer":null   |
 
   Scenario: A backend TLS failure is logged with its reason while the caller sees the sterile body
     Given the gateway identity fixture "gw-identity-a" is stored as "obs-identity-a"

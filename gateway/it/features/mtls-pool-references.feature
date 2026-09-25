@@ -116,8 +116,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
     When I send a GET request to "https://localhost:8443/ref-naming/v1.0/anything" with client certificate "client-valid"
     Then the response status code should be 200
     When I delete the API "ref-naming-api"
-    And I wait for 2 seconds
-    And I delete the certificate named "ref-partner-a"
+    And I delete the certificate named "ref-partner-a" once no API references it
     Then the response should be successful
 
   Scenario: An authority referenced only by inheriting APIs can be removed, and they stop accepting it on the next request
@@ -149,7 +148,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
     Then the response status code should be 200
     When I delete the certificate named "ref-partner-b"
     Then the response should be successful
-    And I wait for 3 seconds
+    And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/ref-inheriting/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
     When I send a GET request to "https://localhost:8443/ref-inheriting/v1.0/anything" with client certificate "client-valid"
@@ -287,7 +286,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
             path: /anything
       """
     Then the response should be successful
-    And I wait for 3 seconds
+    And I wait for policy snapshot sync
     When I send a GET request to "https://localhost:8443/ref-lever/v1.0/anything" with client certificate "client-multi-san"
     Then the response status code should be 401
     When I send a GET request to "https://localhost:8443/ref-lever/v1.0/anything" with client certificate "client-valid"
@@ -348,7 +347,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
             path: /anything
       """
     Then the response should be successful
-    And I wait for 3 seconds
+    And I wait for policy snapshot sync
     When I send a GET request to "https://localhost:8443/ref-lever/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
     When I send a GET request to "https://localhost:8443/ref-lever/v1.0/anything" with client certificate "client-valid"
@@ -411,7 +410,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
             path: /anything
       """
     Then the response should be successful
-    And I wait for 3 seconds
+    And I wait for policy snapshot sync
     When I send a GET request to "https://localhost:8443/ref-lever/v1.0/anything" with client certificate "client-valid"
     Then the response status code should be 401
     When I send a GET request to "https://localhost:8443/ref-lever/v1.0/anything" with client certificate "client-renewed"

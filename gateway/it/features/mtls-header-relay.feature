@@ -78,7 +78,7 @@ Feature: Client certificates relayed in a header by a front proxy
   Scenario Outline: With a relay entry, only a connection authenticated as the relay can make the header believed
     Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
     And the response status should be 201
-    And I wait for 3 seconds
+    And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" <presenting>
     Then the response status code should be <status>
 
@@ -99,7 +99,7 @@ Feature: Client certificates relayed in a header by a front proxy
   Scenario: A header that is not a certificate is rejected when the relay vouched for it
     Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
     And the response status should be 201
-    And I wait for 3 seconds
+    And the gateway has applied the client authority pool
     And I set header "X-WSO2-CLIENT-CERTIFICATE" to "this-is-not-a-certificate"
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb"
     Then the response status code should be 401
@@ -111,7 +111,7 @@ Feature: Client certificates relayed in a header by a front proxy
   Scenario: A relay entry narrowed by SAN vouches only for the proxy carrying that SAN
     Given I upload the certificate fixture "corp-ca" as "relay-corp" with usage "client" and role "relay" and dns SAN "lb.corp.test"
     And the response status should be 201
-    And I wait for 3 seconds
+    And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb-corp" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "corp-other-service" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
@@ -120,7 +120,7 @@ Feature: Client certificates relayed in a header by a front proxy
   Scenario: The relayed certificate reaches no backend and the relay's own header is never forwarded
     Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
     And the response status should be 201
-    And I wait for 3 seconds
+    And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
     And the response should not contain echoed header "x-wso2-client-certificate"
@@ -228,11 +228,11 @@ Feature: Client certificates relayed in a header by a front proxy
   Scenario: Removing the last relay entry turns header mode off again
     Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
     And the response status should be 201
-    And I wait for 3 seconds
+    And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
     When I delete the certificate named "relay-edge-lb"
     Then the response should be successful
-    And I wait for 3 seconds
+    And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 401

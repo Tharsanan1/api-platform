@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/cucumber/godog"
 )
@@ -57,7 +58,22 @@ func (m *mtlsSteps) uploadRaw(name, certPEM, usage, role string, match map[strin
 	}
 
 	m.httpSteps.SetHeader("Content-Type", "application/json")
-	return m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: string(bodyBytes)})
+	if err := m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: string(bodyBytes)}); err != nil {
+		return err
+	}
+	m.notePoolChangeIfAccepted(usage)
+	return nil
+}
+
+// notePoolChangeIfAccepted records a client authority pool change when the
+// last certificate mutation, on a certificate of the given usage, succeeded.
+func (m *mtlsSteps) notePoolChangeIfAccepted(usage string) {
+	if usage != "client" {
+		return
+	}
+	if resp := m.httpSteps.LastResponse(); resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		markClientAuthorityPoolChanged(m.state)
+	}
 }
 
 func (m *mtlsSteps) uploadFixtureNoUsage(fixture, name string) error {
@@ -145,7 +161,16 @@ func (m *mtlsSteps) uploadRawBody(body *godog.DocString) error {
 	m.recordUploadedNameFromJSON(resolved)
 
 	m.httpSteps.SetHeader("Content-Type", "application/json")
-	return m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: resolved})
+	if err := m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: resolved}); err != nil {
+		return err
+	}
+	var parsed struct {
+		Usage string `json:"usage"`
+	}
+	if json.Unmarshal([]byte(resolved), &parsed) == nil {
+		m.notePoolChangeIfAccepted(parsed.Usage)
+	}
+	return nil
 }
 
 func (m *mtlsSteps) recordUploadedNameFromJSON(body string) {
@@ -193,7 +218,7 @@ func (m *mtlsSteps) updateWithFixtureValues(apiName string, body *godog.DocStrin
 	if err != nil {
 		return err
 	}
-	return updateAPIConfiguration(m.httpSteps, apiName, resolved)
+	return updateAPIConfiguration(m.state, m.httpSteps, apiName, resolved)
 }
 
 // currentList parses the certificates array from the last HTTP response. It
@@ -439,6 +464,7 @@ func (m *mtlsSteps) clientAuthorityPoolIsEmpty() error {
 		if resp != nil && resp.StatusCode != http.StatusNotFound && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
 			return fmt.Errorf("failed to delete certificate %q (id %s) while emptying the client authority pool: status %d", item["name"], id, resp.StatusCode)
 		}
+		m.notePoolChangeIfAccepted("client")
 	}
 	return nil
 }
@@ -510,28 +536,77 @@ func (m *mtlsSteps) responseShouldIncludeNoWarnings() error {
 	return nil
 }
 
-func (m *mtlsSteps) findCertificateIDByName(name string) (string, error) {
+// findCertificateByName lists the certificates and returns the entry named
+// name.
+func (m *mtlsSteps) findCertificateByName(name string) (map[string]any, error) {
 	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates"); err != nil {
-		return "", err
+		return nil, err
 	}
 	var parsed struct {
 		Certificates []map[string]any `json:"certificates"`
 	}
 	if err := json.Unmarshal(m.httpSteps.LastBody(), &parsed); err != nil {
-		return "", fmt.Errorf("failed to parse certificate list while resolving %q: %w", name, err)
+		return nil, fmt.Errorf("failed to parse certificate list while resolving %q: %w", name, err)
 	}
 	for _, item := range parsed.Certificates {
 		if fmt.Sprint(item["name"]) == name {
-			return fmt.Sprint(item["id"]), nil
+			return item, nil
 		}
 	}
-	return "", fmt.Errorf("no certificate named %q found", name)
+	return nil, fmt.Errorf("no certificate named %q found", name)
+}
+
+func (m *mtlsSteps) findCertificateIDByName(name string) (string, error) {
+	item, err := m.findCertificateByName(name)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprint(item["id"]), nil
 }
 
 func (m *mtlsSteps) deleteCertificateNamed(name string) error {
-	id, err := m.findCertificateIDByName(name)
+	item, err := m.findCertificateByName(name)
 	if err != nil {
 		return fmt.Errorf("failed to delete certificate %q: %w", name, err)
 	}
-	return m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
+	return m.deleteListedCertificate(item)
+}
+
+// certificateReferenceTimeout and certificateReferencePollInterval bound
+// deleteCertificateNamedOnceUnreferenced.
+const (
+	certificateReferenceTimeout      = 5 * time.Second
+	certificateReferencePollInterval = 100 * time.Millisecond
+)
+
+// deleteCertificateNamedOnceUnreferenced polls the listing until the named
+// certificate's referencedByApis is 0, then deletes it.
+func (m *mtlsSteps) deleteCertificateNamedOnceUnreferenced(name string) error {
+	deadline := time.Now().Add(certificateReferenceTimeout)
+	for {
+		item, err := m.findCertificateByName(name)
+		if err != nil {
+			return fmt.Errorf("failed to delete certificate %q: %w", name, err)
+		}
+		refs, ok := item["referencedByApis"].(float64)
+		if !ok {
+			return fmt.Errorf("certificate %q is listed without a referencedByApis count", name)
+		}
+		if refs == 0 {
+			return m.deleteListedCertificate(item)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("certificate %q was still referenced by %v APIs after %s", name, refs, certificateReferenceTimeout)
+		}
+		time.Sleep(certificateReferencePollInterval)
+	}
+}
+
+// deleteListedCertificate deletes a certificate entry from a listing.
+func (m *mtlsSteps) deleteListedCertificate(item map[string]any) error {
+	if err := m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+fmt.Sprint(item["id"])); err != nil {
+		return err
+	}
+	m.notePoolChangeIfAccepted(fmt.Sprint(item["usage"]))
+	return nil
 }

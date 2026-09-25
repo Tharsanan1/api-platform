@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -38,6 +39,19 @@ type mtlsObservabilitySteps struct {
 	// scenarioStart bounds log polling so a line from an earlier scenario
 	// cannot satisfy this scenario's assertion.
 	scenarioStart time.Time
+
+	// containerIDs caches each service's container id for the scenario.
+	containerIDs map[string]string
+}
+
+// logThumbprintRow matches an access-log table row naming a fixture's
+// thumbprint rather than a literal substring.
+var logThumbprintRow = regexp.MustCompile(`^thumbprint of "([^"]+)"$`)
+
+// logExpectation is one thing a container log must show.
+type logExpectation struct {
+	describe string
+	shownIn  func(logs string) bool
 }
 
 // RegisterMTLSObservabilitySteps registers the mTLS observability steps.
@@ -46,6 +60,7 @@ func RegisterMTLSObservabilitySteps(ctx *godog.ScenarioContext, composeManager *
 
 	ctx.Before(func(c context.Context, sc *godog.Scenario) (context.Context, error) {
 		o.scenarioStart = time.Now()
+		o.containerIDs = map[string]string{}
 		return c, nil
 	})
 
@@ -55,6 +70,8 @@ func RegisterMTLSObservabilitySteps(ctx *godog.ScenarioContext, composeManager *
 	// `\"peerSubj\":\"CN=client-valid\"`), which [^"]* would stop at.
 	ctx.Step(`^the "([^"]*)" container log should contain "(.*)" within (\d+) seconds$`,
 		o.containerLogShouldContainWithin)
+	ctx.Step(`^the "([^"]*)" access log should show within (\d+) seconds:$`,
+		o.accessLogShouldShowWithin)
 
 	ctx.Step(`^the latest analytics event should have the user id of fixture "([^"]*)"$`,
 		o.latestAnalyticsEventShouldHaveUserIDOfFixture)
@@ -65,52 +82,115 @@ func RegisterMTLSObservabilitySteps(ctx *godog.ScenarioContext, composeManager *
 // containerLogShouldContainWithin polls the service's log since the scenario
 // started until it contains substr, matched exactly and case-sensitively.
 func (o *mtlsObservabilitySteps) containerLogShouldContainWithin(service, substr string, seconds int) error {
-	substr = unescapeGherkinQuotes(substr)
-	return o.pollLogs(service, seconds, func(logs string) bool {
-		return strings.Contains(logs, substr)
-	}, fmt.Sprintf("%q", substr))
+	return o.pollLogs(service, seconds, []logExpectation{logContains(unescapeGherkinQuotes(substr))})
 }
 
 // containerLogShouldContainThumbprintOfFixtureWithin polls the service's log
-// for the fixture's thumbprint, case-insensitively because Envoy's
-// fingerprint rendering case is not guaranteed.
+// for the fixture's thumbprint.
 func (o *mtlsObservabilitySteps) containerLogShouldContainThumbprintOfFixtureWithin(service, fixture string, seconds int) error {
-	thumbprint, err := o.mtls.thumbprintOf(fixture)
+	expectation, err := o.logContainsThumbprintOf(fixture)
 	if err != nil {
 		return err
 	}
-	lowerThumbprint := strings.ToLower(thumbprint)
-	return o.pollLogs(service, seconds, func(logs string) bool {
-		return strings.Contains(strings.ToLower(logs), lowerThumbprint)
-	}, fmt.Sprintf("the thumbprint of fixture %q (%s)", fixture, thumbprint))
+	return o.pollLogs(service, seconds, []logExpectation{expectation})
 }
 
-// pollLogs polls the service's log every 500ms until match returns true or
+// accessLogShouldShowWithin polls the service's log until it shows every
+// row of the one-column table: a literal substring, matched exactly and
+// case-sensitively, or `thumbprint of "fixture"`.
+func (o *mtlsObservabilitySteps) accessLogShouldShowWithin(service string, seconds int, table *godog.Table) error {
+	expectations := make([]logExpectation, 0, len(table.Rows))
+	for _, row := range table.Rows {
+		if len(row.Cells) != 1 {
+			return fmt.Errorf("each expected log row must have exactly one cell, got %d", len(row.Cells))
+		}
+		cell := strings.TrimSpace(row.Cells[0].Value)
+		if m := logThumbprintRow.FindStringSubmatch(cell); m != nil {
+			expectation, err := o.logContainsThumbprintOf(m[1])
+			if err != nil {
+				return err
+			}
+			expectations = append(expectations, expectation)
+			continue
+		}
+		expectations = append(expectations, logContains(cell))
+	}
+	return o.pollLogs(service, seconds, expectations)
+}
+
+func logContains(substr string) logExpectation {
+	return logExpectation{
+		describe: fmt.Sprintf("%q", substr),
+		shownIn:  func(logs string) bool { return strings.Contains(logs, substr) },
+	}
+}
+
+// logContainsThumbprintOf matches the fixture's thumbprint
+// case-insensitively, because Envoy's fingerprint rendering case is not
+// guaranteed.
+func (o *mtlsObservabilitySteps) logContainsThumbprintOf(fixture string) (logExpectation, error) {
+	thumbprint, err := o.mtls.thumbprintOf(fixture)
+	if err != nil {
+		return logExpectation{}, err
+	}
+	lowerThumbprint := strings.ToLower(thumbprint)
+	return logExpectation{
+		describe: fmt.Sprintf("the thumbprint of fixture %q (%s)", fixture, thumbprint),
+		shownIn:  func(logs string) bool { return strings.Contains(strings.ToLower(logs), lowerThumbprint) },
+	}, nil
+}
+
+// pollLogs fetches the service's log since the scenario started every 500ms,
+// once per poll for all expectations, until every expectation is shown or
 // the timeout elapses.
-func (o *mtlsObservabilitySteps) pollLogs(service string, seconds int, match func(logs string) bool, describeWant string) error {
-	if o.composeManager == nil {
-		return fmt.Errorf("compose manager is not initialized")
+func (o *mtlsObservabilitySteps) pollLogs(service string, seconds int, expectations []logExpectation) error {
+	containerID, err := o.containerID(service)
+	if err != nil {
+		return err
 	}
 
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 	var lastErr error
 	for {
-		logs, err := o.composeManager.ServiceLogs(service, o.scenarioStart)
+		var missing []string
+		logs, err := ContainerLogs(containerID, o.scenarioStart)
 		if err != nil {
 			lastErr = err
-		} else if match(logs) {
-			return nil
+		} else {
+			for _, e := range expectations {
+				if !e.shownIn(logs) {
+					missing = append(missing, e.describe)
+				}
+			}
+			if len(missing) == 0 {
+				return nil
+			}
 		}
 
 		if time.Now().After(deadline) {
-			if lastErr != nil {
-				return fmt.Errorf("%q container log did not contain %s within %ds (last log-collection error: %v)",
-					service, describeWant, seconds, lastErr)
+			if lastErr != nil && missing == nil {
+				return fmt.Errorf("%q container log could not be read within %ds: %v", service, seconds, lastErr)
 			}
-			return fmt.Errorf("%q container log did not contain %s within %ds", service, describeWant, seconds)
+			return fmt.Errorf("%q container log did not show %s within %ds", service, strings.Join(missing, ", "), seconds)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// containerID resolves the service's container once per scenario.
+func (o *mtlsObservabilitySteps) containerID(service string) (string, error) {
+	if id, ok := o.containerIDs[service]; ok {
+		return id, nil
+	}
+	if o.composeManager == nil {
+		return "", fmt.Errorf("compose manager is not initialized")
+	}
+	id, err := o.composeManager.ServiceContainerID(service)
+	if err != nil {
+		return "", err
+	}
+	o.containerIDs[service] = id
+	return id, nil
 }
 
 // mtlsAuthSubjectIdentity mirrors the mtls-auth policy's subject: the first

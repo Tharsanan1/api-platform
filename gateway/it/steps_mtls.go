@@ -89,8 +89,7 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	})
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
 		// A pooled certificate cannot be removed while a deployed API still
-		// references it, so APIs are deleted first; a repeat deletion by the
-		// API steps' own hook is a harmless 404.
+		// references it, so APIs and Agents are deleted first.
 		if !scenarioHasTag(sc, "@mtls") {
 			return c, nil
 		}
@@ -143,10 +142,12 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 
 	// Deletion
 	ctx.Step(`^I delete the certificate named "([^"]*)"$`, m.deleteCertificateNamed)
+	ctx.Step(`^I delete the certificate named "([^"]*)" once no API references it$`, m.deleteCertificateNamedOnceUnreferenced)
 
 	// HTTPS listener probing
 	ctx.Step(`^the HTTPS listener should request a client certificate$`, m.httpsListenerShouldRequestClientCertificate)
 	ctx.Step(`^the HTTPS listener should not request a client certificate$`, m.httpsListenerShouldNotRequestClientCertificate)
+	ctx.Step(`^the HTTPS listener should stop requesting a client certificate$`, m.httpsListenerShouldStopRequestingClientCertificate)
 	ctx.Step(`^the HTTPS listener should present the certificate in "([^"]*)"$`, m.httpsListenerShouldPresentCertificateFile)
 
 	// Requests carrying or omitting a client certificate
@@ -165,6 +166,9 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 
 	// Client authority pool state
 	ctx.Step(`^the client authority pool is empty$`, m.clientAuthorityPoolIsEmpty)
+	ctx.Step(`^the gateway has applied the client authority pool$`, func() error {
+		return waitForClientAuthorityPool(m.state)
+	})
 
 	// Deploy-response warnings
 	ctx.Step(`^the response should include a warning with code "([^"]*)" for field "([^"]*)"$`, m.responseShouldIncludeWarningWithCodeForField)

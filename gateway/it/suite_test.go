@@ -21,6 +21,7 @@ package it
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -267,6 +268,9 @@ func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 			"mock-aws-bedrock-guardrail": testState.Config.MockAWSBedrockGuardrailURL,
 			"mock-embedding-provider":    testState.Config.MockEmbeddingProviderURL,
 			"mock-platform-api":          testState.Config.MockPlatformAPIURL,
+		})
+		httpSteps.SetBeforeSend(func(req *http.Request) {
+			settlePendingPropagationBeforeGatewayRequest(testState, req)
 		})
 		assertSteps = steps.NewAssertSteps(httpSteps)
 

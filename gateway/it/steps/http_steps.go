@@ -77,6 +77,9 @@ type HTTPSteps struct {
 	lastBody     []byte
 	headers      map[string]string
 	requestHost  string
+
+	// beforeSend, when set, runs just before every request is sent.
+	beforeSend func(*http.Request)
 }
 
 // NewHTTPSteps creates a new HTTPSteps instance
@@ -129,6 +132,19 @@ func (h *HTTPSteps) Reset() {
 	h.lastBody = nil
 	h.headers = make(map[string]string)
 	h.requestHost = ""
+}
+
+// SetBeforeSend installs fn to run just before every request this instance
+// sends, whichever step builds it.
+func (h *HTTPSteps) SetBeforeSend(fn func(*http.Request)) {
+	h.beforeSend = fn
+}
+
+// runBeforeSend calls the installed beforeSend hook, if any.
+func (h *HTTPSteps) runBeforeSend(req *http.Request) {
+	if h.beforeSend != nil {
+		h.beforeSend(req)
+	}
 }
 
 // SetHeader sets a header for subsequent requests
@@ -465,6 +481,7 @@ func (h *HTTPSteps) sendRequestWithTempHeader(method, url string, body []byte, h
 	fmt.Printf("REQUEST:\n%s\n", string(redactRequestDump(reqDump)))
 	log.Printf("DEBUG: Sending %s request to %s", method, url)
 
+	h.runBeforeSend(req)
 	resp, err := h.client.Do(req)
 	if err != nil {
 		log.Printf("ERROR: Failed to send request to %s: %v", url, err)
@@ -539,6 +556,7 @@ func (h *HTTPSteps) doRequest(client *http.Client, req *http.Request) error {
 	fmt.Printf("REQUEST:\n%s\n", string(redactRequestDump(reqDump)))
 	log.Printf("DEBUG: Sending %s request to %s", req.Method, req.URL.String())
 
+	h.runBeforeSend(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("ERROR: Failed to send request to %s: %v", req.URL.String(), err)
@@ -615,6 +633,7 @@ func (h *HTTPSteps) SendMcpRequest(url string, body *godog.DocString) error {
 
 	h.lastRequest = httpReq
 
+	h.runBeforeSend(httpReq)
 	resp, err := h.client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to reach MCP server for initialize: %w", err)

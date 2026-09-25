@@ -26,35 +26,81 @@ import (
 	"time"
 )
 
-// cleanupDeleteRetryBudget and cleanupDeleteRetryInterval bound the 409
-// retries in deleteRetryingConflict. The controller's reference check can
-// still see a just-deleted API briefly, because its config store converges
-// asynchronously.
+// cleanupReferenceTimeout and cleanupReferencePollInterval bound each of
+// cleanupTrackedCertificates' waits for references to clear.
 const (
-	cleanupDeleteRetryBudget   = 5 * time.Second
-	cleanupDeleteRetryInterval = 25 * time.Millisecond
+	cleanupReferenceTimeout      = 5 * time.Second
+	cleanupReferencePollInterval = 25 * time.Millisecond
 )
 
-// deleteRetryingConflict deletes a certificate or gateway identity, retrying
-// on 409 until cleanupDeleteRetryBudget runs out. The outcome is not checked.
-func (m *mtlsSteps) deleteRetryingConflict(id string) {
-	deadline := time.Now().Add(cleanupDeleteRetryBudget)
+// waitForDeletedConfigsToLeaveController polls the controller's config dump
+// until none of the named configurations is still deployed there, or
+// cleanupReferenceTimeout passes. The controller checks certificate
+// references against that store, which converges asynchronously after a
+// delete, so a certificate deleted sooner can still be refused as referenced.
+func (m *mtlsSteps) waitForDeletedConfigsToLeaveController(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	deleted := make(map[string]bool, len(names))
+	for _, name := range names {
+		deleted[name] = true
+	}
+	deadline := time.Now().Add(cleanupReferenceTimeout)
 	for {
-		_ = m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
-		resp := m.httpSteps.LastResponse()
-		if resp == nil || resp.StatusCode != http.StatusConflict {
-			return
+		var dump struct {
+			Apis []struct {
+				Configuration struct {
+					Metadata struct {
+						Name string `json:"name"`
+					} `json:"metadata"`
+				} `json:"configuration"`
+				Metadata struct {
+					Status string `json:"status"`
+				} `json:"metadata"`
+			} `json:"apis"`
+		}
+		err := getJSONAsAdmin(m.state, m.state.Config.GatewayControllerAdminURL+"/config_dump", &dump)
+		if err == nil {
+			stillDeployed := false
+			for _, item := range dump.Apis {
+				if deleted[item.Configuration.Metadata.Name] && item.Metadata.Status != "undeployed" {
+					stillDeployed = true
+					break
+				}
+			}
+			if !stillDeployed {
+				return
+			}
 		}
 		if time.Now().After(deadline) {
 			return
 		}
-		time.Sleep(cleanupDeleteRetryInterval)
+		time.Sleep(cleanupReferencePollInterval)
 	}
 }
 
+// scenarioConfigNames returns the API and Agent names this scenario deployed.
+func scenarioConfigNames(state *TestState) []string {
+	var names []string
+	for _, key := range []string{deployedAPINamesContextKey, deployedAgentNamesContextKey} {
+		if raw, ok := state.GetContextValue(key); ok {
+			if recorded, ok := raw.([]string); ok {
+				names = append(names, recorded...)
+			}
+		}
+	}
+	return names
+}
+
 // cleanupTrackedCertificates deletes, as admin, every gateway identity and
-// certificate this scenario attempted to upload. Names that were never
-// stored are skipped, and the previous auth header is not restored.
+// certificate this scenario attempted to upload. It first waits, within
+// cleanupReferenceTimeout, for the listing to show none of them referenced
+// by an API. A delete the controller still refuses as referenced, which a
+// reference the listing does not count can cause, is retried once after the
+// scenario's configurations have left the controller's store. Names that
+// were never stored are skipped, and the previous auth header is not
+// restored.
 func (m *mtlsSteps) cleanupTrackedCertificates() {
 	if len(m.uploadedIdentityNames) == 0 && len(m.uploadedNames) == 0 {
 		return
@@ -67,28 +113,55 @@ func (m *mtlsSteps) cleanupTrackedCertificates() {
 	creds := base64.StdEncoding.EncodeToString([]byte(admin.Username + ":" + admin.Password))
 	m.httpSteps.SetHeader("Authorization", "Basic "+creds)
 
-	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates"); err != nil {
-		return
-	}
-	var parsed struct {
-		Certificates []map[string]any `json:"certificates"`
-	}
-	if err := json.Unmarshal(m.httpSteps.LastBody(), &parsed); err != nil {
-		return
+	tracked := make(map[string]bool, len(m.uploadedIdentityNames)+len(m.uploadedNames))
+	for _, name := range append(append([]string{}, m.uploadedIdentityNames...), m.uploadedNames...) {
+		tracked[name] = true
 	}
 
-	idByName := make(map[string]string, len(parsed.Certificates))
-	for _, item := range parsed.Certificates {
-		idByName[fmt.Sprint(item["name"])] = fmt.Sprint(item["id"])
+	var idByName map[string]string
+	deadline := time.Now().Add(cleanupReferenceTimeout)
+	for {
+		if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates"); err != nil {
+			return
+		}
+		var parsed struct {
+			Certificates []map[string]any `json:"certificates"`
+		}
+		if err := json.Unmarshal(m.httpSteps.LastBody(), &parsed); err != nil {
+			return
+		}
+
+		idByName = make(map[string]string, len(parsed.Certificates))
+		referenced := false
+		for _, item := range parsed.Certificates {
+			name := fmt.Sprint(item["name"])
+			idByName[name] = fmt.Sprint(item["id"])
+			if refs, ok := item["referencedByApis"].(float64); ok && refs > 0 && tracked[name] {
+				referenced = true
+			}
+		}
+		if !referenced || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(cleanupReferencePollInterval)
 	}
 
+	storeConverged := false
 	deleteTracked := func(names []string) {
 		for _, name := range names {
 			id, ok := idByName[name]
 			if !ok {
 				continue
 			}
-			m.deleteRetryingConflict(id)
+			_ = m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
+			if resp := m.httpSteps.LastResponse(); resp == nil || resp.StatusCode != http.StatusConflict {
+				continue
+			}
+			if !storeConverged {
+				m.waitForDeletedConfigsToLeaveController(scenarioConfigNames(m.state))
+				storeConverged = true
+			}
+			_ = m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
 		}
 	}
 	deleteTracked(m.uploadedIdentityNames)

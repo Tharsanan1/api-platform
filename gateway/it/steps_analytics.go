@@ -71,6 +71,7 @@ func RegisterAnalyticsSteps(ctx *godog.ScenarioContext, state *TestState, httpSt
 	ctx.Step(`^I wait (\d+) seconds for analytics to be published$`, a.iWaitSecondsForAnalytics)
 	ctx.Step(`^the analytics collector should have received (\d+) events?$`, a.theAnalyticsCollectorShouldHaveReceivedEvents)
 	ctx.Step(`^the analytics collector should have received at least (\d+) events?$`, a.theAnalyticsCollectorShouldHaveReceivedAtLeastEvents)
+	ctx.Step(`^the analytics collector should receive at least (\d+) events? within (\d+) seconds$`, a.theAnalyticsCollectorShouldReceiveAtLeastEventsWithin)
 	ctx.Step(`^the latest analytics event should have request URI "([^"]*)"$`, a.theLatestAnalyticsEventShouldHaveRequestURI)
 	ctx.Step(`^the latest analytics event should have request method "([^"]*)"$`, a.theLatestAnalyticsEventShouldHaveRequestMethod)
 	ctx.Step(`^the latest analytics event should have response status (\d+)$`, a.theLatestAnalyticsEventShouldHaveResponseStatus)
@@ -148,6 +149,26 @@ func (a *AnalyticsSteps) theAnalyticsCollectorShouldHaveReceivedEvents(expectedC
 	}
 
 	return nil
+}
+
+// analyticsPollInterval is how often
+// theAnalyticsCollectorShouldReceiveAtLeastEventsWithin re-reads the count.
+const analyticsPollInterval = 200 * time.Millisecond
+
+// theAnalyticsCollectorShouldReceiveAtLeastEventsWithin polls the collector's
+// event count until it reaches minCount or the timeout elapses.
+func (a *AnalyticsSteps) theAnalyticsCollectorShouldReceiveAtLeastEventsWithin(minCount, seconds int) error {
+	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+	for {
+		err := a.theAnalyticsCollectorShouldHaveReceivedAtLeastEvents(minCount)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("within %ds: %w", seconds, err)
+		}
+		time.Sleep(analyticsPollInterval)
+	}
 }
 
 // theAnalyticsCollectorShouldHaveReceivedAtLeastEvents verifies minimum event count

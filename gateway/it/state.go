@@ -181,6 +181,13 @@ func (s *TestState) SetContextValue(key string, value interface{}) {
 	s.Context[key] = value
 }
 
+// DeleteContextValue removes a value from the context
+func (s *TestState) DeleteContextValue(key string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	delete(s.Context, key)
+}
+
 // GetContextValue retrieves a value from the context
 func (s *TestState) GetContextValue(key string) (interface{}, bool) {
 	s.mutex.RLock()

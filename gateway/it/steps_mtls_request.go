@@ -33,8 +33,8 @@ import (
 const httpsListenerAddr = "localhost:8443"
 
 // mtlsListenerProbeRetries and mtlsListenerProbeInterval absorb xDS
-// propagation lag when asserting the listener requests a certificate. The
-// negative assertion probes once.
+// propagation lag in the polling listener probes. The single-shot
+// assertions probe once, after any pending propagation has settled.
 const (
 	mtlsListenerProbeRetries  = 10
 	mtlsListenerProbeInterval = 500 * time.Millisecond
@@ -81,7 +81,29 @@ func (m *mtlsSteps) httpsListenerShouldRequestClientCertificate() error {
 	return lastErr
 }
 
+// httpsListenerShouldStopRequestingClientCertificate polls until the HTTPS
+// listener no longer requests a client certificate.
+func (m *mtlsSteps) httpsListenerShouldStopRequestingClientCertificate() error {
+	var lastErr error
+	for attempt := 0; attempt < mtlsListenerProbeRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(mtlsListenerProbeInterval)
+		}
+		invoked, err := m.probeClientCertRequested()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if !invoked {
+			return nil
+		}
+		lastErr = fmt.Errorf("HTTPS listener at %s still requests a client certificate", httpsListenerAddr)
+	}
+	return lastErr
+}
+
 func (m *mtlsSteps) httpsListenerShouldNotRequestClientCertificate() error {
+	settlePendingPropagation(m.state)
 	invoked, err := m.probeClientCertRequested()
 	if err != nil {
 		return err
@@ -248,6 +270,7 @@ func (m *mtlsSteps) httpsListenerShouldPresentCertificateFile(path string) error
 	}
 	expected := sha256.Sum256(block.Bytes)
 
+	settlePendingPropagation(m.state)
 	conn, err := tls.Dial("tcp", httpsListenerAddr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		return fmt.Errorf("failed to complete a TLS handshake against %s: %w", httpsListenerAddr, err)

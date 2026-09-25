@@ -19,7 +19,6 @@
 package it
 
 import (
-	"context"
 	"encoding/base64"
 	"time"
 
@@ -28,9 +27,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// policyPropagationDelay is the time to wait after mutating operations
-// to allow the Policy Engine to receive and apply configuration changes.
-// Reduced from 2s to 500ms as xDS sync typically completes in <500ms.
+// policyPropagationDelay is how long a gateway request waits after an
+// accepted mutation for the router and the Policy Engine to apply it, unless
+// a step has already polled the change into place.
 const policyPropagationDelay = 1 * time.Second
 
 // deployedAPINamesContextKey holds the API names this scenario deployed. It
@@ -74,36 +73,38 @@ func recordDeployedName(state *TestState, key, body string) {
 }
 
 // deployAPIConfiguration POSTs a RestApi configuration to the gateway
-// controller, records its name for cleanup, and waits out policy propagation
-// if the controller accepted it.
+// controller, records its name for cleanup, and marks policy propagation
+// pending if the controller accepted it.
 func deployAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, body string) error {
 	recordDeployedAPIName(state, body)
 	httpSteps.SetHeader("Content-Type", "application/yaml")
 	if err := httpSteps.SendPOSTToService("gateway-controller", "/rest-apis", &godog.DocString{Content: body}); err != nil {
 		return err
 	}
-	waitForPropagationIfAccepted(httpSteps)
+	markPropagationPendingIfAccepted(state, httpSteps)
 	return nil
 }
 
-// waitForPropagationIfAccepted sleeps out policy propagation only after a
-// mutation the controller accepted (2xx). A refused mutation leaves the
-// gateway untouched, so waiting would only slow the suite down.
-func waitForPropagationIfAccepted(httpSteps *steps.HTTPSteps) {
+// markPropagationPendingIfAccepted marks policy propagation pending only
+// after a mutation the controller accepted (2xx). A refused mutation leaves
+// the gateway untouched, so nothing needs to wait for it. The wait itself is
+// paid by the next gateway request, unless an endpoint-wait step polls the
+// change into place first.
+func markPropagationPendingIfAccepted(state *TestState, httpSteps *steps.HTTPSteps) {
 	if resp := httpSteps.LastResponse(); resp != nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
 		return
 	}
-	time.Sleep(policyPropagationDelay)
+	markPropagationPending(state)
 }
 
 // updateAPIConfiguration PUTs a RestApi configuration to the gateway
-// controller under the given API name and waits out policy propagation.
-func updateAPIConfiguration(httpSteps *steps.HTTPSteps, apiName, body string) error {
+// controller under the given API name and marks policy propagation pending.
+func updateAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, apiName, body string) error {
 	httpSteps.SetHeader("Content-Type", "application/yaml")
 	if err := httpSteps.SendPUTToService("gateway-controller", "/rest-apis/"+apiName, &godog.DocString{Content: body}); err != nil {
 		return err
 	}
-	waitForPropagationIfAccepted(httpSteps)
+	markPropagationPendingIfAccepted(state, httpSteps)
 	return nil
 }
 
@@ -154,7 +155,7 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 		if err != nil {
 			return err
 		}
-		waitForPropagationIfAccepted(httpSteps)
+		markPropagationPendingIfAccepted(state, httpSteps)
 		return nil
 	}
 
@@ -172,22 +173,11 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 	})
 
 	ctx.Step(`^I update the API "([^"]*)" with this configuration:$`, func(apiName string, body *godog.DocString) error {
-		return updateAPIConfiguration(httpSteps, apiName, body.Content)
+		return updateAPIConfiguration(state, httpSteps, apiName, body.Content)
 	})
 
 	ctx.Step(`^I get the API "([^"]*)"$`, func(name string) error {
 		return httpSteps.SendGETToService("gateway-controller", "/rest-apis/"+name)
-	})
-
-	// @mtls scenarios delete their APIs here. This hook is registered before
-	// the certificate cleanup hook and godog runs After hooks in registration
-	// order, so no API still references a pool entry being removed. Other
-	// features may share an API across scenarios, so they are left alone.
-	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
-		if scenarioHasTag(sc, "@mtls") {
-			cleanupDeployedAPIs(state, httpSteps)
-		}
-		return c, nil
 	})
 }
 

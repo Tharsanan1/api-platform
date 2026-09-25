@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -439,9 +440,8 @@ func (cm *ComposeManager) DumpLogs(outputFile string) error {
 // `since`. Callers match by content, so extra earlier lines are harmless.
 const serviceLogsSinceMargin = 5 * time.Second
 
-// ServiceLogs returns one service's container log output emitted since
-// roughly the given time, for steps that poll for a line during a scenario.
-func (cm *ComposeManager) ServiceLogs(service string, since time.Time) (string, error) {
+// ServiceContainerID returns the id of the service's running container.
+func (cm *ComposeManager) ServiceContainerID(service string) (string, error) {
 	if cm == nil {
 		return "", fmt.Errorf("compose manager is nil")
 	}
@@ -450,12 +450,28 @@ func (cm *ComposeManager) ServiceLogs(service string, since time.Time) (string, 
 	defer cancel()
 
 	args := append([]string{"compose", "-p", cm.projectName}, cm.composeFileFlags()...)
-	args = append(args, "logs", "--no-color", "--since", since.Add(-serviceLogsSinceMargin).UTC().Format(time.RFC3339Nano), service)
-	cmd := execCommandContext(ctx, "docker", args...)
+	args = append(args, "ps", "-q", service)
+	out, err := execCommandContext(ctx, "docker", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve the container of service %s: %w", service, err)
+	}
+	id, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	if id == "" {
+		return "", fmt.Errorf("service %s has no running container", service)
+	}
+	return id, nil
+}
 
+// ContainerLogs returns a container's log output emitted since roughly the
+// given time, for steps that poll for a line during a scenario.
+func ContainerLogs(containerID string, since time.Time) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := execCommandContext(ctx, "docker", "logs", "--since", since.Add(-serviceLogsSinceMargin).UTC().Format(time.RFC3339Nano), containerID)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("failed to collect logs for service %s: %w", service, err)
+		return string(out), fmt.Errorf("failed to collect logs for container %s: %w", containerID, err)
 	}
 	return string(out), nil
 }

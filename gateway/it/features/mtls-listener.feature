@@ -65,7 +65,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     And the HTTPS listener should request a client certificate
     When I delete the API "mtls-listener-api"
     Then the response should be successful
-    And I wait for 3 seconds
+    And the HTTPS listener should stop requesting a client certificate
     And the HTTPS listener should not request a client certificate
 
   Scenario: Callers of other APIs are not affected while the listener asks for certificates
@@ -186,7 +186,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
                 version: v1
       """
     Then the response should be successful
-    And I wait for 3 seconds
+    And I wait for the endpoint "http://localhost:8080/mtls-listener/v1.0/health" to respond with status 401
     When I send a GET request to "http://localhost:9901/config_dump?resource=dynamic_listeners"
     Then the response status code should be 200
     And the response body should contain "downstream_client_ca"

@@ -93,32 +93,7 @@ func (t *Translator) ToProtoDownstream(ds *policy.DownstreamContext) *proto.Down
 			Authority: ds.Request.Authority,
 			Scheme:    ds.Request.Scheme,
 		},
-		Tls: t.toProtoDownstreamTLS(ds.TLS),
 	}
-}
-
-// toProtoDownstreamTLS converts the TLS snapshot into the transport form. A
-// nil snapshot leaves the wire field unset, which a Python policy must treat
-// as no certificate accepted, never as not required.
-func (t *Translator) toProtoDownstreamTLS(tls *policy.DownstreamTLS) *proto.DownstreamTLS {
-	if tls == nil {
-		return nil
-	}
-	out := &proto.DownstreamTLS{
-		Mtls:                tls.MTLS,
-		Sha256Thumbprint:    tls.SHA256Thumbprint,
-		SubjectDn:           tls.SubjectDN,
-		FirstUriSan:         tls.FirstURISAN,
-		FirstDnsSan:         tls.FirstDNSSAN,
-		PeerCertificatePem:  tls.PeerCertificatePEM,
-		TlsVersion:          tls.TLSVersion,
-		RequestedServerName: tls.RequestedServerName,
-	}
-	if tls.PeerCertValid != nil {
-		v := *tls.PeerCertValid
-		out.PeerCertValid = &v
-	}
-	return out
 }
 
 // ToProtoRequestUpstream converts the request-phase resolved upstream target

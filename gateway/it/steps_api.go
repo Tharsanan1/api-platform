@@ -19,28 +19,134 @@
 package it
 
 import (
+	"encoding/base64"
 	"time"
 
 	"github.com/cucumber/godog"
 	"github.com/wso2/api-platform/gateway/it/steps"
+	"gopkg.in/yaml.v3"
 )
 
-// policyPropagationDelay is the time to wait after mutating operations
-// to allow the Policy Engine to receive and apply configuration changes.
-// Reduced from 2s to 500ms as xDS sync typically completes in <500ms.
+// policyPropagationDelay is how long a gateway request waits after an
+// accepted mutation for the router and the Policy Engine to apply it, unless
+// a step has already polled the change into place.
 const policyPropagationDelay = 1 * time.Second
+
+// deployedAPINamesContextKey holds the API names this scenario deployed. It
+// lives in TestState.Context so TestState.Reset clears it per scenario.
+const deployedAPINamesContextKey = "deployedAPINames"
+
+// apiConfigMetadata captures just enough of a RestApi configuration's YAML to
+// recover its name for cleanup tracking; every other field is ignored.
+type apiConfigMetadata struct {
+	Metadata struct {
+		Name string `yaml:"name"`
+	} `yaml:"metadata"`
+}
+
+// deployedAgentNamesContextKey holds the Agent names this scenario deployed,
+// on the same terms as deployedAPINamesContextKey.
+const deployedAgentNamesContextKey = "deployedAgentNames"
+
+// recordDeployedAPIName records the configuration's metadata.name for
+// end-of-scenario cleanup. A body without a parseable name created nothing,
+// so it is skipped.
+func recordDeployedAPIName(state *TestState, body string) {
+	recordDeployedName(state, deployedAPINamesContextKey, body)
+}
+
+// recordDeployedAgentName records an Agent configuration's metadata.name for
+// end-of-scenario cleanup.
+func recordDeployedAgentName(state *TestState, body string) {
+	recordDeployedName(state, deployedAgentNamesContextKey, body)
+}
+
+func recordDeployedName(state *TestState, key, body string) {
+	var cfg apiConfigMetadata
+	if err := yaml.Unmarshal([]byte(body), &cfg); err != nil || cfg.Metadata.Name == "" {
+		return
+	}
+	existing, _ := state.GetContextValue(key)
+	names, _ := existing.([]string)
+	names = append(names, cfg.Metadata.Name)
+	state.SetContextValue(key, names)
+}
+
+// deployAPIConfiguration POSTs a RestApi configuration to the gateway
+// controller, records its name for cleanup, and marks policy propagation
+// pending if the controller accepted it.
+func deployAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, body string) error {
+	recordDeployedAPIName(state, body)
+	httpSteps.SetHeader("Content-Type", "application/yaml")
+	if err := httpSteps.SendPOSTToService("gateway-controller", "/rest-apis", &godog.DocString{Content: body}); err != nil {
+		return err
+	}
+	markPropagationPendingIfAccepted(state, httpSteps)
+	return nil
+}
+
+// markPropagationPendingIfAccepted marks policy propagation pending only
+// after a mutation the controller accepted (2xx). A refused mutation leaves
+// the gateway untouched, so nothing needs to wait for it. The wait itself is
+// paid by the next gateway request, unless an endpoint-wait step polls the
+// change into place first.
+func markPropagationPendingIfAccepted(state *TestState, httpSteps *steps.HTTPSteps) {
+	if resp := httpSteps.LastResponse(); resp != nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		return
+	}
+	markPropagationPending(state)
+}
+
+// updateAPIConfiguration PUTs a RestApi configuration to the gateway
+// controller under the given API name and marks policy propagation pending.
+func updateAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, apiName, body string) error {
+	httpSteps.SetHeader("Content-Type", "application/yaml")
+	if err := httpSteps.SendPUTToService("gateway-controller", "/rest-apis/"+apiName, &godog.DocString{Content: body}); err != nil {
+		return err
+	}
+	markPropagationPendingIfAccepted(state, httpSteps)
+	return nil
+}
+
+// cleanupDeployedAPIs deletes, as admin, every API this scenario recorded.
+// It is best-effort: an API already deleted or never created just gets a 404.
+func cleanupDeployedAPIs(state *TestState, httpSteps *steps.HTTPSteps) {
+	cleanupDeployed(state, httpSteps, deployedAPINamesContextKey, "/rest-apis/")
+}
+
+// cleanupDeployedAgents deletes, as admin, every Agent this scenario
+// recorded, on the same best-effort terms as cleanupDeployedAPIs.
+func cleanupDeployedAgents(state *TestState, httpSteps *steps.HTTPSteps) {
+	cleanupDeployed(state, httpSteps, deployedAgentNamesContextKey, "/agents/")
+}
+
+func cleanupDeployed(state *TestState, httpSteps *steps.HTTPSteps, key, pathPrefix string) {
+	raw, ok := state.GetContextValue(key)
+	if !ok {
+		return
+	}
+	names, ok := raw.([]string)
+	if !ok || len(names) == 0 {
+		return
+	}
+
+	admin, ok := state.Config.Users["admin"]
+	if !ok {
+		return
+	}
+	creds := base64.StdEncoding.EncodeToString([]byte(admin.Username + ":" + admin.Password))
+	httpSteps.SetHeader("Authorization", "Basic "+creds)
+
+	for _, name := range names {
+		_ = httpSteps.SendDELETEToService("gateway-controller", pathPrefix+name)
+	}
+}
 
 // RegisterAPISteps registers all API deployment step definitions
 func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *steps.HTTPSteps) {
 	// Single deploy function used by multiple step patterns
 	deployAPI := func(body *godog.DocString) error {
-		httpSteps.SetHeader("Content-Type", "application/yaml")
-		err := httpSteps.SendPOSTToService("gateway-controller", "/rest-apis", body)
-		if err != nil {
-			return err
-		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return deployAPIConfiguration(state, httpSteps, body.Content)
 	}
 
 	// Single delete function used by multiple step patterns
@@ -49,7 +155,7 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 		if err != nil {
 			return err
 		}
-		time.Sleep(policyPropagationDelay)
+		markPropagationPendingIfAccepted(state, httpSteps)
 		return nil
 	}
 
@@ -67,16 +173,21 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 	})
 
 	ctx.Step(`^I update the API "([^"]*)" with this configuration:$`, func(apiName string, body *godog.DocString) error {
-		httpSteps.SetHeader("Content-Type", "application/yaml")
-		err := httpSteps.SendPUTToService("gateway-controller", "/rest-apis/"+apiName, body)
-		if err != nil {
-			return err
-		}
-		time.Sleep(policyPropagationDelay)
-		return nil
+		return updateAPIConfiguration(state, httpSteps, apiName, body.Content)
 	})
 
 	ctx.Step(`^I get the API "([^"]*)"$`, func(name string) error {
 		return httpSteps.SendGETToService("gateway-controller", "/rest-apis/"+name)
 	})
+}
+
+// scenarioHasTag reports whether the scenario, or the feature it belongs to,
+// carries the given tag (godog copies feature-level tags onto each scenario).
+func scenarioHasTag(sc *godog.Scenario, tag string) bool {
+	for _, t := range sc.Tags {
+		if t.Name == tag {
+			return true
+		}
+	}
+	return false
 }

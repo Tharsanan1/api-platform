@@ -1,4 +1,6 @@
-# Integration Test Configuration
+# Integration Test Configuration — mTLS profile: a believed client certificate
+# relayed in a header is forwarded to the backend. Runs via
+# `cd it && make test-mtls-header-forward` (see features/mtls-header-forward.feature).
 
 # =============================================================================
 # ROOT-LEVEL POLICY CONFIGURATIONS (accessed via ${config.xxx})
@@ -105,11 +107,14 @@ enabled = true
 
 [router.access_logs]
 enabled = true
-format = "json"
+format = "text"
 
 [router.http_listener.timeouts]
 # This is the only HCM timeout set to a small, testable value here.
 request_headers_timeout = "5s"
+
+[router.downstream_tls.client_certificate_header]
+forward_to_backend = true # forward a believed relayed certificate to backends
 
 # =============================================================================
 # POLICY ENGINE CONFIGURATION
@@ -142,10 +147,6 @@ issuer = "http://expected-issuer.com"
 
 [policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
 uri = "http://mock-jwks:8080/jwks"
-
-[policy_configurations.mcpauth_v1]
-gatewayhost = "mcp-e2e-gatewayhost.example.com:9443"
-gatewayurl = "https://mcp-e2e-gatewayurl.example.com:7777"
 
 [policy_configurations.ratelimit_v1]
 algorithm = "fixed-window"

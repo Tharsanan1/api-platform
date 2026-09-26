@@ -51,7 +51,8 @@ Feature: Certificate management
     Then the response status should be 400
     And the response should be valid JSON
     And the JSON response field "status" should be "error"
-    And the JSON response field "message" should contain "Invalid certificate"
+    And the JSON response field "message" should contain "certificate upload is invalid"
+    And the JSON response field "errors[0].message" should contain "not a PEM-encoded certificate"
 
   Scenario: Upload certificate without a name is rejected
     When I send a "POST" request to the "gateway-controller" service at "/certificates" with body:

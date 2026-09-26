@@ -71,3 +71,7 @@ replace github.com/wso2/api-platform/common => ../../../common
 replace github.com/wso2/api-platform/gateway/common => ../../common
 
 replace github.com/wso2/api-platform/httpkit => ../../../httpkit
+
+// Local SDK during development of SDK-coupled features; the image build copies
+// sdk/core to /api-platform/sdk/core, so the relative path resolves there too.
+replace github.com/wso2/api-platform/sdk/core => ../../../sdk/core

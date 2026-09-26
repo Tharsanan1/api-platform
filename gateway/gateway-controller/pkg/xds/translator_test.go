@@ -403,7 +403,8 @@ func TestTranslator_CreateTLSProtocolVersion(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name     string
@@ -430,7 +431,8 @@ func TestTranslator_ParseCipherSuites(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name     string
@@ -471,7 +473,8 @@ func TestTranslator_PathToRegex(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name     string
@@ -522,7 +525,8 @@ func TestTranslator_CreateRoute_PathSpecifier(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name          string
@@ -593,7 +597,8 @@ func TestTranslator_WildcardRegexBoundary(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	type wildcardCase struct {
 		context        string
@@ -676,7 +681,8 @@ func TestTranslator_WildcardUpstreamRewrite(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name         string
@@ -721,7 +727,8 @@ func TestTranslator_MCPUpstreamRewrite(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	mcpKind := string(models.KindMcp)
 	mcpPath := constants.MCP_RESOURCE_PATH
@@ -769,7 +776,8 @@ func TestTranslator_WildcardUpstreamRewriteFromRDC(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name          string
@@ -815,7 +823,8 @@ func TestTranslator_RouteResilienceTimeoutsFromRDC(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	dur := func(d time.Duration) *time.Duration { return &d }
 
@@ -860,7 +869,8 @@ func TestTranslator_MCPUpstreamRewriteFromRDC(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	mcpPath := constants.MCP_RESOURCE_PATH
 
@@ -911,7 +921,8 @@ func TestTranslator_MCPAppendResourcePathToBackend(t *testing.T) {
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
 	cfg.MCP.AppendResourcePathToBackend = true
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	mcpKind := string(models.KindMcp)
 	mcpPath := constants.MCP_RESOURCE_PATH
@@ -971,7 +982,8 @@ func TestTranslator_MCPAppendResourcePathToBackend(t *testing.T) {
 // case below configures a gateway path that differs from the upstream one.
 func TestTranslator_UpstreamPathOverride(t *testing.T) {
 	logger := createTestLogger()
-	translator := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	translator, err := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	require.NoError(t, err)
 
 	const override = "/.well-known/agent-card.json"
 
@@ -1036,7 +1048,8 @@ func TestTranslator_UpstreamPathOverride(t *testing.T) {
 // (^/match(?:/.*)?$) outrank a shorter exact (^/match/exact$).
 func TestTranslator_ExactPathUsesNativeMatcher(t *testing.T) {
 	logger := createTestLogger()
-	translator := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	translator, err := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	require.NoError(t, err)
 
 	rdc := &models.RuntimeDeployConfig{
 		UpstreamClusters: map[string]*models.UpstreamCluster{
@@ -1094,7 +1107,8 @@ func TestSortRoutesByPriority_ExactBeatsLongerPrefixRegex(t *testing.T) {
 // regex length so the wildcard's (?:/.*)? syntax cannot shadow the exact route's policy chain.
 func TestSortRoutesByPriority_LegacyExactBeatsWildcardRegex(t *testing.T) {
 	logger := createTestLogger()
-	translator := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	translator, err := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	require.NoError(t, err)
 
 	const (
 		exactKey    = "POST|/llm/a/b|"
@@ -1142,7 +1156,8 @@ func TestTranslator_SanitizeClusterName(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name     string
@@ -1313,7 +1328,8 @@ func TestNewTranslator_WithoutCerts(t *testing.T) {
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
 
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 	assert.NotNil(t, translator)
 	assert.Nil(t, translator.GetCertStore())
 }
@@ -1322,7 +1338,8 @@ func TestTranslator_ExtractTemplateHandle_NilSourceConfig(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	storedCfg := &models.StoredConfig{
 		SourceConfiguration: nil,
@@ -1337,7 +1354,8 @@ func TestTranslator_ExtractProviderName_NilSourceConfig(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	storedCfg := &models.StoredConfig{
 		SourceConfiguration: nil,
@@ -1382,9 +1400,10 @@ func TestTranslator_CreateListener_HCMTimeouts(t *testing.T) {
 			routerCfg.HTTPListener.Timeouts = tt.timeouts
 			cfg := testConfig()
 			cfg.Router = *routerCfg
-			translator := NewTranslator(logger, routerCfg, nil, cfg)
+			translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+			require.NoError(t, err)
 
-			lis, _, err := translator.createListener(nil, false)
+			lis, _, err := translator.createListener(nil, false, false)
 			require.NoError(t, err)
 
 			manager := extractHCM(t, lis)
@@ -1407,9 +1426,10 @@ func TestTranslator_CreateListener_HCMPathNormalization(t *testing.T) {
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
-	lis, _, err := translator.createListener(nil, false)
+	lis, _, err := translator.createListener(nil, false, false)
 	require.NoError(t, err)
 
 	manager := extractHCM(t, lis)
@@ -1449,9 +1469,10 @@ func TestTranslator_CreateListener_PathNormalization(t *testing.T) {
 			routerCfg.HTTPListener.DisablePathNormalization = tt.disablePathNormalization
 			cfg := testConfig()
 			cfg.Router = *routerCfg
-			translator := NewTranslator(logger, routerCfg, nil, cfg)
+			translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+			require.NoError(t, err)
 
-			lis, _, err := translator.createListener(nil, false)
+			lis, _, err := translator.createListener(nil, false, false)
 			require.NoError(t, err)
 
 			manager := extractHCM(t, lis)
@@ -1502,9 +1523,10 @@ func TestTranslator_CreateListener_PathWithEscapedSlashesAction(t *testing.T) {
 			routerCfg.HTTPListener.PathWithEscapedSlashesAction = tt.pathWithEscapedSlashesAction
 			cfg := testConfig()
 			cfg.Router = *routerCfg
-			translator := NewTranslator(logger, routerCfg, nil, cfg)
+			translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+			require.NoError(t, err)
 
-			lis, _, err := translator.createListener(nil, false)
+			lis, _, err := translator.createListener(nil, false, false)
 			require.NoError(t, err)
 
 			manager := extractHCM(t, lis)
@@ -1522,7 +1544,8 @@ func TestTranslator_CreateAccessLogConfig_Disabled(t *testing.T) {
 	routerCfg.AccessLogs.Enabled = false
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	logs, err := translator.createAccessLogConfig()
 	assert.NoError(t, err)
@@ -1602,7 +1625,8 @@ func TestTranslator_AccessLogSinks_DecoupledFromStdoutToggle(t *testing.T) {
 				BufferSizeBytes:     16384,
 				GRPCRequestTimeout:  5000,
 			}
-			translator := NewTranslator(logger, routerCfg, nil, cfg)
+			translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+			require.NoError(t, err)
 
 			logs, err := translator.createAccessLogConfig()
 			require.NoError(t, err)
@@ -1615,7 +1639,7 @@ func TestTranslator_AccessLogSinks_DecoupledFromStdoutToggle(t *testing.T) {
 			assert.Equal(t, tt.wantSinkNames, nilIfEmpty(gotNames), "access log sinks")
 
 			// The sinks must actually reach the HCM — the caller's gate is half the fix.
-			lis, _, err := translator.createListener(nil, false)
+			lis, _, err := translator.createListener(nil, false, false)
 			require.NoError(t, err)
 			manager := extractHCM(t, lis)
 			if !tt.wantManagerSinks {
@@ -1651,7 +1675,8 @@ func TestTranslator_CreateAccessLogConfig_JSON(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	logs, err := translator.createAccessLogConfig()
 	assert.NoError(t, err)
@@ -1668,7 +1693,8 @@ func TestTranslator_CreateAccessLogConfig_Text(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	logs, err := translator.createAccessLogConfig()
 	assert.NoError(t, err)
@@ -1685,7 +1711,8 @@ func TestTranslator_CreateAccessLogConfig_JSONMissingFields(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	logs, err := translator.createAccessLogConfig()
 	assert.Error(t, err)
@@ -1707,7 +1734,8 @@ func TestTranslator_CreateFileAccessLog_SuppressesHealthProbes(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	accessLog, err := translator.createFileAccessLog()
 	assert.NoError(t, err)
@@ -1737,7 +1765,8 @@ func TestTranslator_CreatePolicyEngineCluster(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	cluster := translator.createPolicyEngineCluster()
 	assert.NotNil(t, cluster)
@@ -1756,7 +1785,8 @@ func TestTranslator_CreatePolicyEngineCluster_UDS(t *testing.T) {
 		}
 		cfg := testConfig()
 		cfg.Router = *routerCfg
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		c := translator.createPolicyEngineCluster()
 		assert.NotNil(t, c)
@@ -1784,7 +1814,8 @@ func TestTranslator_CreatePolicyEngineCluster_UDS(t *testing.T) {
 		}
 		cfg := testConfig()
 		cfg.Router = *routerCfg
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		c := translator.createPolicyEngineCluster()
 		assert.NotNil(t, c)
@@ -1816,7 +1847,8 @@ func TestTranslator_CreateExtProcFilter(t *testing.T) {
 		}
 		cfg := testConfig()
 		cfg.Router = *routerCfg
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		filter, err := translator.createExtProcFilter()
 		assert.NoError(t, err)
@@ -1829,7 +1861,8 @@ func TestTranslator_CreateRouteConfiguration(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	// Test with nil virtual hosts
 	routeConfig := translator.createRouteConfiguration(nil)
@@ -1842,7 +1875,8 @@ func TestTranslator_TranslateConfigs_EmptyConfigs(t *testing.T) {
 
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	// Test with empty configs
 	resources, err := translator.TranslateConfigs([]*models.StoredConfig{}, "test-correlation-id")
@@ -1859,7 +1893,8 @@ func TestTranslator_TranslateConfigs_StripsClientOriginalPathHeader(t *testing.T
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	resources, err := translator.TranslateConfigs([]*models.StoredConfig{}, "test-correlation-id")
 	require.NoError(t, err)
@@ -1933,7 +1968,8 @@ func TestTranslator_TranslateConfigs_GatewayHealthRoutes(t *testing.T) {
 
 	t.Run("present on the wildcard vhost with zero deployed artifacts", func(t *testing.T) {
 		logger := createTestLogger()
-		translator := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+		translator, err := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+		require.NoError(t, err)
 
 		resources, err := translator.TranslateConfigs([]*models.StoredConfig{}, "test-correlation-id")
 		require.NoError(t, err)
@@ -1952,7 +1988,8 @@ func TestTranslator_TranslateConfigs_GatewayHealthRoutes(t *testing.T) {
 
 	t.Run("present on every vhost once APIs are deployed", func(t *testing.T) {
 		logger := createTestLogger()
-		translator := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+		translator, err := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+		require.NoError(t, err)
 
 		configs := []*models.StoredConfig{makeRestAPI("uuid-api-1", "api-one", "/api-one")}
 		resources, err := translator.TranslateConfigs(configs, "test-correlation-id")
@@ -1978,7 +2015,8 @@ func TestTranslator_GetVHostDomains(t *testing.T) {
 	t.Run("fallback domains when explicit domain lists are empty", func(t *testing.T) {
 		routerCfg := testRouterConfig()
 		cfg := testConfig()
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		domains := translator.getVHostDomains("api.example.com")
 		assert.Equal(t, []string{"api.example.com", "api.example.com:*"}, domains)
@@ -1990,7 +2028,8 @@ func TestTranslator_GetVHostDomains(t *testing.T) {
 		routerCfg.VHosts.Main.Domains = []string{"*.wso2.com", "*.foo.com"}
 		cfg := testConfig()
 		cfg.Router = *routerCfg
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		domains := translator.getVHostDomains("*.wso2.com")
 		assert.Equal(t, []string{"*.wso2.com", "*.wso2.com:*", "*.foo.com", "*.foo.com:*"}, domains)
@@ -2002,7 +2041,8 @@ func TestTranslator_GetVHostDomains(t *testing.T) {
 		routerCfg.VHosts.Sandbox.Domains = []string{"*-sandbox.wso2.com", "*-sandbox.foo.com"}
 		cfg := testConfig()
 		cfg.Router = *routerCfg
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		domains := translator.getVHostDomains("*-sandbox.wso2.com")
 		assert.Equal(t, []string{"*-sandbox.wso2.com", "*-sandbox.wso2.com:*", "*-sandbox.foo.com", "*-sandbox.foo.com:*"}, domains)
@@ -2014,7 +2054,8 @@ func TestTranslator_GetVHostDomains(t *testing.T) {
 		routerCfg.VHosts.Main.Domains = []string{"*.wso2.com", "*.foo.com"}
 		cfg := testConfig()
 		cfg.Router = *routerCfg
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		domains := translator.getVHostDomains("custom.wso2.com")
 		assert.Equal(t, []string{"custom.wso2.com", "custom.wso2.com:*"}, domains)
@@ -2023,7 +2064,8 @@ func TestTranslator_GetVHostDomains(t *testing.T) {
 	t.Run("port-qualified domain is not expanded with :*", func(t *testing.T) {
 		routerCfg := testRouterConfig()
 		cfg := testConfig()
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		domains := translator.getVHostDomains("api.example.com:8443")
 		assert.Equal(t, []string{"api.example.com:8443"}, domains)
@@ -2035,7 +2077,8 @@ func TestTranslator_GetVHostDomains(t *testing.T) {
 		routerCfg.VHosts.Main.Domains = []string{"   ", "  "}
 		cfg := testConfig()
 		cfg.Router = *routerCfg
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		domains := translator.getVHostDomains("*.wso2.com")
 		assert.Equal(t, []string{"*.wso2.com", "*.wso2.com:*"}, domains)
@@ -2047,27 +2090,20 @@ func TestTranslator_GetVHostDomains(t *testing.T) {
 		routerCfg.VHosts.Main.Domains = []string{"api.wso2.com", "api.wso2.com:8443"}
 		cfg := testConfig()
 		cfg.Router = *routerCfg
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		domains := translator.getVHostDomains("api.wso2.com")
 		assert.Equal(t, []string{"api.wso2.com", "api.wso2.com:*", "api.wso2.com:8443"}, domains)
 	})
 }
 
-func TestTranslator_GetCertStore_Nil(t *testing.T) {
-	logger := createTestLogger()
-	routerCfg := testRouterConfig()
-	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
-
-	assert.Nil(t, translator.GetCertStore())
-}
-
 func TestTranslator_ExtractTemplateHandle_InvalidKind(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	storedCfg := &models.StoredConfig{
 		SourceConfiguration: map[string]interface{}{
@@ -2084,7 +2120,8 @@ func TestTranslator_ExtractProviderName_InvalidKind(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	storedCfg := &models.StoredConfig{
 		SourceConfiguration: map[string]interface{}{
@@ -2102,7 +2139,8 @@ func TestTranslator_CreateTracingConfig_Disabled(t *testing.T) {
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
 	cfg.TracingConfig.Enabled = false
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tracingCfg, err := translator.createTracingConfig()
 	assert.NoError(t, err)
@@ -2117,7 +2155,8 @@ func TestTranslator_CreateTracingConfig_Enabled(t *testing.T) {
 	cfg.TracingConfig.Endpoint = "otel-collector:4317"
 	cfg.TracingConfig.SamplingRate = 0.5
 	cfg.Router.TracingServiceName = "test-service"
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tracingCfg, err := translator.createTracingConfig()
 	assert.NoError(t, err)
@@ -2151,7 +2190,8 @@ func TestTranslator_CreateTracingConfig_ResourceAttributes(t *testing.T) {
 		"deployment.environment": "prod",
 		"service.namespace":      "api-gw",
 	}
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tracingCfg, err := translator.createTracingConfig()
 	require.NoError(t, err)
@@ -2195,7 +2235,8 @@ func TestTranslator_CreateTracingConfig_PeerServiceCustomTag(t *testing.T) {
 	cfg := testConfig()
 	cfg.TracingConfig.Enabled = true
 	cfg.TracingConfig.Endpoint = "otel-collector:4317"
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tracingCfg, err := translator.createTracingConfig()
 	require.NoError(t, err)
@@ -2245,7 +2286,8 @@ func TestTranslator_CreateOTELCollectorCluster(t *testing.T) {
 	cfg := testConfig()
 	cfg.TracingConfig.Enabled = true
 	cfg.TracingConfig.Endpoint = "otel-collector:4317"
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	cluster := translator.createOTELCollectorCluster()
 	assert.NotNil(t, cluster)
@@ -2257,7 +2299,8 @@ func TestTranslator_CreateOTELCollectorCluster_Disabled(t *testing.T) {
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
 	cfg.TracingConfig.Enabled = false
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	cluster := translator.createOTELCollectorCluster()
 	assert.Nil(t, cluster)
@@ -2276,7 +2319,8 @@ func TestTranslator_CreateALSCluster(t *testing.T) {
 			BufferSizeBytes:     16384,
 			GRPCRequestTimeout:  20000000000,
 		}
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		c := translator.createALSCluster()
 		assert.NotNil(t, c)
@@ -2303,7 +2347,8 @@ func TestTranslator_CreateALSCluster(t *testing.T) {
 			BufferSizeBytes:     16384,
 			GRPCRequestTimeout:  20000000000,
 		}
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		c := translator.createALSCluster()
 		assert.NotNil(t, c)
@@ -2331,7 +2376,8 @@ func TestTranslator_CreateALSCluster(t *testing.T) {
 		}
 		// Set policy engine host - ALS uses the same host in TCP mode
 		cfg.Router.PolicyEngine.Host = "policy-engine"
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		c := translator.createALSCluster()
 		assert.NotNil(t, c)
@@ -2361,7 +2407,8 @@ func TestTranslator_CreateALSCluster(t *testing.T) {
 			GRPCRequestTimeout:  20000000000,
 		}
 		cfg.Router.PolicyEngine.Host = "policy-engine"
-		translator := NewTranslator(logger, routerCfg, nil, cfg)
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
 
 		c := translator.createALSCluster()
 		assert.NotNil(t, c)
@@ -2383,7 +2430,8 @@ func TestTranslator_CreateGRPCAccessLog(t *testing.T) {
 		BufferSizeBytes:     16384,
 		GRPCRequestTimeout:  5000,
 	}
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	accessLog, err := translator.createGRPCAccessLog()
 	assert.NoError(t, err)
@@ -2408,7 +2456,8 @@ func TestTranslator_CreateGRPCAccessLog_WithIgnorePathPrefixes(t *testing.T) {
 		GRPCRequestTimeout:  5000,
 	}
 	cfg.Collector.IgnorePathPrefixes = []string{"/health"}
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	accessLog, err := translator.createGRPCAccessLog()
 	assert.NoError(t, err)
@@ -2426,7 +2475,8 @@ func TestTranslator_CreateGRPCAccessLog_BufferSizeOverflow(t *testing.T) {
 		BufferSizeBytes:     math.MaxInt,
 		GRPCRequestTimeout:  5000,
 	}
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	accessLog, err := translator.createGRPCAccessLog()
 	assert.Error(t, err)
@@ -2628,13 +2678,15 @@ func TestTranslator_CreateUpstreamTLSContext_SDSViaADS(t *testing.T) {
 	routerCfg := testRouterConfig()
 	routerCfg.Upstream.TLS.DisableSslVerification = false
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 	// Only t.certStore != nil matters for this code path -- construct one
 	// directly rather than routing through NewTranslator's CustomCertsPath
 	// init, which calls LoadCertificates against a real db.Storage.
 	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
 
-	tlsContext := translator.createUpstreamTLSContext(nil, "example.com")
+	tlsContext, err := translator.createUpstreamTLSContext(nil, "example.com", nil, "")
+	require.NoError(t, err)
 	require.NotNil(t, tlsContext)
 
 	combinedCtx := tlsContext.CommonTlsContext.GetCombinedValidationContext()
@@ -2652,17 +2704,20 @@ func TestTranslator_CreateUpstreamTLSContext(t *testing.T) {
 	routerCfg := testRouterConfig()
 	routerCfg.Upstream.TLS.EcdhCurves = "X25519,P-256"
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	// Test with no certificate
-	tlsContext := translator.createUpstreamTLSContext(nil, "example.com")
+	tlsContext, err := translator.createUpstreamTLSContext(nil, "example.com", nil, "")
+	require.NoError(t, err)
 	assert.NotNil(t, tlsContext)
 	assert.Equal(t, "example.com", tlsContext.Sni)
 	assert.Equal(t, []string{"X25519", "P-256"}, tlsContext.CommonTlsContext.TlsParams.EcdhCurves)
 
 	// Test with certificate
 	certPem := []byte("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----")
-	tlsContextWithCert := translator.createUpstreamTLSContext(certPem, "secure.example.com")
+	tlsContextWithCert, err := translator.createUpstreamTLSContext(certPem, "secure.example.com", nil, "")
+	require.NoError(t, err)
 	assert.NotNil(t, tlsContextWithCert)
 	assert.Equal(t, "secure.example.com", tlsContextWithCert.Sni)
 }
@@ -2671,7 +2726,8 @@ func TestTranslator_ResolveUpstreamCluster_SimpleURL(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	urlStr := "http://backend:8080"
 	upstream := &api.Upstream{
@@ -2690,7 +2746,8 @@ func TestTranslator_ResolveUpstreamCluster_HTTPSUrl(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	urlStr := "https://secure-backend:443/api"
 	upstream := &api.Upstream{
@@ -2709,13 +2766,14 @@ func TestTranslator_ResolveUpstreamCluster_MissingURL(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	upstream := &api.Upstream{
 		Url: nil, // No URL
 	}
 
-	_, _, _, err := translator.resolveUpstreamCluster("no-url-upstream", upstream, nil)
+	_, _, _, err = translator.resolveUpstreamCluster("no-url-upstream", upstream, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no no-url-upstream upstream configured")
 }
@@ -2728,7 +2786,8 @@ func TestTranslator_CreateCluster(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name       string
@@ -2745,7 +2804,8 @@ func TestTranslator_CreateCluster(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			parsedURL, err := parseURL(tt.urlStr)
 			require.NoError(t, err)
-			cluster := translator.createCluster(tt.clusterNm, parsedURL, tt.certs, nil)
+			cluster, err := translator.createCluster(tt.clusterNm, parsedURL, tt.certs, nil, nil, "")
+			require.NoError(t, err)
 			if tt.hasCluster {
 				assert.NotNil(t, cluster)
 				assert.Equal(t, tt.clusterNm, cluster.Name)
@@ -2764,9 +2824,10 @@ func TestTranslator_CreateListener_HTTP(t *testing.T) {
 	routerCfg.ListenerPort = 8080
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
-	listener, routeConfig, err := translator.createListener(nil, false)
+	listener, routeConfig, err := translator.createListener(nil, false, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, listener)
 	assert.NotNil(t, routeConfig)
@@ -2780,9 +2841,10 @@ func TestTranslator_CreateListener_PerConnectionBufferLimitBytes(t *testing.T) {
 	routerCfg.HTTPListener.PerConnectionBufferLimitBytes = 2097152
 	cfg := testConfig()
 	cfg.Router = *routerCfg
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
-	listener, _, err := translator.createListener(nil, false)
+	listener, _, err := translator.createListener(nil, false, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, listener)
 	assert.Equal(t, uint32(2097152), listener.GetPerConnectionBufferLimitBytes().GetValue())
@@ -2792,19 +2854,44 @@ func TestTranslator_CreateDownstreamTLSContext_NoCert(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
-	tlsContext, err := translator.createDownstreamTLSContext()
-	// Should fail because no certs are configured
-	assert.Error(t, err)
-	assert.Nil(t, tlsContext)
+	tlsContext, err := translator.createDownstreamTLSContext(false)
+	require.NoError(t, err)
+	require.NotNil(t, tlsContext)
+
+	sdsConfigs := tlsContext.CommonTlsContext.GetTlsCertificateSdsSecretConfigs()
+	require.Len(t, sdsConfigs, 1)
+	assert.Equal(t, SecretNameDownstreamListenerCert, sdsConfigs[0].GetName())
+	assert.Empty(t, tlsContext.CommonTlsContext.GetTlsCertificates(),
+		"the listener certificate/key must never be inlined into the LDS resource")
+}
+
+// A listener that requests a client certificate never resumes a session, so
+// every connection presents its certificate to mtls-auth; one that does not
+// request a certificate keeps resumption.
+func TestTranslator_CreateDownstreamTLSContext_SessionResumptionOnlyWithoutClientCertificate(t *testing.T) {
+	translator, err := NewTranslator(createTestLogger(), testRouterConfig(), nil, testConfig())
+	require.NoError(t, err)
+
+	requesting, err := translator.createDownstreamTLSContext(true)
+	require.NoError(t, err)
+	assert.True(t, requesting.GetDisableStatelessSessionResumption())
+	assert.True(t, requesting.GetDisableStatefulSessionResumption())
+
+	plain, err := translator.createDownstreamTLSContext(false)
+	require.NoError(t, err)
+	assert.False(t, plain.GetDisableStatelessSessionResumption())
+	assert.False(t, plain.GetDisableStatefulSessionResumption())
 }
 
 func TestTranslator_CreateRoute_Basic(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	route := translator.createRoute(
 		"api-123",                         // apiId
@@ -2848,7 +2935,8 @@ func TestTranslator_CreateRouteFromRDC_HTTPRouteMetadata(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	rdc := &models.RuntimeDeployConfig{
 		UpstreamClusters: map[string]*models.UpstreamCluster{
@@ -2880,7 +2968,8 @@ func TestTranslator_CreateRoute_DynamicRouting(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	t.Run("static cluster when useClusterHeader is false", func(t *testing.T) {
 		r := translator.createRoute(
@@ -2917,7 +3006,8 @@ func TestTranslator_ExtractTemplateHandle_ValidLLMProvider(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	storedCfg := &models.StoredConfig{
 		Kind: string(api.LLMProviderConfigurationKindLlmProvider),
@@ -2938,7 +3028,8 @@ func TestTranslator_ExtractProviderName_ValidLLMProvider(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	translator := NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
 
 	storedCfg := &models.StoredConfig{
 		Kind: string(api.LLMProviderConfigurationKindLlmProvider),
@@ -3070,7 +3161,11 @@ func createTestTranslator() *Translator {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
-	return NewTranslator(logger, routerCfg, nil, cfg)
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	if err != nil {
+		panic(err)
+	}
+	return translator
 }
 
 // TestProcessEndpoint_PeerHostnameMetadata guards the fix for GH issue #2883 (Datadog
@@ -3086,7 +3181,8 @@ func TestProcessEndpoint_PeerHostnameMetadata(t *testing.T) {
 		u, err := url.Parse("http://backend.default.svc.cluster.local:8080/v1")
 		require.NoError(t, err)
 
-		endpoints, tsm := translator.processEndpoint(u, nil)
+		endpoints, tsm, err := translator.processEndpoint(u, nil, nil, "")
+		require.NoError(t, err)
 		require.Len(t, endpoints, 1)
 		lb := endpoints[0].GetLbEndpoints()[0]
 
@@ -3100,7 +3196,8 @@ func TestProcessEndpoint_PeerHostnameMetadata(t *testing.T) {
 		u, err := url.Parse("https://api.example.com/v1")
 		require.NoError(t, err)
 
-		endpoints, tsm := translator.processEndpoint(u, nil)
+		endpoints, tsm, err := translator.processEndpoint(u, nil, nil, "")
+		require.NoError(t, err)
 		require.Len(t, endpoints, 1)
 		lb := endpoints[0].GetLbEndpoints()[0]
 
@@ -3121,7 +3218,8 @@ func TestProcessEndpoint_PeerHostnameMetadata(t *testing.T) {
 // plaintext.
 func TestCreateWeightedCluster_TLS(t *testing.T) {
 	logger := createTestLogger()
-	translator := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	translator, err := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	require.NoError(t, err)
 
 	w := func(n int) *int { return &n }
 	endpoints := []models.Endpoint{
@@ -3130,7 +3228,8 @@ func TestCreateWeightedCluster_TLS(t *testing.T) {
 	}
 
 	t.Run("https weighted upstream gets per-endpoint TLS transport sockets", func(t *testing.T) {
-		c := translator.createWeightedCluster("upstream_secure", endpoints, &models.UpstreamTLS{Enabled: true}, nil)
+		c, err := translator.createWeightedCluster("upstream_secure", endpoints, &models.UpstreamTLS{Enabled: true}, nil, "")
+		require.NoError(t, err)
 		require.NotNil(t, c)
 
 		// One transport socket match per endpoint, each carrying a TLS transport socket.
@@ -3167,7 +3266,8 @@ func TestCreateWeightedCluster_TLS(t *testing.T) {
 		}
 		// Both nil TLS and explicitly-disabled TLS must produce a plain cluster.
 		for _, tls := range []*models.UpstreamTLS{nil, {Enabled: false}} {
-			c := translator.createWeightedCluster("upstream_plain", plain, tls, nil)
+			c, err := translator.createWeightedCluster("upstream_plain", plain, tls, nil, "")
+			require.NoError(t, err)
 			require.NotNil(t, c)
 			assert.Empty(t, c.GetTransportSocketMatches(),
 				"plaintext weighted upstream must not get transport socket matches")
@@ -3197,7 +3297,8 @@ func TestCreateWeightedCluster_PeerHostnameMetadata(t *testing.T) {
 	}
 
 	t.Run("each endpoint carries its own hostname, distinct from its siblings", func(t *testing.T) {
-		c := translator.createWeightedCluster("upstream_secure", endpoints, &models.UpstreamTLS{Enabled: true}, nil)
+		c, err := translator.createWeightedCluster("upstream_secure", endpoints, &models.UpstreamTLS{Enabled: true}, nil, "")
+		require.NoError(t, err)
 		require.NotNil(t, c)
 
 		lbs := c.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()
@@ -3212,7 +3313,8 @@ func TestCreateWeightedCluster_PeerHostnameMetadata(t *testing.T) {
 	})
 
 	t.Run("plaintext weighted endpoints still get hostname metadata", func(t *testing.T) {
-		c := translator.createWeightedCluster("upstream_plain", endpoints, nil, nil)
+		c, err := translator.createWeightedCluster("upstream_plain", endpoints, nil, nil, "")
+		require.NoError(t, err)
 		require.NotNil(t, c)
 
 		lbs := c.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()
@@ -3267,7 +3369,8 @@ func TestParseDurationAllowZero_MatchesCRDPattern(t *testing.T) {
 // than being downgraded to an exact match.
 func TestBuildMatchHeaders_HeaderMatchersRendered(t *testing.T) {
 	logger := createTestLogger()
-	translator := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	translator, err := NewTranslator(logger, testRouterConfig(), nil, testConfig())
+	require.NoError(t, err)
 	rdc := &models.RuntimeDeployConfig{
 		UpstreamClusters: map[string]*models.UpstreamCluster{
 			"main": {BasePath: "", Endpoints: []models.Endpoint{{Host: "echo", Port: 80}}},

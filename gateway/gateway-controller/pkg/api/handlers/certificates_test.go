@@ -34,6 +34,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 )
@@ -199,7 +200,15 @@ MIIEowIBAAKCAQEA...
 
 // newCertListHandler wraps ListCertificates with CorrelationIDMiddleware for testing.
 func newCertListHandler(server *APIServer) http.Handler {
-	return middleware.CorrelationIDMiddleware(server.logger)(http.HandlerFunc(server.ListCertificates))
+	listCertificates := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var params management.ListCertificatesParams
+		if usage := r.URL.Query().Get("usage"); usage != "" {
+			usageParam := management.ListCertificatesParamsUsage(usage)
+			params.Usage = &usageParam
+		}
+		server.ListCertificates(w, r, params)
+	})
+	return middleware.CorrelationIDMiddleware(server.logger)(listCertificates)
 }
 
 // newUploadCertHandler wraps UploadCertificate with CorrelationIDMiddleware for testing.

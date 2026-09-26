@@ -761,6 +761,23 @@ func (m *MockStorage) GetCertificateByName(name string) (*models.StoredCertifica
 	return nil, errors.New("certificate not found")
 }
 
+func (m *MockStorage) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	var filtered []*models.StoredCertificate
+	for _, cert := range m.certs {
+		certUsage := cert.Usage
+		if certUsage == "" {
+			certUsage = models.CertificateUsageUpstream
+		}
+		if certUsage == usage {
+			filtered = append(filtered, cert)
+		}
+	}
+	return filtered, nil
+}
+
 func (m *MockStorage) ListCertificates() ([]*models.StoredCertificate, error) {
 	if m.getErr != nil {
 		return nil, m.getErr
@@ -775,6 +792,16 @@ func (m *MockStorage) DeleteCertificate(id string) error {
 	for i, cert := range m.certs {
 		if cert.UUID == id {
 			m.certs = append(m.certs[:i], m.certs[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("certificate not found")
+}
+
+func (m *MockStorage) UpdateCertificate(cert *models.StoredCertificate) error {
+	for i, c := range m.certs {
+		if c.UUID == cert.UUID {
+			m.certs[i] = cert
 			return nil
 		}
 	}
@@ -1383,7 +1410,7 @@ func attachTestEventHub(server *APIServer, hub eventhub.EventHub, gatewayID stri
 	if server.systemConfig != nil {
 		server.systemConfig.Controller.Server.GatewayID = gatewayID
 	}
-	policyValidator := config.NewPolicyValidator(server.policyDefinitions)
+	policyValidator := config.NewPolicyValidator(server.policyDefinitions, nil)
 	policyVersionResolver := utils.NewLoadedPolicyVersionResolver(server.policyDefinitions)
 	server.deploymentService = utils.NewAPIDeploymentService(server.store, server.db, server.snapshotManager, server.validator, server.routerConfig, hub, gatewayID, nil, server.httpClient)
 	server.apiKeyService = utils.NewAPIKeyService(server.store, server.db, server.apiKeyXDSManager, &server.systemConfig.APIKey, hub, gatewayID)

@@ -92,7 +92,10 @@ func TestConcurrentUpdateSnapshot(t *testing.T) {
 			t.Fatalf("Add api-one: %v", err)
 		}
 
-		sm := NewSnapshotManager(store, createTestLogger(), testRouterConfig(), nil, testConfig())
+		sm, err := NewSnapshotManager(store, createTestLogger(), testRouterConfig(), nil, testConfig())
+		if err != nil {
+			t.Fatalf("NewSnapshotManager: %v", err)
+		}
 
 		// Step 1: A reads store, blocks in hook
 		aGotAll := make(chan struct{})

@@ -46,7 +46,10 @@ func RegisterMetricsSteps(ctx *godog.ScenarioContext, state *TestState, httpStep
 	ctx.Step(`^I send a GET request to the gateway controller metrics endpoint$`, m.iSendGETRequestToGatewayControllerMetrics)
 	ctx.Step(`^I send a GET request to the policy engine metrics endpoint$`, m.iSendGETRequestToPolicyEngineMetrics)
 	ctx.Step(`^the response should contain Prometheus metrics$`, m.theResponseShouldContainPrometheusMetrics)
-	ctx.Step(`^the response should contain metric "([^"]*)"$`, m.theResponseShouldContainMetric)
+	// (.*) because a metric argument can carry an escaped quoted label value
+	// (e.g. `cert_name=\"obs-expiring\"`), which [^"]* would stop at.
+	ctx.Step(`^the response should contain metric "(.*)"$`, m.theResponseShouldContainMetric)
+	ctx.Step(`^the response should not contain metric "(.*)"$`, m.theResponseShouldNotContainMetric)
 }
 
 // iSendGETRequestToGatewayControllerMetrics sends a GET request to the gateway controller metrics endpoint
@@ -98,13 +101,35 @@ func (m *MetricsSteps) theResponseShouldContainPrometheusMetrics() error {
 	return nil
 }
 
+// unescapeGherkinQuotes turns `\"` in a captured step argument back into a
+// bare quote. Godog keeps step text verbatim, so an escaped quote inside a
+// quoted argument (e.g. a Prometheus label value) arrives with its backslash.
+func unescapeGherkinQuotes(s string) string {
+	return strings.ReplaceAll(s, `\"`, `"`)
+}
+
 // theResponseShouldContainMetric verifies the response contains a specific metric
 func (m *MetricsSteps) theResponseShouldContainMetric(metricName string) error {
+	metricName = unescapeGherkinQuotes(metricName)
 	body := m.httpSteps.LastBody()
 	bodyStr := string(body)
 
 	if !strings.Contains(bodyStr, metricName) {
 		return fmt.Errorf("response does not contain metric '%s'", metricName)
+	}
+
+	return nil
+}
+
+// theResponseShouldNotContainMetric verifies the response does not contain a
+// specific metric or metric series.
+func (m *MetricsSteps) theResponseShouldNotContainMetric(metricName string) error {
+	metricName = unescapeGherkinQuotes(metricName)
+	body := m.httpSteps.LastBody()
+	bodyStr := string(body)
+
+	if strings.Contains(bodyStr, metricName) {
+		return fmt.Errorf("response unexpectedly contains metric '%s'", metricName)
 	}
 
 	return nil

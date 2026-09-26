@@ -263,6 +263,36 @@ services:
     networks:
       - it-gateway-runtime-network
 
+  # Outbound mTLS test backends: each
+  # requires a client certificate signed by its own trusted authority and
+  # echoes the presented client subject back in X-Client-Subject.
+  mtls-backend-a:
+    image: nginx:1.25
+    container_name: it-mtls-backend-a
+    volumes:
+      - ./mock-api/mtls-backend-a.conf:/etc/nginx/nginx.conf:ro
+      - ./resources/mtls-pki:/etc/mtls-pki:ro
+    networks:
+      - it-gateway-runtime-network
+
+  mtls-backend-b:
+    image: nginx:1.25
+    container_name: it-mtls-backend-b
+    volumes:
+      - ./mock-api/mtls-backend-b.conf:/etc/nginx/nginx.conf:ro
+      - ./resources/mtls-pki:/etc/mtls-pki:ro
+    networks:
+      - it-gateway-runtime-network
+
+  mtls-backend-wronghost:
+    image: nginx:1.25
+    container_name: it-mtls-backend-wronghost
+    volumes:
+      - ./mock-api/mtls-backend-wronghost.conf:/etc/nginx/nginx.conf:ro
+      - ./resources/mtls-pki:/etc/mtls-pki:ro
+    networks:
+      - it-gateway-runtime-network
+
   # Mock Azure Content Safety for content moderation policy testing
   mock-azure-content-safety:
     container_name: it-mock-azure-content-safety

@@ -108,7 +108,7 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^the certificate fixture "([^"]*)" is pooled as "([^"]*)" with usage "([^"]*)"$`, m.pooledFixtureWithUsage)
 	ctx.Step(`^the certificate fixture "([^"]*)" is pooled as "([^"]*)"$`, m.pooledFixtureNoUsage)
 	ctx.Step(`^I upload to the certificates endpoint the body:$`, m.uploadRawBody)
-	ctx.Step(`^I upload a certificate body of (\d+) megabytes as "([^"]*)" with usage "([^"]*)"$`, m.uploadOversizedBody)
+	ctx.Step(`^I upload a certificate body a tenth over the upload limit as "([^"]*)" with usage "([^"]*)"$`, m.uploadOversizedBody)
 
 	// Gateway identities: certificates pooled with usage "identity".
 	ctx.Step(`^I upload the gateway identity fixture "([^"]*)" with its chain as "([^"]*)"$`, m.uploadGatewayIdentityFixtureWithChain)

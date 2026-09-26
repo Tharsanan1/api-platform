@@ -268,7 +268,7 @@ Feature: Client certificate authority pool
     And the response should list a validation error for field "role"
 
   Scenario: A body over the size limit is rejected without stating the limit
-    When I upload a certificate body of 2 megabytes as "pool-too-big" with usage "client"
+    When I upload a certificate body a tenth over the upload limit as "pool-too-big" with usage "client"
     Then the response status should be 413
     And the response body should not contain "1048576"
     And the response body should not contain "MiB"

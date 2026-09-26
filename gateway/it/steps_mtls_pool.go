@@ -183,10 +183,18 @@ func (m *mtlsSteps) recordUploadedNameFromJSON(body string) {
 	}
 }
 
-func (m *mtlsSteps) uploadOversizedBody(megabytes int, name, usage string) error {
+// certificateUploadLimitBytes mirrors the controller's default
+// max_certificate_upload_bytes, which the test configuration leaves unset.
+const certificateUploadLimitBytes = 1 << 20
+
+// uploadOversizedBody sends a body a tenth over the upload limit through a
+// client with its own timeout: the controller answers 413 and closes the
+// connection while the body is still being written, and a write that stalls
+// behind that close must fail the scenario rather than hang the suite.
+func (m *mtlsSteps) uploadOversizedBody(name, usage string) error {
 	m.recordUploaded(name)
 
-	payload := strings.Repeat("A", megabytes*1024*1024)
+	payload := strings.Repeat("A", certificateUploadLimitBytes+certificateUploadLimitBytes/10)
 	body := map[string]any{
 		"name":        name,
 		"usage":       usage,
@@ -198,7 +206,8 @@ func (m *mtlsSteps) uploadOversizedBody(megabytes int, name, usage string) error
 	}
 
 	m.httpSteps.SetHeader("Content-Type", "application/json")
-	return m.httpSteps.SendPOSTToService("gateway-controller", "/certificates", &godog.DocString{Content: string(bodyBytes)})
+	client := &http.Client{Timeout: 30 * time.Second}
+	return m.httpSteps.SendToServiceWithClient(client, http.MethodPost, "gateway-controller", "/certificates", bodyBytes)
 }
 
 // deployWithFixtureValues expands {{thumbprint "name"}} markers and deploys

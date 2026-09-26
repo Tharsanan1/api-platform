@@ -517,6 +517,20 @@ func (h *HTTPSteps) sendRequestWithTempHeader(method, url string, body []byte, h
 
 // sendRequest is a helper to send HTTP requests
 func (h *HTTPSteps) sendRequest(method, url string, body []byte) error {
+	return h.sendRequestWith(h.client, method, url, body)
+}
+
+// SendToServiceWithClient sends a request to a named service through client,
+// with the scenario's headers, and records the response like every other step.
+func (h *HTTPSteps) SendToServiceWithClient(client *http.Client, method, serviceName, path string, body []byte) error {
+	baseURL, ok := h.baseURLs[serviceName]
+	if !ok {
+		return fmt.Errorf("unknown service: %s", serviceName)
+	}
+	return h.sendRequestWith(client, method, baseURL+path, body)
+}
+
+func (h *HTTPSteps) sendRequestWith(client *http.Client, method, url string, body []byte) error {
 	var bodyReader io.Reader
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
@@ -544,7 +558,7 @@ func (h *HTTPSteps) sendRequest(method, url string, body []byte) error {
 		}
 	}
 
-	return h.doRequest(h.client, req)
+	return h.doRequest(client, req)
 }
 
 // doRequest sends an already-built request with the given client and records

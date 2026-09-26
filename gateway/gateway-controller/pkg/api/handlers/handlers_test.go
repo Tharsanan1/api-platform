@@ -43,6 +43,7 @@ import (
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/lazyresourcexds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/metrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	policybuilder "github.com/wso2/api-platform/gateway/gateway-controller/pkg/policy"
@@ -746,7 +747,7 @@ func (m *MockStorage) GetCertificate(id string) (*models.StoredCertificate, erro
 			return cert, nil
 		}
 	}
-	return nil, errors.New("certificate not found")
+	return nil, storage.ErrNotFound
 }
 
 func (m *MockStorage) GetCertificateByName(name string) (*models.StoredCertificate, error) {
@@ -1112,6 +1113,19 @@ func (m *MockControlPlaneClient) Close() error {
 	return nil
 }
 
+// newTestLazyResourceManager returns an in-memory lazy-resource manager.
+func newTestLazyResourceManager() *lazyresourcexds.LazyResourceStateManager {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := storage.NewLazyResourceStore(logger)
+	return lazyresourcexds.NewLazyResourceStateManager(store, lazyresourcexds.NewLazyResourceSnapshotManager(store, logger), logger)
+}
+
+// testClientAuthorityPublisher returns a publisher over db that publishes to
+// an in-memory lazy-resource manager.
+func testClientAuthorityPublisher(db storage.Storage) *utils.ClientAuthorityPublisher {
+	return utils.NewClientAuthorityPublisher(db, newTestLazyResourceManager())
+}
+
 // createTestAPIServer creates a minimal test server with dependencies
 func createTestAPIServer() *APIServer {
 	return createTestAPIServerWithDB(NewMockStorage())
@@ -1139,7 +1153,8 @@ func createTestAPIServerWithDB(db storage.Storage) *APIServer {
 	systemCfg := &config.Config{
 		Controller: config.Controller{
 			Server: config.ServerConfig{
-				GatewayID: gatewayID,
+				GatewayID:                 gatewayID,
+				MaxCertificateUploadBytes: 1 << 20,
 			},
 		},
 		Router: config.RouterConfig{
@@ -1166,6 +1181,7 @@ func createTestAPIServerWithDB(db storage.Storage) *APIServer {
 		httpClient:        httpClient,
 		systemConfig:      systemCfg,
 		gatewayID:         gatewayID,
+		clientAuthorities: testClientAuthorityPublisher(db),
 	}
 
 	deploymentService := utils.NewAPIDeploymentService(store, db, nil, validator, routerCfg, hub, gatewayID, nil, httpClient)

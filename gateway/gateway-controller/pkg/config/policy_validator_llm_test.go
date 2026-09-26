@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 )
@@ -155,6 +156,26 @@ func TestPolicyValidator_ValidateLLMProxyPolicies_NonExistentMajorVersion(t *tes
 	errors := validator.ValidateLLMProxyPolicies(cfg)
 	assert.Len(t, errors, 1, "expected one error for a non-existent major version")
 	assert.Contains(t, errors[0].Message, "major version 'v999' not found")
+}
+
+func TestPolicyValidator_MtlsAuthRefusedOutsideRestAPI(t *testing.T) {
+	validator := NewPolicyValidator(ratelimitDefs(), nil)
+
+	llm := &api.LLMProxyConfiguration{Spec: api.LLMProxyConfigData{
+		GlobalPolicies: &[]api.Policy{{Name: MtlsAuthPolicyName, Version: "v1"}},
+	}}
+	errs := validator.ValidateLLMProxyPolicies(llm)
+	require.Len(t, errs, 1)
+	assert.Equal(t, "spec.globalPolicies[0]", errs[0].Field)
+	assert.Equal(t, "mtls-auth is supported on RestApi only", errs[0].Message)
+
+	mcp := &api.MCPProxyConfiguration{Spec: api.MCPProxyConfigData{
+		Policies: &[]api.Policy{{Name: MtlsAuthPolicyName, Version: "v1"}},
+	}}
+	errs = validator.ValidateMCPProxyPolicies(mcp)
+	require.Len(t, errs, 1)
+	assert.Equal(t, "spec.policies[0]", errs[0].Field)
+	assert.Equal(t, "mtls-auth is supported on RestApi only", errs[0].Message)
 }
 
 // paramDefs returns definitions whose "token-based-ratelimit" policy declares a parameter

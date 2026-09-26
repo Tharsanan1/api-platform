@@ -19,6 +19,7 @@
 package xds
 
 import (
+	"fmt"
 	"math"
 	"net/url"
 	"regexp"
@@ -29,15 +30,18 @@ import (
 
 	accesslog "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tracev3 "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
+	extproc "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	otelresourcedetectorsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/tracers/opentelemetry/resource_detectors/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	matcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	metadatav3 "github.com/envoyproxy/go-control-plane/envoy/type/metadata/v3"
 	tracingv3 "github.com/envoyproxy/go-control-plane/envoy/type/tracing/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resource "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,6 +51,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/constants"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/testutil/pki"
 )
 
 func TestResolveUpstreamDefinition_Found(t *testing.T) {
@@ -1323,7 +1328,7 @@ func TestConvertToInterface(t *testing.T) {
 	}
 }
 
-func TestNewTranslator_WithoutCerts(t *testing.T) {
+func TestNewTranslator_WithoutCerts_StoreExistsWithEmptyBundle(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
@@ -1331,7 +1336,8 @@ func TestNewTranslator_WithoutCerts(t *testing.T) {
 	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
 	require.NoError(t, err)
 	assert.NotNil(t, translator)
-	assert.Nil(t, translator.GetCertStore())
+	require.NotNil(t, translator.GetCertStore(), "the certificate store backs SDS and must exist without a custom certs path")
+	assert.Empty(t, translator.GetCertStore().GetCombinedCertificates())
 }
 
 func TestTranslator_ExtractTemplateHandle_NilSourceConfig(t *testing.T) {
@@ -1854,6 +1860,35 @@ func TestTranslator_CreateExtProcFilter(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, filter)
 		assert.Equal(t, constants.ExtProcFilterName, filter.Name)
+	})
+
+	// mtls-auth needs every connection.* attribute; a missing one silently
+	// starves the policy engine of a fact.
+	t.Run("RequestAttributes carries every connection.* fact plus the route name", func(t *testing.T) {
+		routerCfg := testRouterConfig()
+		cfg := testConfig()
+		translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+		require.NoError(t, err)
+
+		filter, err := translator.createExtProcFilter()
+		require.NoError(t, err)
+
+		var extProcConfig extproc.ExternalProcessor
+		require.NoError(t, filter.GetTypedConfig().UnmarshalTo(&extProcConfig))
+
+		want := []string{
+			constants.ExtProcRequestAttributeRouteName,
+			constants.ExtProcRequestAttributeConnectionMTLS,
+			constants.ExtProcRequestAttributeConnectionPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionPeerCertificateDigest,
+			constants.ExtProcRequestAttributeConnectionSubjectPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionURISANPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionDNSSANPeerCertificate,
+			constants.ExtProcRequestAttributeConnectionTLSVersion,
+			constants.ExtProcRequestAttributeConnectionRequestedServerName,
+			constants.ExtProcRequestAttributeConnectionPeerCertificateValid,
+		}
+		assert.ElementsMatch(t, want, extProcConfig.RequestAttributes)
 	})
 }
 
@@ -2722,6 +2757,151 @@ func TestTranslator_CreateUpstreamTLSContext(t *testing.T) {
 	assert.Equal(t, "secure.example.com", tlsContextWithCert.Sni)
 }
 
+// ============================================================================
+// Outbound mTLS: gateway identity + per-upstream trust
+// ============================================================================
+
+// assertNoInlineBytesAnywhere asserts no DataSource in the TLS context is
+// inline bytes: identity and trust material must arrive via SDS.
+func assertNoInlineBytesAnywhere(t *testing.T, tlsCtx *tlsv3.UpstreamTlsContext) {
+	t.Helper()
+	common := tlsCtx.GetCommonTlsContext()
+	for _, tc := range common.GetTlsCertificates() {
+		_, isInline := tc.GetCertificateChain().GetSpecifier().(*core.DataSource_InlineBytes)
+		assert.False(t, isInline, "TlsCertificates must never carry inline_bytes")
+	}
+	if vc := common.GetValidationContext(); vc != nil {
+		_, isInline := vc.GetTrustedCa().GetSpecifier().(*core.DataSource_InlineBytes)
+		assert.False(t, isInline, "ValidationContext.TrustedCa must never carry inline_bytes when a tls block is configured")
+	}
+	if combined := common.GetCombinedValidationContext(); combined != nil {
+		_, isInline := combined.GetDefaultValidationContext().GetTrustedCa().GetSpecifier().(*core.DataSource_InlineBytes)
+		assert.False(t, isInline, "CombinedValidationContext.DefaultValidationContext.TrustedCa must never carry inline_bytes")
+	}
+}
+
+func TestTranslator_CreateUpstreamTLSContext_IdentityAndTrust_VerifyHostNameTrue(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.Upstream.TLS.DisableSslVerification = false // the SAN-matching/validation-context branch is gated on this
+	cfg := testConfig()
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
+
+	tlsOpts := &models.UpstreamTLS{
+		HasTLSBlock:    true,
+		IdentityName:   "out-identity-a",
+		TrustedCANames: []string{"out-backend-ca"},
+		VerifyHostName: true,
+	}
+	validationSecretName := UpstreamCAValidationContextSecretName("out-partner-api", "partner-a")
+
+	tlsCtx, err := translator.createUpstreamTLSContext(nil, "mtls-backend-a", tlsOpts, validationSecretName)
+	require.NoError(t, err)
+	require.NotNil(t, tlsCtx)
+
+	assert.Equal(t, "mtls-backend-a", tlsCtx.Sni, "SNI must be set to the target host")
+
+	// Identity presented via SDS, named gateway_identity:<name>.
+	sdsConfigs := tlsCtx.CommonTlsContext.GetTlsCertificateSdsSecretConfigs()
+	require.Len(t, sdsConfigs, 1)
+	assert.Equal(t, GatewayIdentitySecretName("out-identity-a"), sdsConfigs[0].GetName())
+
+	// Per-upstream trust via the CombinedValidationContext's SDS secret,
+	// named upstream_ca:<handle>:<definition>.
+	combined := tlsCtx.CommonTlsContext.GetCombinedValidationContext()
+	require.NotNil(t, combined)
+	assert.Equal(t, validationSecretName, combined.GetValidationContextSdsSecretConfig().GetName())
+
+	// verifyHostName true -> a DNS SAN matcher on the target host.
+	sanMatchers := combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()
+	require.Len(t, sanMatchers, 1)
+	assert.Equal(t, tlsv3.SubjectAltNameMatcher_DNS, sanMatchers[0].GetSanType())
+	assert.Equal(t, "mtls-backend-a", sanMatchers[0].GetMatcher().GetExact())
+
+	assertNoInlineBytesAnywhere(t, tlsCtx)
+}
+
+// An IP-literal target gets an IP_ADDRESS SAN matcher and no SNI.
+func TestTranslator_CreateUpstreamTLSContext_IPAddressTarget_UsesIPMatcher(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.Upstream.TLS.DisableSslVerification = false
+	cfg := testConfig()
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
+	// A cert store gives the context a validation context to hold the matcher.
+	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
+
+	tlsOpts := &models.UpstreamTLS{HasTLSBlock: true, VerifyHostName: true, TrustedCANames: []string{"partner-ca"}}
+	tlsCtx, err := translator.createUpstreamTLSContext(nil, "10.0.0.5", tlsOpts, "upstream_ca:test:partner")
+	require.NoError(t, err)
+
+	assert.Empty(t, tlsCtx.Sni, "SNI is not meaningful for an IP-literal target")
+	combined := tlsCtx.CommonTlsContext.GetCombinedValidationContext()
+	sanMatchers := combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()
+	require.Len(t, sanMatchers, 1)
+	assert.Equal(t, tlsv3.SubjectAltNameMatcher_IP_ADDRESS, sanMatchers[0].GetSanType())
+}
+
+// Only a tls block that sets identity or trustedCAs yields a secret ref.
+func TestTranslator_CollectUpstreamTLSSecretRefs(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	cfg := testConfig()
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
+
+	rdc := &models.RuntimeDeployConfig{
+		Metadata: models.Metadata{Handle: "out-partner-api"},
+		UpstreamClusters: map[string]*models.UpstreamCluster{
+			"with-tls": {
+				Name: "partner-a",
+				TLS: &models.UpstreamTLS{
+					Enabled: true, HasTLSBlock: true,
+					IdentityName: "out-identity-a", TrustedCANames: []string{"out-backend-ca"}, VerifyHostName: true,
+				},
+			},
+			"no-tls-block": {
+				Name: "partner-b",
+				TLS:  &models.UpstreamTLS{Enabled: true, HasTLSBlock: false},
+			},
+			"nil-tls": {
+				Name: "partner-c",
+			},
+			"empty-tls-block": {
+				Name: "partner-d",
+				TLS:  &models.UpstreamTLS{Enabled: true, HasTLSBlock: true}, // tls: {} — no identity, no trustedCAs
+			},
+		},
+	}
+
+	translator.collectUpstreamTLSSecretRefs(rdc)
+	refs := translator.GetUpstreamTLSSecretRefs()
+
+	require.Len(t, refs, 1, "only the definition with an actual identity/trustedCAs should produce a ref, got %+v", refs)
+	assert.Equal(t, "out-identity-a", refs[0].IdentityName)
+	assert.Equal(t, "out-partner-api", refs[0].APIHandle)
+	assert.Equal(t, "partner-a", refs[0].DefinitionName)
+	assert.Equal(t, []string{"out-backend-ca"}, refs[0].TrustedCANames)
+}
+
+// A certificate store load failure is returned as an error with no
+// Translator.
+func TestNewTranslator_CertStoreInitFailure_SurfacesAsError(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.Upstream.TLS.CustomCertsPath = t.TempDir()
+	routerCfg.Upstream.TLS.TrustedCertPath = "" // no system-cert fallback either
+	cfg := testConfig()
+
+	db := &fakeSDSStorage{listErr: fmt.Errorf("boom")}
+	translator, err := NewTranslator(logger, routerCfg, db, cfg)
+
+	require.Error(t, err)
+	assert.Nil(t, translator, "no translator should be returned alongside a construction error")
+}
+
 func TestTranslator_ResolveUpstreamCluster_SimpleURL(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
@@ -2850,7 +3030,8 @@ func TestTranslator_CreateListener_PerConnectionBufferLimitBytes(t *testing.T) {
 	assert.Equal(t, uint32(2097152), listener.GetPerConnectionBufferLimitBytes().GetValue())
 }
 
-func TestTranslator_CreateDownstreamTLSContext_NoCert(t *testing.T) {
+// The listener certificate is referenced via SDS and never inlined.
+func TestTranslator_CreateDownstreamTLSContext_ListenerCertViaSDS(t *testing.T) {
 	logger := createTestLogger()
 	routerCfg := testRouterConfig()
 	cfg := testConfig()
@@ -3490,4 +3671,344 @@ func TestTranslateRuntimeConfig_PeerHostnameOnEveryEndpoint(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 4, checked, "expected to have checked all 4 endpoints across both clusters (1 + 3)")
+}
+
+// makeRestAPIWithOperationLevelMTLSAuth is makeRestAPI with mtls-auth on its
+// one operation.
+func makeRestAPIWithOperationLevelMTLSAuth(uuid, name, ctx string) *models.StoredConfig {
+	cfg := api.RestAPI{
+		Kind:     api.RestAPIKindRestApi,
+		Metadata: api.Metadata{Name: name},
+		Spec: api.APIConfigData{
+			DisplayName: name,
+			Version:     "v1.0",
+			Context:     ctx,
+			Upstream: struct {
+				Main    api.Upstream  `json:"main" yaml:"main"`
+				Sandbox *api.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+			}{
+				Main: api.Upstream{Url: api.Ptr("http://backend:8080")},
+			},
+			Operations: []api.Operation{
+				{
+					Method: api.Ptr(api.OperationMethodGET),
+					Path:   api.Ptr("/resource"),
+					Policies: &[]api.Policy{
+						{Name: "mtls-auth", Version: "v1"},
+					},
+				},
+			},
+		},
+	}
+	return &models.StoredConfig{
+		UUID:                uuid,
+		Kind:                models.KindRestApi,
+		Handle:              name,
+		DisplayName:         name,
+		Version:             "v1.0",
+		DesiredState:        models.StateDeployed,
+		Configuration:       cfg,
+		SourceConfiguration: cfg,
+	}
+}
+
+func findListenerByPort(t *testing.T, resources []types.Resource, port int) *listener.Listener {
+	t.Helper()
+	for _, res := range resources {
+		l, ok := res.(*listener.Listener)
+		if !ok {
+			continue
+		}
+		if l.GetAddress().GetSocketAddress().GetPortValue() == uint32(port) {
+			return l
+		}
+	}
+	t.Fatalf("no listener found bound to port %d", port)
+	return nil
+}
+
+func extractDownstreamTLSContext(t *testing.T, l *listener.Listener) *tlsv3.DownstreamTlsContext {
+	t.Helper()
+	require.Len(t, l.FilterChains, 1)
+	typedConfig := l.FilterChains[0].GetTransportSocket().GetTypedConfig()
+	require.NotNil(t, typedConfig, "listener %q has no transport socket configured", l.GetName())
+	var tlsCtx tlsv3.DownstreamTlsContext
+	require.NoError(t, typedConfig.UnmarshalTo(&tlsCtx))
+	return &tlsCtx
+}
+
+// An API with operation-level mtls-auth and a non-empty client-CA pool make
+// the HTTPS listener request a client certificate against that pool.
+func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClientCA(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.HTTPSEnabled = true
+	routerCfg.HTTPSPort = 8443
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	clientCA := pki.NewRootCA(t, "Listener Client CA")
+	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
+		{UUID: "client-1", Name: "client-ca", Certificate: clientCA.PEM(), Usage: models.CertificateUsageClient},
+	}}
+	translator, err := NewTranslator(logger, routerCfg, db, cfg)
+	require.NoError(t, err)
+
+	configs := []*models.StoredConfig{makeRestAPIWithOperationLevelMTLSAuth("uuid-mtls-1", "mtls-api", "/mtls-api")}
+	resources, err := translator.TranslateConfigs(configs, "test-correlation-id")
+	require.NoError(t, err)
+
+	httpsListener := findListenerByPort(t, resources[resource.ListenerType], routerCfg.HTTPSPort)
+	tlsCtx := extractDownstreamTLSContext(t, httpsListener)
+
+	require.NotNil(t, tlsCtx.CommonTlsContext.GetValidationContextSdsSecretConfig())
+	assert.Equal(t, SecretNameDownstreamClientCA, tlsCtx.CommonTlsContext.GetValidationContextSdsSecretConfig().GetName())
+	require.NotNil(t, tlsCtx.RequireClientCertificate)
+	assert.False(t, tlsCtx.RequireClientCertificate.GetValue())
+}
+
+// With mtls-auth attached but an empty client-CA pool, the HTTPS listener
+// names no downstream_client_ca secret, so it never waits on a secret that is
+// not served; mtls-auth then denies for lack of a certificate.
+func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_EmptyPool_NoClientCA(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.HTTPSEnabled = true
+	routerCfg.HTTPSPort = 8443
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	upstreamCA := pki.NewRootCA(t, "Listener Upstream CA")
+	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
+		{UUID: "upstream-1", Name: "upstream-ca", Certificate: upstreamCA.PEM(), Usage: models.CertificateUsageUpstream},
+	}}
+	translator, err := NewTranslator(logger, routerCfg, db, cfg)
+	require.NoError(t, err)
+
+	configs := []*models.StoredConfig{makeRestAPIWithOperationLevelMTLSAuth("uuid-mtls-1", "mtls-api", "/mtls-api")}
+	resources, err := translator.TranslateConfigs(configs, "test-correlation-id")
+	require.NoError(t, err)
+
+	httpsListener := findListenerByPort(t, resources[resource.ListenerType], routerCfg.HTTPSPort)
+	tlsCtx := extractDownstreamTLSContext(t, httpsListener)
+
+	assert.Nil(t, tlsCtx.CommonTlsContext.GetValidationContextType())
+	assert.Nil(t, tlsCtx.RequireClientCertificate)
+	assert.False(t, SnapshotReferencesSDSSecret(nil, []types.Resource{httpsListener}, SecretNameDownstreamClientCA))
+}
+
+// With no mtls-auth deployed, the HTTPS listener carries no client-CA
+// validation context.
+func TestTranslator_TranslateConfigs_HTTPSListener_NoMTLSAuth_NoClientCA(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.HTTPSEnabled = true
+	routerCfg.HTTPSPort = 8443
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
+
+	configs := []*models.StoredConfig{makeRestAPI("uuid-plain-1", "plain-api", "/plain-api")}
+	resources, err := translator.TranslateConfigs(configs, "test-correlation-id")
+	require.NoError(t, err)
+
+	httpsListener := findListenerByPort(t, resources[resource.ListenerType], routerCfg.HTTPSPort)
+	tlsCtx := extractDownstreamTLSContext(t, httpsListener)
+
+	assert.Nil(t, tlsCtx.CommonTlsContext.GetValidationContextType())
+	assert.Nil(t, tlsCtx.RequireClientCertificate)
+}
+
+// TestSnapshotReferencesSDSSecret covers listener validation context,
+// listener certificate and cluster trust references, and an unreferenced
+// name.
+func TestSnapshotReferencesSDSSecret(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	routerCfg.HTTPSEnabled = true
+	routerCfg.HTTPSPort = 8443
+	routerCfg.Upstream.TLS.DisableSslVerification = false
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
+	// A non-nil cert store is all the SDS path needs.
+	translator.certStore = certstore.NewCertStore(logger, nil, "", "")
+
+	httpsListener, _, err := translator.createListener(nil, true, true)
+	require.NoError(t, err)
+	listeners := []types.Resource{httpsListener}
+
+	weightedCluster, err := translator.createWeightedCluster(
+		"upstream-cluster",
+		[]models.Endpoint{{Host: "backend.example.com", Port: 8443}},
+		&models.UpstreamTLS{Enabled: true},
+		nil,
+		"",
+	)
+	require.NoError(t, err)
+	clusters := []types.Resource{weightedCluster}
+
+	assert.True(t, SnapshotReferencesSDSSecret(nil, listeners, SecretNameDownstreamClientCA),
+		"a listener's ValidationContextSdsSecretConfig must be recognised")
+	assert.True(t, SnapshotReferencesSDSSecret(nil, listeners, SecretNameDownstreamListenerCert),
+		"a listener's TlsCertificateSdsSecretConfigs entry must be recognised")
+	assert.True(t, SnapshotReferencesSDSSecret(clusters, nil, SecretNameUpstreamCA),
+		"a cluster's CombinedValidationContext must be recognised")
+	assert.False(t, SnapshotReferencesSDSSecret(clusters, listeners, "some-unreferenced-secret"),
+		"a secret name referenced by nothing in the snapshot must report false")
+}
+
+// The HCM uses SANITIZE_SET, so a forged x-forwarded-client-cert never
+// survives, and sets every SetCurrentClientCertDetails flag.
+func TestTranslator_CreateListener_ForwardClientCertDetails(t *testing.T) {
+	logger := createTestLogger()
+	routerCfg := testRouterConfig()
+	cfg := testConfig()
+	cfg.Router = *routerCfg
+	translator, err := NewTranslator(logger, routerCfg, nil, cfg)
+	require.NoError(t, err)
+
+	lis, _, err := translator.createListener(nil, false, false)
+	require.NoError(t, err)
+
+	manager := extractHCM(t, lis)
+	assert.Equal(t, hcm.HttpConnectionManager_SANITIZE_SET, manager.GetForwardClientCertDetails())
+
+	details := manager.GetSetCurrentClientCertDetails()
+	require.NotNil(t, details, "set_current_client_cert_details must be explicitly configured")
+	require.NotNil(t, details.GetSubject(), "subject must be explicitly set (not left as an unset wrapper)")
+	assert.True(t, details.GetSubject().GetValue())
+	assert.True(t, details.GetCert())
+	assert.True(t, details.GetChain())
+	assert.True(t, details.GetUri())
+	assert.True(t, details.GetDns())
+}
+
+// A route without mtls-auth strips x-forwarded-client-cert before its
+// backend; a route with it keeps the header.
+func TestTranslator_CreateRouteFromRDC_StripsXFCCHeader_UnlessChainAttachesMTLSAuth(t *testing.T) {
+	translator := createTestTranslator()
+
+	// Hand-built because importing the transform package here would be an
+	// import cycle.
+	rdc := &models.RuntimeDeployConfig{
+		Metadata: models.Metadata{UUID: "u", Kind: "RestApi"},
+		Routes: map[string]*models.Route{
+			"plain-route": {
+				Method: "GET", Path: "/plain-api/resource", OperationPath: "/resource",
+				Upstream: models.RouteUpstream{ClusterKey: "backend"},
+			},
+			"mtls-route": {
+				Method: "GET", Path: "/mtls-api/resource", OperationPath: "/resource",
+				Upstream: models.RouteUpstream{ClusterKey: "backend"},
+			},
+		},
+		PolicyChains: map[string]*models.PolicyChain{
+			"mtls-route": {Policies: []models.Policy{{Name: "mtls-auth", Version: "v1.0.0"}}},
+			// "plain-route" has no chain at all.
+		},
+		UpstreamClusters: map[string]*models.UpstreamCluster{
+			"backend": {BasePath: "/", Endpoints: []models.Endpoint{{Host: "backend.example.com", Port: 8080}}},
+		},
+	}
+
+	routes, _, err := translator.translateRuntimeConfig(rdc)
+	require.NoError(t, err)
+
+	var plainRoute, mtlsRoute *route.Route
+	for _, r := range routes {
+		switch r.GetName() {
+		case "plain-route":
+			plainRoute = r
+		case "mtls-route":
+			mtlsRoute = r
+		}
+	}
+	require.NotNil(t, plainRoute, "expected to find the plain (no mtls-auth) route")
+	require.NotNil(t, mtlsRoute, "expected to find the mtls-auth route")
+
+	assert.Contains(t, plainRoute.RequestHeadersToRemove, xfccHeaderName,
+		"a route whose chain lacks mtls-auth must strip x-forwarded-client-cert before its backend")
+	assert.NotContains(t, mtlsRoute.RequestHeadersToRemove, xfccHeaderName,
+		"a route whose chain attaches mtls-auth must not strip x-forwarded-client-cert")
+}
+
+// mtlsHeaderStrippingRDC builds a plain route and an mtls-auth route.
+func mtlsHeaderStrippingRDC() *models.RuntimeDeployConfig {
+	return &models.RuntimeDeployConfig{
+		Metadata: models.Metadata{UUID: "u", Kind: "RestApi"},
+		Routes: map[string]*models.Route{
+			"plain-route": {
+				Method: "GET", Path: "/plain-api/resource", OperationPath: "/resource",
+				Upstream: models.RouteUpstream{ClusterKey: "backend"},
+			},
+			"mtls-route": {
+				Method: "GET", Path: "/mtls-api/resource", OperationPath: "/resource",
+				Upstream: models.RouteUpstream{ClusterKey: "backend"},
+			},
+		},
+		PolicyChains: map[string]*models.PolicyChain{
+			"mtls-route": {Policies: []models.Policy{{Name: "mtls-auth", Version: "v1.0.0"}}},
+		},
+		UpstreamClusters: map[string]*models.UpstreamCluster{
+			"backend": {BasePath: "/", Endpoints: []models.Endpoint{{Host: "backend.example.com", Port: 8080}}},
+		},
+	}
+}
+
+func findRoutesByName(t *testing.T, routes []*route.Route) (plainRoute, mtlsRoute *route.Route) {
+	t.Helper()
+	for _, r := range routes {
+		switch r.GetName() {
+		case "plain-route":
+			plainRoute = r
+		case "mtls-route":
+			mtlsRoute = r
+		}
+	}
+	require.NotNil(t, plainRoute, "expected to find the plain (no mtls-auth) route")
+	require.NotNil(t, mtlsRoute, "expected to find the mtls-auth route")
+	return plainRoute, mtlsRoute
+}
+
+// A route without mtls-auth always strips the relayed header, whatever
+// forward_to_backend says.
+func TestTranslator_CreateRouteFromRDC_StripsClientCertificateHeader_UnlessBelieved(t *testing.T) {
+
+	t.Run("header name is lower-cased before being added to RequestHeadersToRemove", func(t *testing.T) {
+		translator := createTestTranslator()
+		translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{
+			Name:             "X-Amzn-Mtls-Clientcert",
+			ForwardToBackend: false,
+		}
+
+		routes, _, err := translator.translateRuntimeConfig(mtlsHeaderStrippingRDC())
+		require.NoError(t, err)
+		plainRoute, _ := findRoutesByName(t, routes)
+
+		assert.Contains(t, plainRoute.RequestHeadersToRemove, "x-amzn-mtls-clientcert")
+		assert.NotContains(t, plainRoute.RequestHeadersToRemove, "X-Amzn-Mtls-Clientcert",
+			"the configured header name must be lower-cased, not added as-authored")
+	})
+}
+
+// Routes that never carry a policy chain evaluating the client-certificate
+// headers strip both headers before their backend.
+func TestTranslator_RoutesWithoutPolicyChain_StripClientCertificateHeaders(t *testing.T) {
+	translator := createTestTranslator()
+	translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{Name: "X-WSO2-CLIENT-CERTIFICATE"}
+
+	topicRoute := translator.createRoutePerTopic("api-123", "Test API", "v1.0.0", "/test", "POST", "/channel1", "test-cluster", "localhost", "WebSubApi", "project-123")
+	legacyRoute := translator.createRoute(
+		"test-id", "TestAPI", "v1.0", "/weather/v1.0",
+		"GET", "/forecast", "test-cluster", "/",
+		"localhost", "http/rest", "", "", nil, "", nil,
+		false, nil,
+	)
+
+	for name, r := range map[string]*route.Route{"websub topic route": topicRoute, "legacy route": legacyRoute} {
+		require.NotNil(t, r, name)
+		assert.Contains(t, r.RequestHeadersToRemove, xfccHeaderName, "%s must strip the forwarded-certificate header", name)
+		assert.Contains(t, r.RequestHeadersToRemove, "x-wso2-client-certificate", "%s must strip the relayed-certificate header", name)
+	}
 }

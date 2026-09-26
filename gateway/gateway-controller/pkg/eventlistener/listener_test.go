@@ -344,7 +344,7 @@ func TestHandleEvent_AcceptsKnownTypesAndUnknown(t *testing.T) {
 	})
 
 	logs := logBuf.String()
-	assert.Contains(t, logs, "Certificate event received")
+	assert.Contains(t, logs, "Unknown certificate event action")
 	assert.Contains(t, logs, "Successfully processed application replica sync event")
 	assert.Contains(t, logs, "Unknown LLM template event action")
 	assert.Contains(t, logs, "Unknown event type received")

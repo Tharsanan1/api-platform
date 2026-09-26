@@ -167,6 +167,18 @@ gateway/gateway-controller/target/
 gateway/gateway-builder/target/
 event-gateway/gateway-runtime/target/
 dev-policies/
+# mtls-auth is a feature-branch exception: it must be committed (unlike the
+# usual dev-policies/ scratch convention) so the mtls-listener gateway
+# integration tests can build it — see gateway/dev-policies/README.md and
+# gateway/build.yaml's filePath entry. Every ancestor of the exempted path
+# must itself be un-ignored — git will not descend into an excluded
+# directory to evaluate a deeper negation (gitignore(5): "It is not possible
+# to re-include a file if a parent directory of that file is excluded").
+!gateway/dev-policies/
+gateway/dev-policies/*
+!gateway/dev-policies/README.md
+!gateway/dev-policies/mtls-auth/
+!gateway/dev-policies/mtls-auth/**
 
 # Copilot Prompts
 .github/prompts

@@ -52,6 +52,7 @@ func RegisterHealthSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps
 	ctx.Step(`^I wait for the endpoint "([^"]*)" to be ready$`, h.iWaitForEndpointToBeReady)
 	ctx.Step(`^I wait for the endpoint "([^"]*)" to be ready with host "([^"]*)"$`, h.iWaitForEndpointToBeReadyWithHost)
 	ctx.Step(`^I wait for the endpoint "([^"]*)" to be ready with method "([^"]*)" and body '([^']*)'$`, h.iWaitForEndpointToBeReadyWithMethodAndBody)
+	ctx.Step(`^I wait for the endpoint "([^"]*)" to respond with status (\d+)$`, h.iWaitForEndpointToReturnStatus)
 	ctx.Step(`^I wait for the endpoint "([^"]*)" to return 403$`, h.iWaitForEndpointToReturn403)
 }
 
@@ -171,7 +172,7 @@ func (h *HealthSteps) iWaitForEndpointToBeReady(url string) error {
 		resp, err := h.state.HTTPClient.Get(url)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
-			return h.waitForPolicySnapshotSync()
+			return h.settleAfterEndpointResponds()
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -204,7 +205,7 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithHost(url, host string) error 
 		resp, err := h.state.HTTPClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
-			return h.waitForPolicySnapshotSync()
+			return h.settleAfterEndpointResponds()
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -218,6 +219,31 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithHost(url, host string) error 
 	return fmt.Errorf("endpoint %s with host %s did not become ready after %d attempts", url, trimmedHost, maxAttempts)
 }
 
+// iWaitForEndpointToReturnStatus polls an endpoint until it returns the given status
+// (e.g. a route protected by an authentication policy answering 401 to an anonymous
+// request), then waits for the policy snapshot to be in sync.
+func (h *HealthSteps) iWaitForEndpointToReturnStatus(url string, status int) error {
+	maxAttempts := 30
+	attemptInterval := 300 * time.Millisecond
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err := h.state.HTTPClient.Get(url)
+		if err == nil && resp.StatusCode == status {
+			resp.Body.Close()
+			return h.settleAfterEndpointResponds()
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+
+		if attempt < maxAttempts {
+			time.Sleep(attemptInterval)
+		}
+	}
+
+	return fmt.Errorf("endpoint %s did not respond with status %d after %d attempts", url, status, maxAttempts)
+}
+
 // iWaitForEndpointToReturn403 polls an endpoint until it returns 403 (e.g. subscription-protected route blocking unauthenticated requests)
 func (h *HealthSteps) iWaitForEndpointToReturn403(url string) error {
 	maxAttempts := 30
@@ -227,7 +253,7 @@ func (h *HealthSteps) iWaitForEndpointToReturn403(url string) error {
 		resp, err := h.state.HTTPClient.Get(url)
 		if err == nil && resp.StatusCode == http.StatusForbidden {
 			resp.Body.Close()
-			return h.waitForPolicySnapshotSync()
+			return h.settleAfterEndpointResponds()
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -257,7 +283,7 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithMethodAndBody(url, method, bo
 		resp, err := h.state.HTTPClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
-			return h.waitForPolicySnapshotSync()
+			return h.settleAfterEndpointResponds()
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -269,6 +295,24 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithMethodAndBody(url, method, bo
 	}
 
 	return fmt.Errorf("endpoint %s did not become ready with %s method after %d attempts", url, method, maxAttempts)
+}
+
+// settleAfterEndpointResponds runs once a polled endpoint has answered as
+// expected. It waits for the policy snapshot to sync and, when this scenario
+// changed the client authority pool, for the gateway to apply the pool. The
+// pending propagation the endpoint just observed is then released, so the
+// next gateway request does not wait for it again.
+func (h *HealthSteps) settleAfterEndpointResponds() error {
+	if err := h.waitForPolicySnapshotSync(); err != nil {
+		return err
+	}
+	if clientAuthorityPoolChanged(h.state) {
+		if err := waitForClientAuthorityPool(h.state); err != nil {
+			return err
+		}
+	}
+	releaseObservedPropagation(h.state)
+	return nil
 }
 
 func (h *HealthSteps) waitForPolicySnapshotSync() error {

@@ -72,6 +72,7 @@ import CustomPoliciesList from './pages/appShell/appShellPages/gateways/CustomPo
 import OrgRegisterPage from './pages/register/OrgRegisterPage';
 import Insights from './pages/appShell/appShellPages/insights/Main';
 import QuickStart from './pages/appShell/appShellPages/quickStart/Main';
+import QuickStartWizard from './pages/appShell/appShellPages/quickStartWizard/Main';
 import Settings, { SettingsIndexRedirect } from './pages/appShell/appShellPages/settings/Main';
 import ProviderTemplatesList from './pages/appShell/appShellPages/providerTemplate/ProviderTemplatesList';
 import ExternalServersList from './pages/appShell/appShellPages/externalServers/ExternalServersList';
@@ -80,9 +81,13 @@ import ExternalServersOverview from './pages/appShell/appShellPages/externalServ
 import ExternalServersDeploy from './pages/appShell/appShellPages/externalServers/ExternalServersDeploy';
 import EditExternalServer from './pages/appShell/appShellPages/externalServers/EditExternalServer';
 import { MCPServerValidationProvider } from './contexts/MCP';
-import { LLMProvidersProvider } from './contexts/llmProvider';
+import {
+  LLMProvidersProvider,
+  ProviderTemplatesProvider,
+} from './contexts/llmProvider';
+import { GuardrailsProvider } from './contexts/GuardrailsContext';
 import React, { useRef, useState, type ReactNode } from 'react';
-import { ChoreoUserProvider } from './contexts/ChoreoUserContext';
+import { PlatformUserProvider } from './contexts/PlatformUserContext';
 import { useAppAuth } from './contexts/AppAuthContext';
 import { ProductActivation } from './hooks/ProductActivation';
 import { Box, Button, Stack, Typography } from '@wso2/oxygen-ui';
@@ -99,6 +104,7 @@ import {
   AI_WORKSPACE_MCP_DEPLOY_SLOT,
   AI_WORKSPACE_LLM_PROXY_DEPLOY_SLOT,
   AI_WORKSPACE_LLM_PROVIDER_DEPLOY_SLOT,
+  AI_WORKSPACE_QUICKSTART_SLOT,
 } from './extensions';
 import { Hideable, HiddenRegionsProvider, useSlot } from './slots';
 import { usePort } from './hostPort';
@@ -122,12 +128,41 @@ function PublicOnlyRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * Shown when the BFF is up and the session is valid, but it cannot currently mint
+ * the token it forwards upstream. Deliberately not the login page: the session is
+ * not the problem, and signing in again runs the very same exchange in the OIDC
+ * callback, so it would fail identically and look like a broken login instead of a
+ * temporary outage. The provider retries on its own; this button is the impatient path.
+ */
+function SessionUnavailableScreen({ onRetry }: { onRetry: () => void }) {
+  return (
+    <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', p: 3 }}>
+      <Stack spacing={2} alignItems="center" sx={{ maxWidth: 420, textAlign: 'center' }}>
+        <Typography variant="h6">Signing you in is temporarily unavailable</Typography>
+        <Typography variant="body2" color="text.secondary">
+          Your session is still valid. We could not reach the identity provider just
+          now, so this will resolve on its own — retrying shortly.
+        </Typography>
+        <Button variant="outlined" size="small" onClick={onRetry}>Retry now</Button>
+      </Stack>
+    </Box>
+  );
+}
+
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isLoading } = useAppAuth();
+  const { isAuthenticated, isLoading, sessionUnavailable, refreshSession } = useAppAuth();
   const location = useLocation();
 
   if (isLoading) {
     return null;
+  }
+
+  // Checked before the redirect below, and that order is the whole point: a 502
+  // leaves `isAuthenticated` false because nothing could be hydrated, so falling
+  // through would bounce a live session to /login over a transient IDP blip.
+  if (sessionUnavailable && !isAuthenticated) {
+    return <SessionUnavailableScreen onRetry={() => { void refreshSession(); }} />;
   }
 
   if (!isAuthenticated) {
@@ -333,6 +368,22 @@ function InsightsRoute() {
   );
 }
 
+// The first-run onboarding wizard, mounted full-screen (outside the app shell —
+// see appShellMain.tsx) at organizations/:orgSlug/quickstart. Same Slot/Hideable
+// split as the page overrides above; the built-in wizard is what a plain build
+// gets, and a deployment that wants its own onboarding registers against
+// AI_WORKSPACE_QUICKSTART_SLOT.
+function QuickStartWizardRoute() {
+  const port = usePort();
+  const [override] = useSlot<AIWorkspacePageOverride>(AI_WORKSPACE_QUICKSTART_SLOT);
+  if (override) return <>{override.render(port)}</>;
+  return (
+    <Hideable name={AI_WORKSPACE_QUICKSTART_SLOT}>
+      <QuickStartWizard />
+    </Hideable>
+  );
+}
+
 // The per-artifact Deploy pages follow the same Slot/Hideable split as
 // GatewaysRoute, with one difference: the replacement needs to know WHICH artifact
 // it is deploying, and only the route knows that. The handle is read here and
@@ -398,7 +449,7 @@ function WorkspaceRoutes({ extensions = [] }: AppProps) {
   ));
 
   return (
-    <ChoreoUserProvider>
+    <PlatformUserProvider>
       <Routes>
         {/* OAuth callback — react-oidc-context processes the ?code= param here */}
         <Route path="/signin" element={<SigninCallbackRoute />} />
@@ -648,6 +699,22 @@ function WorkspaceRoutes({ extensions = [] }: AppProps) {
                 <WithPageBoundary>
                   <LLMProvidersProvider>
                     <QuickStart />
+                  </LLMProvidersProvider>
+                </WithPageBoundary>
+              }
+            />
+            {/* Full-screen first-run onboarding. Organization-scoped only: the
+                wizard picks the project itself when it creates an MCP server. */}
+            <Route
+              path="quickstart"
+              element={
+                <WithPageBoundary>
+                  <LLMProvidersProvider>
+                    <ProviderTemplatesProvider>
+                      <GuardrailsProvider>
+                        <QuickStartWizardRoute />
+                      </GuardrailsProvider>
+                    </ProviderTemplatesProvider>
                   </LLMProvidersProvider>
                 </WithPageBoundary>
               }
@@ -932,7 +999,7 @@ function WorkspaceRoutes({ extensions = [] }: AppProps) {
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </ChoreoUserProvider>
+    </PlatformUserProvider>
   );
 }
 

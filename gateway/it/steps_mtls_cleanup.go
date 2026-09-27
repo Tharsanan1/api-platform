@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -78,6 +80,92 @@ func (m *mtlsSteps) waitForDeletedConfigsToLeaveController(names []string) {
 		}
 		time.Sleep(cleanupReferencePollInterval)
 	}
+}
+
+// deletedRouteTimeout bounds, per API, the wait for a deleted API's route to
+// leave the gateway's plain HTTP listener.
+const deletedRouteTimeout = 10 * time.Second
+
+// pathParamPattern matches a {param} segment of an operation path.
+var pathParamPattern = regexp.MustCompile(`\{[^}/]*\}`)
+
+// apiRoute is one operation of a deployed API as the router serves it on the
+// plain HTTP listener.
+type apiRoute struct {
+	api    string
+	method string
+	url    string
+}
+
+// scenarioAPIRoutes reads from the controller the first operation of each
+// API this scenario deployed. An API the controller does not hold, or one
+// without operations, is skipped.
+func scenarioAPIRoutes(state *TestState) []apiRoute {
+	raw, ok := state.GetContextValue(deployedAPINamesContextKey)
+	if !ok {
+		return nil
+	}
+	names, _ := raw.([]string)
+	admin, ok := state.Config.Users["admin"]
+	if !ok {
+		return nil
+	}
+	var routes []apiRoute
+	for _, name := range names {
+		req, err := http.NewRequest(http.MethodGet, state.Config.GatewayControllerURL+"/rest-apis/"+name, nil)
+		if err != nil {
+			continue
+		}
+		req.SetBasicAuth(admin.Username, admin.Password)
+		req.Header.Set("Accept", "application/json")
+		var api struct {
+			Spec struct {
+				Context    string `json:"context"`
+				Version    string `json:"version"`
+				Operations []struct {
+					Method string `json:"method"`
+					Path   string `json:"path"`
+				} `json:"operations"`
+			} `json:"spec"`
+		}
+		if err := doJSON(state.HTTPClient, req, &api); err != nil || len(api.Spec.Operations) == 0 {
+			continue
+		}
+		op := api.Spec.Operations[0]
+		path := strings.ReplaceAll(api.Spec.Context, "$version", api.Spec.Version) + pathParamPattern.ReplaceAllString(op.Path, "x")
+		routes = append(routes, apiRoute{api: name, method: strings.ToUpper(op.Method), url: state.Config.RouterURL + path})
+	}
+	return routes
+}
+
+// waitForRoutesRemoved waits, up to deletedRouteTimeout per route, until the
+// router answers each route with 404, which it does once the gateway has
+// applied the API's delete.
+func waitForRoutesRemoved(routes []apiRoute) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	for _, r := range routes {
+		deadline := time.Now().Add(deletedRouteTimeout)
+		lastStatus := 0
+		for {
+			req, err := http.NewRequest(r.method, r.url, nil)
+			if err != nil {
+				return fmt.Errorf("probing the route of deleted API %q: %w", r.api, err)
+			}
+			resp, err := client.Do(req)
+			if err == nil {
+				lastStatus = resp.StatusCode
+				resp.Body.Close()
+				if lastStatus == http.StatusNotFound {
+					break
+				}
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("deleted API %q: %s %s still answered %d after %s, expected 404", r.api, r.method, r.url, lastStatus, deletedRouteTimeout)
+			}
+			time.Sleep(cleanupReferencePollInterval * 4)
+		}
+	}
+	return nil
 }
 
 // scenarioConfigNames returns the API and Agent names this scenario deployed.

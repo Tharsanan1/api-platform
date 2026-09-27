@@ -96,9 +96,21 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 		if !scenarioHasTag(sc, "@mtls") {
 			return c, nil
 		}
+		// The next scenario starts from a gateway that has applied every
+		// delete: routes gone, pool converged, no listener warming.
+		routes := scenarioAPIRoutes(m.state)
 		cleanupDeployedAPIs(m.state, m.httpSteps)
 		cleanupDeployedAgents(m.state, m.httpSteps)
+		if err := waitForRoutesRemoved(routes); err != nil {
+			return c, err
+		}
 		m.cleanupTrackedCertificates()
+		if err := waitForClientAuthorityPool(m.state); err != nil {
+			return c, err
+		}
+		if err := waitForEnvoyListenersActive(m.state); err != nil {
+			return c, err
+		}
 		return c, nil
 	})
 

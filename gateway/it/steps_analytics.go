@@ -85,11 +85,33 @@ func RegisterAnalyticsSteps(ctx *godog.ScenarioContext, state *TestState, httpSt
 	return a
 }
 
-// iResetTheAnalyticsCollector resets all events in the mock analytics collector
+// In an @mtls scenario the reset waits for the collector to stay empty this
+// long, since events published up to one interval after the reset belong to
+// earlier requests. The drain gives up after analyticsDrainBound.
+const (
+	analyticsQuietWindow = 2500 * time.Millisecond
+	analyticsDrainBound  = 10 * time.Second
+)
+
+// iResetTheAnalyticsCollector resets all events in the mock analytics
+// collector. In an @mtls scenario it then drains the collector until no event
+// arrives for analyticsQuietWindow.
 func (a *AnalyticsSteps) iResetTheAnalyticsCollector() error {
 	// Clear the last matched event for test isolation
 	a.lastMatchedEvent = nil
 
+	if err := a.clearAnalyticsCollector(); err != nil {
+		return err
+	}
+	if !isMTLSScenario(a.state) {
+		return nil
+	}
+	return a.drainAnalyticsCollector()
+}
+
+// clearAnalyticsCollector removes every event the mock analytics collector
+// holds.
+func (a *AnalyticsSteps) clearAnalyticsCollector() error {
 	url := fmt.Sprintf("http://localhost:8086/test/reset")
 
 	req, err := http.NewRequest("POST", url, nil)
@@ -110,6 +132,52 @@ func (a *AnalyticsSteps) iResetTheAnalyticsCollector() error {
 	}
 
 	return nil
+}
+
+// drainAnalyticsCollector clears every event that arrives until the collector
+// stays empty for analyticsQuietWindow, bounded by analyticsDrainBound.
+func (a *AnalyticsSteps) drainAnalyticsCollector() error {
+	deadline := time.Now().Add(analyticsDrainBound)
+	quietSince := time.Now()
+	for {
+		count, err := a.analyticsEventCount()
+		if err != nil {
+			return err
+		}
+		if count > 0 {
+			if err := a.clearAnalyticsCollector(); err != nil {
+				return err
+			}
+			quietSince = time.Now()
+		} else if time.Since(quietSince) >= analyticsQuietWindow {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the analytics collector did not stay empty for %s within %s of the reset", analyticsQuietWindow, analyticsDrainBound)
+		}
+		time.Sleep(analyticsPollInterval)
+	}
+}
+
+// analyticsEventCount returns how many events the mock analytics collector
+// holds.
+func (a *AnalyticsSteps) analyticsEventCount() (int, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://localhost:8086/test/events/count")
+	if err != nil {
+		return 0, fmt.Errorf("failed to get event count: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("count request failed with status %d", resp.StatusCode)
+	}
+
+	var result map[string]int
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode count response: %w", err)
+	}
+	return result["count"], nil
 }
 
 // iWaitSecondsForAnalytics waits for the specified duration to allow analytics to be published

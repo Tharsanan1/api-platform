@@ -108,7 +108,7 @@ func clientAuthorityPoolMismatch(state *TestState) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if warming {
+	if len(warming) > 0 {
 		return "an Envoy listener is still warming", nil
 	}
 	if !referenced {
@@ -183,27 +183,52 @@ func policyEngineClientAuthorities(state *TestState) (map[string]clientAuthority
 }
 
 // envoyListenerNamesClientCASecret reports whether any active Envoy listener
-// names the downstream client-CA secret, and whether any listener is still
-// warming.
-func envoyListenerNamesClientCASecret(state *TestState) (referenced, warming bool, err error) {
+// names the downstream client-CA secret, and the names of the listeners that
+// are still warming.
+func envoyListenerNamesClientCASecret(state *TestState) (referenced bool, warming []string, err error) {
 	var dump struct {
 		Configs []struct {
+			Name         string          `json:"name"`
 			ActiveState  json.RawMessage `json:"active_state"`
 			WarmingState json.RawMessage `json:"warming_state"`
 		} `json:"configs"`
 	}
 	if err := getJSON(state, envoyAdminURL()+"/config_dump?resource=dynamic_listeners", &dump); err != nil {
-		return false, false, err
+		return false, nil, err
 	}
 	for _, l := range dump.Configs {
 		if len(l.WarmingState) > 0 && string(l.WarmingState) != "null" {
-			warming = true
+			warming = append(warming, l.Name)
 		}
 		if strings.Contains(string(l.ActiveState), `"`+downstreamClientCASecret+`"`) {
 			referenced = true
 		}
 	}
 	return referenced, warming, nil
+}
+
+// waitForEnvoyListenersActive waits until no Envoy listener is warming. While
+// a replacement listener warms, Envoy serves new connections on the previous
+// instance, so a request sent then meets the configuration being replaced.
+func waitForEnvoyListenersActive(state *TestState) error {
+	const (
+		timeout  = 10 * time.Second
+		interval = 100 * time.Millisecond
+	)
+	deadline := time.Now().Add(timeout)
+	for {
+		_, warming, err := envoyListenerNamesClientCASecret(state)
+		if err == nil && len(warming) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("reading Envoy's listeners: %w", err)
+			}
+			return fmt.Errorf("Envoy listeners still warming after %s: %s", timeout, strings.Join(warming, ", "))
+		}
+		time.Sleep(interval)
+	}
 }
 
 // envoyClientCAThumbprints returns the thumbprints of the certificates in

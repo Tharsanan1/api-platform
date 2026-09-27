@@ -85,6 +85,9 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 		m.uploadedNames = nil
 		m.uploadedIdentityNames = nil
 		m.resumingClient = nil
+		if scenarioHasTag(sc, "@mtls") {
+			markMTLSScenario(m.state)
+		}
 		return c, nil
 	})
 	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {

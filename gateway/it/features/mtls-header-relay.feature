@@ -214,13 +214,13 @@ Feature: Client certificates relayed in a header by a front proxy
     Then the response status code should be 200
     When I send a GET request to "https://localhost:8443/relay-lb/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
-    And I wait 5 seconds for analytics to be published
+    And the analytics collector should receive at least 2 events within 10 seconds
     And the analytics collector should have received at least 2 events
     And the latest analytics event should have the user id of fixture "edge-lb"
     Given I reset the analytics collector
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
-    And I wait 5 seconds for analytics to be published
+    And the analytics collector should receive at least 1 event within 10 seconds
     And the latest analytics event should have the user id of fixture "client-valid"
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb"
     Then the response status code should be 401

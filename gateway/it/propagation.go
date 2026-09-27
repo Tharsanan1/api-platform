@@ -19,6 +19,7 @@
 package it
 
 import (
+	"log"
 	"net/http"
 	"time"
 )
@@ -31,6 +32,10 @@ const pendingPropagationContextKey = "pendingPropagation"
 // changed the client authority pool and no step has yet seen the gateway
 // apply the change.
 const clientAuthorityPoolChangedContextKey = "clientAuthorityPoolChanged"
+
+// mtlsScenarioContextKey is set for a scenario tagged @mtls, whose steps
+// wait for Envoy's listeners to become active before sending to the gateway.
+const mtlsScenarioContextKey = "mtlsScenario"
 
 // pendingPropagation records the API mutations the controller accepted that
 // no step has yet seen reach the gateway.
@@ -57,7 +62,9 @@ func currentPendingPropagation(state *TestState) (pendingPropagation, bool) {
 }
 
 // settlePendingPropagation waits until policyPropagationDelay has passed
-// since the last accepted API mutation, then forgets the pending mutations.
+// since the last accepted API mutation and, in an @mtls scenario, until no
+// Envoy listener is warming, then forgets the pending mutations. A listener
+// still warming at the bound is logged and the caller's request goes ahead.
 // With nothing pending it returns at once.
 func settlePendingPropagation(state *TestState) {
 	pending, ok := currentPendingPropagation(state)
@@ -66,6 +73,11 @@ func settlePendingPropagation(state *TestState) {
 	}
 	if remaining := policyPropagationDelay - time.Since(pending.lastAccepted); remaining > 0 {
 		time.Sleep(remaining)
+	}
+	if isMTLSScenario(state) {
+		if err := waitForEnvoyListenersActive(state); err != nil {
+			log.Printf("settling propagation: %v", err)
+		}
 	}
 	state.DeleteContextValue(pendingPropagationContextKey)
 }
@@ -104,4 +116,15 @@ func markClientAuthorityPoolChanged(state *TestState) {
 func clientAuthorityPoolChanged(state *TestState) bool {
 	changed, _ := state.GetContextValue(clientAuthorityPoolChangedContextKey)
 	return changed == true
+}
+
+// markMTLSScenario records that the current scenario is tagged @mtls.
+func markMTLSScenario(state *TestState) {
+	state.SetContextValue(mtlsScenarioContextKey, true)
+}
+
+// isMTLSScenario reports whether the current scenario is tagged @mtls.
+func isMTLSScenario(state *TestState) bool {
+	flag, _ := state.GetContextValue(mtlsScenarioContextKey)
+	return flag == true
 }

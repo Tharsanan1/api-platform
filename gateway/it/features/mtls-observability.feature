@@ -62,8 +62,7 @@ Feature: Seeing what client and backend certificates did
       | thumbprint of "client-valid" |
       | "tlsVer":"TLSv1.3"           |
       | "sni":"localhost"            |
-    And I wait 5 seconds for analytics to be published
-    And the analytics collector should have received at least 1 event
+    And the analytics collector should receive at least 1 event within 10 seconds
     And the latest analytics event should have response status 200
     And the latest analytics event should have the user id of fixture "client-valid"
     And the latest analytics event should have no metadata field "applicationId"

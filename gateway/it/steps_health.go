@@ -299,7 +299,8 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithMethodAndBody(url, method, bo
 
 // settleAfterEndpointResponds runs once a polled endpoint has answered as
 // expected. It waits for the policy snapshot to sync and, when this scenario
-// changed the client authority pool, for the gateway to apply the pool. The
+// changed the client authority pool, for the gateway to apply the pool. In an
+// @mtls scenario it then waits for Envoy's listeners to become active. The
 // pending propagation the endpoint just observed is then released, so the
 // next gateway request does not wait for it again.
 func (h *HealthSteps) settleAfterEndpointResponds() error {
@@ -308,6 +309,11 @@ func (h *HealthSteps) settleAfterEndpointResponds() error {
 	}
 	if clientAuthorityPoolChanged(h.state) {
 		if err := waitForClientAuthorityPool(h.state); err != nil {
+			return err
+		}
+	}
+	if isMTLSScenario(h.state) {
+		if err := waitForEnvoyListenersActive(h.state); err != nil {
 			return err
 		}
 	}

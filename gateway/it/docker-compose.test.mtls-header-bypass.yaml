@@ -17,6 +17,8 @@
 # --------------------------------------------------------------------
 
 # Integration test Docker Compose configuration for Gateway Runtime
+# mTLS profile: client certificate relayed in a header, believed from any
+# connection (trust_any bypass). Run with: cd it && make test-mtls-header-bypass
 # Uses the gateway-runtime container (Router + Policy Engine combined)
 # Build coverage images with: make build-gateway-runtime-coverage
 
@@ -44,7 +46,7 @@ services:
     volumes:
       - controller-data-tests:/app/data
       - ./it-aesgcm-keys/default-aesgcm256-v1.bin:/app/data/aesgcm-keys/default-aesgcm256-v1.bin:ro
-      - ./test-config.vhosts-single.toml:/etc/gateway-controller/config.toml:ro
+      - ./test-config.mtls-header-bypass.toml:/etc/gateway-controller/config.toml:ro
       - ../gateway-controller/certificates:/app/certificates
       - ../gateway-controller/listener-certs:/app/listener-certs:ro
       - ./coverage/gateway-controller:/coverage
@@ -84,7 +86,7 @@ services:
       - GOCOVERDIR=/coverage
     volumes:
       - ./coverage/gateway-runtime:/coverage
-      - ./test-config.vhosts-single.toml:/etc/policy-engine/config.toml:ro
+      - ./test-config.mtls-header-bypass.toml:/etc/policy-engine/config.toml:ro
     depends_on:
       # gateway-controller:
       #   condition: service_healthy

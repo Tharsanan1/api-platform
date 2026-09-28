@@ -232,9 +232,9 @@ func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[str
 	headerPresent := len(headerValues) > 0
 
 	if connectionVerified(tls) {
-		connection := p.evaluateVerifiedConnection(set, reqCtx, tls, now)
-		if connection.authenticated || !headerPresent {
-			return connection
+		connectionResult := p.evaluateVerifiedConnection(set, reqCtx, tls, now)
+		if connectionResult.authenticated || !headerPresent {
+			return connectionResult
 		}
 		if p.header.trustAny {
 			return p.evaluateHeaderCertificate(set, headerValues, now, sourceBypass, "", "")
@@ -243,7 +243,7 @@ func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[str
 			return p.evaluateHeaderCertificate(set, headerValues, now, sourceHeader, relay.name, relayLeaf.Subject.String())
 		}
 		p.logIgnoredHeader(tls)
-		return connection
+		return connectionResult
 	}
 
 	deny := evaluationResult{authenticated: false, entryIndex: -1, source: sourceHandshake}

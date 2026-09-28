@@ -20,8 +20,10 @@ package it
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -108,4 +110,70 @@ func (m *mtlsSteps) getWithNoClientCertificateAndHeaderCertificate(reqURL, heade
 // or over HTTPS without a client certificate.
 func (m *mtlsSteps) getWithHeaderCertificate(reqURL, headerName, certFixture string) error {
 	return m.getWithNoClientCertificateAndHeaderCertificate(reqURL, headerName, certFixture)
+}
+
+// xfccHashPattern reads the Hash element of an x-forwarded-client-cert value.
+var xfccHashPattern = regexp.MustCompile(`(?i)(?:^|;)Hash=([0-9a-f]{64})(?:;|$)`)
+
+// echoedXFCC returns the x-forwarded-client-cert value the echo backend
+// received, or "" when it received none.
+func (m *mtlsSteps) echoedXFCC() (string, error) {
+	var data struct {
+		Headers map[string]interface{} `json:"headers"`
+	}
+	if err := json.Unmarshal(m.httpSteps.LastBody(), &data); err != nil {
+		return "", fmt.Errorf("failed to parse the echo backend response: %w", err)
+	}
+	for key, value := range data.Headers {
+		if strings.EqualFold(key, "x-forwarded-client-cert") {
+			return fmt.Sprintf("%v", value), nil
+		}
+	}
+	return "", nil
+}
+
+// echoedXFCCShouldName asserts the backend's x-forwarded-client-cert
+// describes the fixture certificate: its Hash is the fixture's thumbprint
+// and its Subject carries the fixture's common name.
+func (m *mtlsSteps) echoedXFCCShouldName(fixture string) error {
+	xfcc, err := m.echoedXFCC()
+	if err != nil {
+		return err
+	}
+	if xfcc == "" {
+		return fmt.Errorf("expected the backend to receive x-forwarded-client-cert naming %q, got none", fixture)
+	}
+	cert, err := m.parseFixtureCert(fixture)
+	if err != nil {
+		return err
+	}
+	thumbprint, err := m.thumbprintOf(fixture)
+	if err != nil {
+		return err
+	}
+	match := xfccHashPattern.FindStringSubmatch(xfcc)
+	if match == nil || !strings.EqualFold(match[1], thumbprint) {
+		return fmt.Errorf("expected x-forwarded-client-cert Hash to be the thumbprint of %q (%s), got %q", fixture, thumbprint, xfcc)
+	}
+	if !strings.Contains(xfcc, "CN="+cert.Subject.CommonName) {
+		return fmt.Errorf("expected x-forwarded-client-cert Subject to name CN=%s, got %q", cert.Subject.CommonName, xfcc)
+	}
+	return nil
+}
+
+// echoedXFCCShouldNotName asserts the backend's x-forwarded-client-cert, if
+// any, does not describe the fixture certificate.
+func (m *mtlsSteps) echoedXFCCShouldNotName(fixture string) error {
+	xfcc, err := m.echoedXFCC()
+	if err != nil {
+		return err
+	}
+	thumbprint, err := m.thumbprintOf(fixture)
+	if err != nil {
+		return err
+	}
+	if match := xfccHashPattern.FindStringSubmatch(xfcc); match != nil && strings.EqualFold(match[1], thumbprint) {
+		return fmt.Errorf("expected x-forwarded-client-cert not to name %q, got %q", fixture, xfcc)
+	}
+	return nil
 }

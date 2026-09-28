@@ -431,11 +431,6 @@ name = "X-WSO2-CLIENT-CERTIFICATE"
 # proxy. Off by default; every mtls-auth deployment carries a
 # HEADER_CERT_BYPASS_ACTIVE warning and a startup WARN is logged while true.
 trust_any = false
-# When true, a header the gateway believed (evaluated by mtls-auth on that
-# route) is forwarded to the backend instead of being stripped. A header the
-# gateway did NOT believe is always stripped regardless of this setting. Off
-# by default.
-forward_to_backend = false
 
 [router.upstream.tls]
 minimum_protocol_version = "TLS1_2"

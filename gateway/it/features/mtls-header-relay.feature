@@ -26,8 +26,10 @@ Feature: Client certificates relayed in a header by a front proxy
   The same mtls-auth policy handles it and API definitions do not change. A header is text anyone
   can send, so it is believed only when the connection that carries it authenticated as a pool entry
   marked as a relay. Otherwise the header is ignored, never trusted, and the connection's own
-  certificate is evaluated as itself. The header is deleted before every backend. The gateway's own
-  default configuration applies here: no bypass, no forwarding.
+  certificate is evaluated as itself. The relayed header never reaches a backend: when the policy
+  believed it, the backend receives the certificate it carried as X-Forwarded-Client-Cert instead,
+  unless the API sets forwardCertificate to false. The gateway's own default configuration applies
+  here: no bypass.
 
   Background:
     Given the gateway services are running
@@ -67,6 +69,7 @@ Feature: Client certificates relayed in a header by a front proxy
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "client-valid"
     Then the response status code should be 200
     And the response should not contain echoed header "x-wso2-client-certificate"
+    And the backend's X-Forwarded-Client-Cert should name certificate "client-valid"
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "client-valid" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-wrong-ca"
     Then the response status code should be 200
     And the response should not contain echoed header "x-wso2-client-certificate"
@@ -117,13 +120,15 @@ Feature: Client certificates relayed in a header by a front proxy
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "corp-other-service" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 401
 
-  Scenario: The relayed certificate reaches no backend and the relay's own header is never forwarded
+  Scenario: A believed header reaches the backend as X-Forwarded-Client-Cert where the policy evaluated it, and never on a public route
     Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
     And the response status should be 201
     And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
     And the response should not contain echoed header "x-wso2-client-certificate"
+    And the backend's X-Forwarded-Client-Cert should name certificate "client-valid"
+    And the backend's X-Forwarded-Client-Cert should not name certificate "edge-lb"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -149,6 +154,76 @@ Feature: Client certificates relayed in a header by a front proxy
     When I send a GET request to "https://localhost:8443/relay-public/v1.0/anything" with no client certificate and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
     And the response should not contain echoed header "x-wso2-client-certificate"
+
+  Scenario: A header from a connection that is not the relay never reaches a backend
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    And the response status should be 201
+    And the gateway has applied the client authority pool
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: relay-public-api
+      spec:
+        displayName: Relay Public API
+        version: v1.0
+        context: /relay-public/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        operations:
+          - method: GET
+            path: /anything
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/relay-public/v1.0/anything" to be ready
+    When I send a GET request to "https://localhost:8443/relay-public/v1.0/anything" with client certificate "client-valid" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-wrong-ca"
+    Then the response status code should be 200
+    And the response should not contain echoed header "x-wso2-client-certificate"
+    When I send a GET request to "https://localhost:8443/relay-public/v1.0/anything" with no client certificate and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
+    Then the response status code should be 200
+    And the response should not contain echoed header "x-wso2-client-certificate"
+    When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "client-valid" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-wrong-ca"
+    Then the response status code should be 200
+    And the response should not contain echoed header "x-wso2-client-certificate"
+    And the backend's X-Forwarded-Client-Cert should name certificate "client-valid"
+    And the backend's X-Forwarded-Client-Cert should not name certificate "client-wrong-ca"
+
+  Scenario: An API that opts out of the certificate header receives neither header, even one it believed
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    And the response status should be 201
+    And the gateway has applied the client authority pool
+    When I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: relay-nofwd-api
+      spec:
+        displayName: Relay Opt-out API
+        version: v1.0
+        context: /relay-nofwd/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        policies:
+          - name: mtls-auth
+            version: v1
+            params:
+              accept:
+                - ca: relay-partner-a
+              forwardCertificate: false
+        operations:
+          - method: GET
+            path: /anything
+      """
+    Then the response should be successful
+    And I wait for the endpoint "http://localhost:8080/relay-nofwd/v1.0/anything" to respond with status 401
+    When I send a GET request to "https://localhost:8443/relay-nofwd/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
+    Then the response status code should be 200
+    And the response should not contain echoed header "x-wso2-client-certificate"
+    And the response should not contain echoed header "x-forwarded-client-cert"
 
   Scenario: A relay entry cannot be accepted as a client
     Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"

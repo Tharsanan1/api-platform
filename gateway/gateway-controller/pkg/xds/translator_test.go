@@ -3971,16 +3971,26 @@ func findRoutesByName(t *testing.T, routes []*route.Route) (plainRoute, mtlsRout
 	return plainRoute, mtlsRoute
 }
 
-// A route without mtls-auth always strips the relayed header, whatever
-// forward_to_backend says.
-func TestTranslator_CreateRouteFromRDC_StripsClientCertificateHeader_UnlessBelieved(t *testing.T) {
+// A route without mtls-auth always strips the relayed header; on a route
+// with it the policy decides, so the router leaves it in place.
+func TestTranslator_CreateRouteFromRDC_StripsRelayedCertificateHeader_UnlessChainAttachesMTLSAuth(t *testing.T) {
+	t.Run("stripped on the plain route only", func(t *testing.T) {
+		translator := createTestTranslator()
+		translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{Name: "X-WSO2-CLIENT-CERTIFICATE"}
+
+		routes, _, err := translator.translateRuntimeConfig(mtlsHeaderStrippingRDC())
+		require.NoError(t, err)
+		plainRoute, mtlsRoute := findRoutesByName(t, routes)
+
+		assert.Contains(t, plainRoute.RequestHeadersToRemove, "x-wso2-client-certificate",
+			"a route whose chain lacks mtls-auth must strip the relayed-certificate header before its backend")
+		assert.NotContains(t, mtlsRoute.RequestHeadersToRemove, "x-wso2-client-certificate",
+			"a route whose chain attaches mtls-auth leaves the relayed-certificate header to the policy")
+	})
 
 	t.Run("header name is lower-cased before being added to RequestHeadersToRemove", func(t *testing.T) {
 		translator := createTestTranslator()
-		translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{
-			Name:             "X-Amzn-Mtls-Clientcert",
-			ForwardToBackend: false,
-		}
+		translator.routerConfig.DownstreamTLS.ClientCertificateHeader = config.ClientCertificateHeader{Name: "X-Amzn-Mtls-Clientcert"}
 
 		routes, _, err := translator.translateRuntimeConfig(mtlsHeaderStrippingRDC())
 		require.NoError(t, err)

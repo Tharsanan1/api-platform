@@ -326,7 +326,7 @@ func TestMtlsAuthPolicy_OnRequestHeaders_ForwardCertificate(t *testing.T) {
 	}
 	wantBoth := []string{xfccHeaderName, defaultHeaderName}
 
-	for _, header := range []map[string]interface{}{nil, {"forwardToBackend": true}} {
+	for _, header := range []map[string]interface{}{nil, {"trustAny": true}} {
 		t.Run("allowed as the connection removes both headers", func(t *testing.T) {
 			p := build(t, false, header)
 			action := p.OnRequestHeaders(context.Background(), reqCtxWithTLS(downstreamTLSFromLeaf(clientA, true)), map[string]interface{}{})

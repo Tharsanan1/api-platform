@@ -101,7 +101,7 @@ Feature: Believing the relayed certificate from any connection on a trusted netw
       | https://localhost:8443/bypass/v1.0/anything     | with no client certificate                                                                                              | 401    |
       | http://localhost:8080/bypass/v1.0/anything      | with header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"                                             | 200    |
 
-  Scenario: Even under the bypass the header never reaches a backend by default
+  Scenario: Under the bypass a believed header reaches the backend as X-Forwarded-Client-Cert
     Given I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -130,3 +130,36 @@ Feature: Believing the relayed certificate from any connection on a trusted netw
     When I send a GET request to "https://localhost:8443/bypass/v1.0/anything" with no client certificate and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
     Then the response status code should be 200
     And the response should not contain echoed header "x-wso2-client-certificate"
+    And the backend's X-Forwarded-Client-Cert should name certificate "client-valid"
+
+  Scenario: Under the bypass an API that opts out of the certificate header receives neither header
+    Given I deploy this API configuration:
+      """
+      apiVersion: gateway.api-platform.wso2.com/v1
+      kind: RestApi
+      metadata:
+        name: bypass-nofwd-api
+      spec:
+        displayName: Bypass Opt-out API
+        version: v1.0
+        context: /bypass-nofwd/$version
+        upstream:
+          main:
+            url: http://echo-backend:80
+        policies:
+          - name: mtls-auth
+            version: v1
+            params:
+              accept:
+                - ca: bypass-partner-a
+              forwardCertificate: false
+        operations:
+          - method: GET
+            path: /anything
+      """
+    And the response should be successful
+    And I wait for the endpoint "http://localhost:8080/bypass-nofwd/v1.0/anything" to respond with status 401
+    When I send a GET request to "https://localhost:8443/bypass-nofwd/v1.0/anything" with no client certificate and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
+    Then the response status code should be 200
+    And the response should not contain echoed header "x-wso2-client-certificate"
+    And the response should not contain echoed header "x-forwarded-client-cert"

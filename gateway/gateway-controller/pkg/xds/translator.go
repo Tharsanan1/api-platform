@@ -416,12 +416,10 @@ func (t *Translator) createRouteFromRDC(routeKey string, rdcRoute *models.Route,
 
 	// RequestHeadersToRemove applies after ext_proc, so the policy engine
 	// still sees both certificate headers; this decides only what the backend
-	// receives. With mtls-auth the relayed header is kept only under
-	// forward_to_backend, and the policy removes it unless it believed it.
+	// receives. With mtls-auth the policy decides, removing a relayed header it
+	// did not believe.
 	if !chainAttachesMTLSAuth(rdc.PolicyChains[routeKey]) {
 		t.stripClientCertificateHeaders(r)
-	} else if !t.routerConfig.DownstreamTLS.ClientCertificateHeader.ForwardToBackend {
-		t.stripRelayedCertificateHeader(r)
 	}
 
 	// Build the request matchers (shared with direct-response routes so both kinds of
@@ -2726,11 +2724,6 @@ const xfccHeaderName = "x-forwarded-client-cert"
 // proxy relays a certificate in.
 func (t *Translator) stripClientCertificateHeaders(r *route.Route) {
 	r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, xfccHeaderName)
-	t.stripRelayedCertificateHeader(r)
-}
-
-// stripRelayedCertificateHeader removes only the relayed-certificate header.
-func (t *Translator) stripRelayedCertificateHeader(r *route.Route) {
 	if name := t.routerConfig.DownstreamTLS.ClientCertificateHeader.Name; name != "" {
 		r.RequestHeadersToRemove = append(r.RequestHeadersToRemove, strings.ToLower(name))
 	}

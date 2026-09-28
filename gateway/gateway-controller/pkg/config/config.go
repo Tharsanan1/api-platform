@@ -709,11 +709,6 @@ type ClientCertificateHeader struct {
 	// connection. It is safe only when nothing but a trusted front proxy can
 	// reach this gateway. Off by default.
 	TrustAny bool `koanf:"trust_any"`
-
-	// ForwardToBackend forwards a header the gateway believed to the backend
-	// instead of stripping it. A header it did not believe is always
-	// stripped. Off by default.
-	ForwardToBackend bool `koanf:"forward_to_backend"`
 }
 
 // httpHeaderTokenPattern matches an HTTP header field-name token (RFC 7230
@@ -1352,9 +1347,8 @@ func defaultConfig() *Config {
 				Ciphers:                "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
 				EcdhCurves:             "X25519,P-256",
 				ClientCertificateHeader: ClientCertificateHeader{
-					Name:             DefaultClientCertificateHeaderName,
-					TrustAny:         false,
-					ForwardToBackend: false,
+					Name:     DefaultClientCertificateHeaderName,
+					TrustAny: false,
 				},
 			},
 			GatewayHost: "*",

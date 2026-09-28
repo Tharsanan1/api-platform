@@ -471,13 +471,6 @@ func (t *RestAPITransformer) buildPolicyChain(
 	result = append(result,
 		resolvePolicyInstances(t.policyDefinitions, t.latestVersions, opPolicies, policyv1alpha.LevelRoute)...)
 
-	// Inject the engine-facing mtls-auth parameters into this chain.
-	var headerConfig config.ClientCertificateHeader
-	if t.routerConfig != nil {
-		headerConfig = t.routerConfig.DownstreamTLS.ClientCertificateHeader
-	}
-	injectMtlsInternalParams(result, headerConfig)
-
 	return result
 }
 

@@ -233,6 +233,14 @@ func TestPolicyValidator_MtlsAuth_EachProblemReportedOnce(t *testing.T) {
 			params: map[string]interface{}{"mode": "strict"},
 			field:  "spec.policies[0].params.mode", message: "unknown parameter mode",
 		},
+		"headerName written by an author": {
+			params: map[string]interface{}{"headerName": "X-Client-Cert"},
+			field:  "spec.policies[0].params.headerName", message: "unknown parameter headerName",
+		},
+		"trustAny written by an author": {
+			params: map[string]interface{}{"trustAny": true},
+			field:  "spec.policies[0].params.trustAny", message: "unknown parameter trustAny",
+		},
 		"forwardCertificate as a string": {
 			params: map[string]interface{}{"forwardCertificate": "no"},
 			field:  "spec.policies[0].params.forwardCertificate", message: "forwardCertificate must be true or false",

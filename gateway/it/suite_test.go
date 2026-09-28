@@ -174,7 +174,6 @@ func getFeaturePaths() []string {
 		// "features/vhost-routing-single.feature", // cd it && make test-vhosts-single
 		// "features/vhost-routing-multi.feature", // cd it && make test-vhosts-multi
 		// "features/mtls-header-bypass.feature", // cd it && make test-mtls-header-bypass
-		// "features/mtls-header-forward.feature", // cd it && make test-mtls-header-forward
 	}
 
 	raw := strings.TrimSpace(os.Getenv("IT_FEATURE_PATHS"))

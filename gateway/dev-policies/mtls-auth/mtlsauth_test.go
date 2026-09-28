@@ -19,6 +19,7 @@
 package mtlsauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -422,8 +423,7 @@ func poolAuthorities(t *testing.T, pool []*testEntity, entries []entrySpec, rela
 	return specs
 }
 
-// buildParams builds the chain params the controller injects for an explicit
-// accept list.
+// buildParams builds the instance params for an explicit accept list.
 func buildParams(entries []entrySpec) map[string]interface{} {
 	acceptList := make([]interface{}, 0, len(entries))
 	for _, e := range entries {
@@ -446,12 +446,13 @@ func buildParams(entries []entrySpec) map[string]interface{} {
 	return map[string]interface{}{acceptParam: acceptList}
 }
 
-// buildParamsWithHeader is buildParams plus the header param; a nil header
-// omits the param.
+// buildParamsWithHeader is buildParams plus the client-certificate header
+// system parameters in header (headerName, trustAny); a nil
+// header leaves every one at its default.
 func buildParamsWithHeader(entries []entrySpec, header map[string]interface{}) map[string]interface{} {
 	params := buildParams(entries)
-	if header != nil {
-		params[internalHeaderParam] = header
+	for key, value := range header {
+		params[key] = value
 	}
 	return params
 }
@@ -859,10 +860,10 @@ func TestMtlsAuthPolicy_Evaluate_HeaderRelay(t *testing.T) {
 
 }
 
-// TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend guards that the header
-// is removed only when forwardToBackend is on and the header was not
-// believed; the router handles the off case.
-func TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend(t *testing.T) {
+// TestMtlsAuthPolicy_OnRequestHeaders_CertificateHeaders guards that the
+// backend receives at most x-forwarded-client-cert, describing the
+// certificate the caller authenticated with, and never the relayed header.
+func TestMtlsAuthPolicy_OnRequestHeaders_CertificateHeaders(t *testing.T) {
 	rootA := newRootCA(t, "Partner A Root CA")
 	acceptLeaf := newLeaf(t, rootA, "client-valid", certOpts{uriSANs: []string{"urn:partner-a:payments"}})
 	relayCA := newRootCA(t, "Edge LB CA")
@@ -871,56 +872,179 @@ func TestMtlsAuthPolicy_OnRequestHeaders_ForwardToBackend(t *testing.T) {
 	acceptEntries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
 	pool := []*testEntity{rootA, relayCA}
 	relays := []relaySpec{{name: "relay-edge-lb", roots: []*testEntity{relayCA}}}
+	relayed := urlEncodedPEMHeaderValue(acceptLeaf)
 
-	believedReqCtx := func() *policy.RequestHeaderContext {
-		return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+	for name, tc := range map[string]struct {
+		header     map[string]interface{}
+		forward    bool
+		reqCtx     func() *policy.RequestHeaderContext
+		wantSet    *testEntity // nil: x-forwarded-client-cert is left as Envoy wrote it
+		wantRemove []string
+	}{
+		"handshake, no relayed header: nothing changes": {
+			forward: true,
+			reqCtx:  func() *policy.RequestHeaderContext { return reqCtxWithTLS(downstreamTLSFromLeaf(acceptLeaf, true)) },
+		},
+		"handshake, relayed header ignored: header removed": {
+			forward: true,
+			reqCtx: func() *policy.RequestHeaderContext {
+				return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(acceptLeaf, true), defaultHeaderName, relayed)
+			},
+			wantRemove: []string{defaultHeaderName},
+		},
+		"believed from a relay: XFCC describes the relayed certificate, header removed": {
+			forward: true,
+			reqCtx: func() *policy.RequestHeaderContext {
+				return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, relayed)
+			},
+			wantSet:    acceptLeaf,
+			wantRemove: []string{defaultHeaderName},
+		},
+		"believed under trustAny: XFCC describes the header certificate, header removed": {
+			header:  map[string]interface{}{trustAnyParam: true},
+			forward: true,
+			reqCtx: func() *policy.RequestHeaderContext {
+				return reqCtxWithTLSAndHeader(&policy.DownstreamTLS{MTLS: false}, defaultHeaderName, relayed)
+			},
+			wantSet:    acceptLeaf,
+			wantRemove: []string{defaultHeaderName},
+		},
+		"forwardCertificate false: both headers removed": {
+			forward: false,
+			reqCtx: func() *policy.RequestHeaderContext {
+				return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, relayed)
+			},
+			wantRemove: []string{xfccHeaderName, defaultHeaderName},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, tc.header)
+			p.forwardCertificate = tc.forward
+			action := p.OnRequestHeaders(context.Background(), tc.reqCtx(), map[string]interface{}{})
+			mods, ok := action.(policy.UpstreamRequestHeaderModifications)
+			if !ok {
+				t.Fatalf("OnRequestHeaders returned %T, want policy.UpstreamRequestHeaderModifications", action)
+			}
+			if !slices.Equal(mods.HeadersToRemove, tc.wantRemove) {
+				t.Errorf("HeadersToRemove = %v, want %v", mods.HeadersToRemove, tc.wantRemove)
+			}
+			if tc.wantSet == nil {
+				if len(mods.HeadersToSet) != 0 {
+					t.Errorf("HeadersToSet = %v, want none", mods.HeadersToSet)
+				}
+				return
+			}
+			if len(mods.HeadersToSet) != 1 {
+				t.Fatalf("HeadersToSet = %v, want only %s", mods.HeadersToSet, xfccHeaderName)
+			}
+			if hash, _ := xfccFieldValue(mods.HeadersToSet[xfccHeaderName], "Hash"); hash != sha256Hex(tc.wantSet.cert.Raw) {
+				t.Errorf("XFCC Hash = %q, want the thumbprint of %s", hash, tc.wantSet.cert.Subject)
+			}
+		})
 	}
-	notBelievedReqCtx := func() *policy.RequestHeaderContext {
-		// The connection is an accepted client, not a relay, so the header is never
-		// believed.
-		return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(acceptLeaf, true), defaultHeaderName, urlEncodedPEMHeaderValue(acceptLeaf))
+}
+
+func TestEnvoyXFCC_RoundTrips(t *testing.T) {
+	root := newRootCA(t, "Partner A Root CA")
+	leaf := newLeaf(t, root, "client-valid", certOpts{
+		uriSANs: []string{"urn:partner-a:payments", "urn:partner-a:x;Hash=forged"},
+		dnsSANs: []string{"client.partner-a.test", "alt.partner-a.test"},
+	}).cert
+
+	xfcc := envoyXFCC(leaf)
+
+	if hash, _ := xfccFieldValue(xfcc, "Hash"); hash != sha256Hex(leaf.Raw) {
+		t.Errorf("Hash = %q, want %q", hash, sha256Hex(leaf.Raw))
+	}
+	if subject, _ := xfccFieldValue(xfcc, "Subject"); subject != leaf.Subject.String() {
+		t.Errorf("Subject = %q, want %q", subject, leaf.Subject.String())
+	}
+	encoded, ok := xfccFieldValue(xfcc, "Cert")
+	if !ok {
+		t.Fatalf("no Cert element in %q", xfcc)
+	}
+	decoded, err := url.PathUnescape(encoded)
+	if err != nil {
+		t.Fatalf("Cert is not percent-encoded: %v", err)
+	}
+	if certs := parsePEMCertificates(decoded); len(certs) != 1 || !bytes.Equal(certs[0].Raw, leaf.Raw) {
+		t.Errorf("Cert does not decode to the certificate")
+	}
+	if _, ok := xfccFieldValue(xfcc, "Chain"); ok {
+		t.Errorf("unexpected Chain element in %q", xfcc)
 	}
 
-	mustModifications := func(t *testing.T, action policy.RequestHeaderAction) policy.UpstreamRequestHeaderModifications {
-		t.Helper()
-		mods, ok := action.(policy.UpstreamRequestHeaderModifications)
-		if !ok {
-			t.Fatalf("OnRequestHeaders returned %T, want policy.UpstreamRequestHeaderModifications", action)
-		}
-		return mods
+	if got := xfccElements(t, xfcc, "URI"); !slices.Equal(got, []string{"urn:partner-a:payments", "urn:partner-a:x;Hash=forged"}) {
+		t.Errorf("URI elements = %v", got)
+	}
+	if got := xfccElements(t, xfcc, "DNS"); !slices.Equal(got, []string{"client.partner-a.test", "alt.partner-a.test"}) {
+		t.Errorf("DNS elements = %v", got)
+	}
+	if got := xfccElements(t, xfcc, "Hash"); len(got) != 1 {
+		t.Errorf("Hash elements = %v, want exactly one — a SAN must not inject an element", got)
 	}
 
-	t.Run("forwardToBackend true, believed header: not removed", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, map[string]interface{}{"forwardToBackend": true})
-		action := p.OnRequestHeaders(context.Background(), believedReqCtx(), map[string]interface{}{})
-		mods := mustModifications(t, action)
-		if len(mods.HeadersToRemove) != 0 {
-			t.Errorf("HeadersToRemove = %v, want empty — a believed header must reach the backend", mods.HeadersToRemove)
-		}
-	})
+	wantOrder := []string{"Hash", "Cert", "Subject", "URI", "URI", "DNS", "DNS"}
+	if got := xfccKeys(t, xfcc); !slices.Equal(got, wantOrder) {
+		t.Errorf("element order = %v, want %v", got, wantOrder)
+	}
+}
 
-	t.Run("forwardToBackend true, header not believed (non-relay connection): removed", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, map[string]interface{}{"forwardToBackend": true})
-		action := p.OnRequestHeaders(context.Background(), notBelievedReqCtx(), map[string]interface{}{})
-		mods := mustModifications(t, action)
-		if !slices.Contains(mods.HeadersToRemove, defaultHeaderName) {
-			t.Errorf("HeadersToRemove = %v, want it to contain %q — a header this policy never believed must not reach the backend", mods.HeadersToRemove, defaultHeaderName)
-		}
-	})
+// xfccKeys returns the element keys of one XFCC hop, in order.
+func xfccKeys(t *testing.T, xfcc string) []string {
+	t.Helper()
+	var keys []string
+	for _, kv := range splitXFCC(t, xfcc) {
+		keys = append(keys, kv[0])
+	}
+	return keys
+}
 
-	t.Run("forwardToBackend false: no removal action either way", func(t *testing.T) {
-		p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil) // forwardToBackend defaults false
-
-		believedAction := p.OnRequestHeaders(context.Background(), believedReqCtx(), map[string]interface{}{})
-		if mods := mustModifications(t, believedAction); len(mods.HeadersToRemove) != 0 {
-			t.Errorf("HeadersToRemove (believed) = %v, want empty when forwardToBackend is false", mods.HeadersToRemove)
+// xfccElements returns every value of key in one XFCC hop, in order.
+func xfccElements(t *testing.T, xfcc, key string) []string {
+	t.Helper()
+	var values []string
+	for _, kv := range splitXFCC(t, xfcc) {
+		if kv[0] == key {
+			values = append(values, kv[1])
 		}
+	}
+	return values
+}
 
-		notBelievedAction := p.OnRequestHeaders(context.Background(), notBelievedReqCtx(), map[string]interface{}{})
-		if mods := mustModifications(t, notBelievedAction); len(mods.HeadersToRemove) != 0 {
-			t.Errorf("HeadersToRemove (not believed) = %v, want empty when forwardToBackend is false — the router's own default route configuration strips it instead", mods.HeadersToRemove)
+// splitXFCC splits one XFCC hop into key/value pairs, reading each element
+// with xfccFieldValue on the remainder so quoting is handled exactly as the
+// policy handles it.
+func splitXFCC(t *testing.T, xfcc string) [][2]string {
+	t.Helper()
+	var pairs [][2]string
+	rest := xfcc
+	for rest != "" {
+		eq := strings.IndexByte(rest, '=')
+		if eq < 0 {
+			t.Fatalf("malformed XFCC element in %q", rest)
 		}
-	})
+		key := rest[:eq]
+		value, _ := xfccFieldValue(rest, key)
+		pairs = append(pairs, [2]string{key, value})
+		end := eq + 1
+		if end < len(rest) && rest[end] == '"' {
+			end++
+			for end < len(rest) && rest[end] != '"' {
+				if rest[end] == '\\' {
+					end++
+				}
+				end++
+			}
+			end++
+		} else {
+			for end < len(rest) && rest[end] != ';' {
+				end++
+			}
+		}
+		rest = strings.TrimPrefix(rest[end:], ";")
+	}
+	return pairs
 }
 
 func TestGetPolicy_MalformedNarrowingFailsClosed(t *testing.T) {
@@ -981,6 +1105,36 @@ func TestGetPolicy_EmptyNarrowingFailsClosed(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.message) {
 				t.Fatalf("GetPolicy error = %q, want it to contain %q", err.Error(), tc.message)
+			}
+		})
+	}
+}
+
+func TestParseHeaderConfig(t *testing.T) {
+	for name, tc := range map[string]struct {
+		params map[string]interface{}
+		want   headerConfig
+	}{
+		"absent": {
+			params: map[string]interface{}{},
+			want:   headerConfig{name: defaultHeaderName},
+		},
+		"all set": {
+			params: map[string]interface{}{headerNameParam: "X-Client-Cert", trustAnyParam: true},
+			want:   headerConfig{name: "X-Client-Cert", trustAny: true},
+		},
+		"blank name": {
+			params: map[string]interface{}{headerNameParam: "  "},
+			want:   headerConfig{name: defaultHeaderName},
+		},
+		"wrong types": {
+			params: map[string]interface{}{headerNameParam: 7, trustAnyParam: "true"},
+			want:   headerConfig{name: defaultHeaderName},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := parseHeaderConfig(tc.params); got != tc.want {
+				t.Errorf("parseHeaderConfig(%v) = %+v, want %+v", tc.params, got, tc.want)
 			}
 		})
 	}

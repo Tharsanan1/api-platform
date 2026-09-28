@@ -61,11 +61,13 @@ const (
 
 	// acceptParam is the author's ordered accept list of {"ca", "match":
 	// {"uriSANs", "dnsSANs"}, "thumbprints"}; absent means every client entry
-	// in the pool, unnarrowed. internalHeaderParam carries {"name", "trustAny",
-	// "forwardToBackend"}; the controller injects it and it is not part of the
-	// author-facing schema.
-	acceptParam         = "accept"
-	internalHeaderParam = "__wso2_internal_mtls_header"
+	// in the pool, unnarrowed.
+	acceptParam = "accept"
+
+	// System parameters resolved from the gateway's
+	// router.downstream_tls.client_certificate_header configuration.
+	headerNameParam = "headerName"
+	trustAnyParam   = "trustAny"
 
 	defaultHeaderName = "X-WSO2-CLIENT-CERTIFICATE"
 
@@ -111,11 +113,10 @@ type acceptEntry struct {
 	thumbprints []string
 }
 
-// headerConfig is the parsed __wso2_internal_mtls_header param.
+// headerConfig holds the gateway's client-certificate header settings.
 type headerConfig struct {
-	name             string
-	trustAny         bool
-	forwardToBackend bool
+	name     string
+	trustAny bool
 }
 
 // evaluationResult is evaluate's outcome, kept small so tests can assert on
@@ -143,6 +144,10 @@ type evaluationResult struct {
 	source       string
 	relayedBy    string
 	relaySubject string
+
+	// headerCertificate is the certificate the header carried, set on allow
+	// when source is sourceHeader or sourceBypass.
+	headerCertificate *x509.Certificate
 }
 
 // MtlsAuthPolicy authenticates API callers via mutual TLS. It holds no
@@ -183,7 +188,7 @@ func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (p
 		accept:             accept,
 		inheritAccept:      params[acceptParam] == nil,
 		acceptNames:        strings.Join(names, ","),
-		header:             parseHeaderParam(params[internalHeaderParam]),
+		header:             parseHeaderConfig(params),
 		forwardCertificate: forwardCertificate,
 	}, nil
 }
@@ -364,6 +369,9 @@ func (p *MtlsAuthPolicy) evaluateHeaderCertificate(set *authoritySet, values []s
 	result.source = source
 	result.relayedBy = relayName
 	result.relaySubject = relaySubject
+	if result.authenticated {
+		result.headerCertificate = leaf
+	}
 	return result
 }
 
@@ -672,16 +680,17 @@ func (p *MtlsAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Re
 		Previous:      reqCtx.SharedContext.AuthContext,
 	}
 
+	// The backend receives at most one certificate header,
+	// x-forwarded-client-cert, and it always describes the certificate the
+	// caller authenticated with. The relayed header never reaches it.
 	action := policy.UpstreamRequestHeaderModifications{}
-	// forwardCertificate false keeps every certificate header from the backend.
-	// Otherwise, when the header is forwarded, remove it unless this policy
-	// believed it, so only a believed header reaches upstream. The router already
-	// strips it when forwarding is off.
-	believed := result.source == sourceHeader || result.source == sourceBypass
 	switch {
 	case !p.forwardCertificate:
 		action.HeadersToRemove = []string{xfccHeaderName, p.header.name}
-	case p.header.forwardToBackend && !believed:
+	case result.headerCertificate != nil:
+		action.HeadersToSet = map[string]string{xfccHeaderName: envoyXFCC(result.headerCertificate)}
+		action.HeadersToRemove = []string{p.header.name}
+	case len(reqCtx.DownstreamRequest().Headers.Get(p.header.name)) > 0:
 		action.HeadersToRemove = []string{p.header.name}
 	}
 	return action
@@ -835,22 +844,16 @@ func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 	return entries, nil
 }
 
-// parseHeaderParam parses the internal header param. A missing or malformed
-// field falls back to its default, and every default is the restrictive one.
-func parseHeaderParam(raw interface{}) headerConfig {
+// parseHeaderConfig reads the client-certificate header system parameters. A
+// missing or malformed value falls back to its default, and every default is
+// the restrictive one.
+func parseHeaderConfig(params map[string]interface{}) headerConfig {
 	cfg := headerConfig{name: defaultHeaderName}
-	obj, ok := raw.(map[string]interface{})
-	if !ok {
-		return cfg
-	}
-	if name, ok := obj["name"].(string); ok && strings.TrimSpace(name) != "" {
+	if name, ok := params[headerNameParam].(string); ok && strings.TrimSpace(name) != "" {
 		cfg.name = name
 	}
-	if trustAny, ok := obj["trustAny"].(bool); ok {
+	if trustAny, ok := params[trustAnyParam].(bool); ok {
 		cfg.trustAny = trustAny
-	}
-	if forward, ok := obj["forwardToBackend"].(bool); ok {
-		cfg.forwardToBackend = forward
 	}
 	return cfg
 }
@@ -1048,6 +1051,48 @@ func parsePEMCertificates(data string) []*x509.Certificate {
 			certs = append(certs, cert)
 		}
 	}
+}
+
+// envoyXFCC renders leaf as a single x-forwarded-client-cert hop in the form
+// the listener's SANITIZE_SET writes with Subject, Cert, URI and DNS details:
+// Hash, Cert, Subject, then one URI and one DNS element per SAN. A header
+// certificate arrives without a chain, so there is no Chain element.
+func envoyXFCC(leaf *x509.Certificate) string {
+	var b strings.Builder
+	b.WriteString("Hash=")
+	b.WriteString(sha256Hex(leaf.Raw))
+	b.WriteString(`;Cert="`)
+	b.WriteString(xfccPEMEncoder.Replace(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))))
+	b.WriteString(`";Subject=`)
+	b.WriteString(xfccQuoted(leaf.Subject.String()))
+	for _, uri := range uriSANStrings(leaf) {
+		b.WriteString(";URI=")
+		b.WriteString(xfccValue(uri))
+	}
+	for _, dns := range leaf.DNSNames {
+		b.WriteString(";DNS=")
+		b.WriteString(xfccValue(dns))
+	}
+	return b.String()
+}
+
+// xfccPEMEncoder percent-encodes PEM text the way Envoy encodes the Cert
+// element.
+var xfccPEMEncoder = strings.NewReplacer("\n", "%0A", " ", "%20", "+", "%2B", "/", "%2F", "=", "%3D")
+
+// xfccValue returns v bare, as Envoy writes URI and DNS values, unless it
+// holds a character that would end or split the element, in which case it is
+// quoted so a SAN cannot inject an element of its own.
+func xfccValue(v string) string {
+	if strings.ContainsAny(v, `;,"`) {
+		return xfccQuoted(v)
+	}
+	return v
+}
+
+// xfccQuoted double-quotes v, escaping '"' and '\' as xfccFieldValue expects.
+func xfccQuoted(v string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`
 }
 
 // parseXFCCChainCertificates parses the certificates in the Chain element of

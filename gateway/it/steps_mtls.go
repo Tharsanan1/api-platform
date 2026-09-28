@@ -173,6 +173,8 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and its chain$`, m.getWithClientCertificateAndChain)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and header "([^"]*)" carrying certificate "([^"]*)" encoded as "([^"]*)"$`, m.getWithClientCertificateAndHeaderCertificateEncoded)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" and header "([^"]*)" carrying certificate "([^"]*)"$`, m.getWithClientCertificateAndHeaderCertificate)
+	ctx.Step(`^the backend's X-Forwarded-Client-Cert should name certificate "([^"]*)"$`, m.echoedXFCCShouldName)
+	ctx.Step(`^the backend's X-Forwarded-Client-Cert should not name certificate "([^"]*)"$`, m.echoedXFCCShouldNotName)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)"$`, m.getWithClientCertificate)
 	ctx.Step(`^I send a GET request to "([^"]*)" with client certificate "([^"]*)" on a resumable TLS session$`, m.getWithClientCertificateOnResumableSession)
 	ctx.Step(`^I send a GET request to "([^"]*)" on a new connection from the same TLS session cache$`, m.getWithCachedTLSSession)

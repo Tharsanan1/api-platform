@@ -220,8 +220,10 @@ func (p *MtlsAuthPolicy) Mode() policy.ProcessingMode {
 // decide denies. The connection's own certificate is judged first. If Envoy
 // verified it and it passes accept, the request is allowed and any header is
 // ignored. Otherwise a single header certificate is judged, only under
-// trustAny or when the connection matches a relay entry. A connection
-// certificate that Envoy rejected denies outright, even under trustAny, so a
+// trustAny or when the connection matches a relay entry, and only for a
+// connection certificate that is valid in itself but not one this API
+// accepts. A connection certificate that Envoy rejected, or that is expired,
+// not yet valid or unparseable, denies outright, even under trustAny, so a
 // caller with a bad certificate gets no second chance. The whole request is
 // judged against one version of the pool.
 func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[string]interface{}) evaluationResult {
@@ -233,7 +235,7 @@ func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[str
 
 	if connectionVerified(tls) {
 		connectionResult := p.evaluateVerifiedConnection(set, reqCtx, tls, now)
-		if connectionResult.authenticated || !headerPresent {
+		if connectionResult.authenticated || !headerPresent || certificateUnusable(connectionResult.reason) {
 			return connectionResult
 		}
 		if p.header.trustAny {
@@ -269,6 +271,16 @@ func (p *MtlsAuthPolicy) evaluate(reqCtx *policy.RequestHeaderContext, _ map[str
 		}
 	}
 	return deny
+}
+
+// certificateUnusable reports whether reason says the connection certificate
+// is bad in itself rather than merely not accepted by this API.
+func certificateUnusable(reason string) bool {
+	switch reason {
+	case reasonExpired, reasonNotYetValid, reasonInvalidCert:
+		return true
+	}
+	return false
 }
 
 // connectionVerified reports whether Envoy delivered a positive verdict for a

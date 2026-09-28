@@ -57,6 +57,10 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 		notBefore: time.Now().Add(-2 * 365 * 24 * time.Hour),
 		notAfter:  time.Now().Add(-1 * 365 * 24 * time.Hour),
 	})
+	clientANotYetValid := newLeaf(t, rootA, "client-a-not-yet-valid", certOpts{
+		notBefore: time.Now().Add(1 * 365 * 24 * time.Hour),
+		notAfter:  time.Now().Add(2 * 365 * 24 * time.Hour),
+	})
 
 	rootB := newRootCA(t, "Partner B Root CA")
 	clientB := newLeaf(t, rootB, "client-b", certOpts{uriSANs: []string{"urn:partner-b:billing"}})
@@ -218,6 +222,29 @@ func TestMtlsAuthPolicy_Evaluate_DecisionTree(t *testing.T) {
 		{
 			name:   "relay mode, expired connection certificate, header ignored",
 			policy: relayPolicy, tls: downstreamTLSFromLeaf(clientAExpired, false), header: []string{header(clientA)},
+			wantReason: reasonExpired, wantSource: sourceHandshake,
+		},
+
+		// Envoy accepted the connection's certificate but it is unusable in
+		// itself; a header never rescues it either.
+		{
+			name:   "trustAny, expired connection certificate Envoy accepted, header carrying an accepted client",
+			policy: bypassPolicy, tls: downstreamTLSFromLeaf(clientAExpired, true), header: []string{header(clientA)},
+			wantReason: reasonExpired, wantSource: sourceHandshake,
+		},
+		{
+			name:   "trustAny, not yet valid connection certificate Envoy accepted, header carrying an accepted client",
+			policy: bypassPolicy, tls: downstreamTLSFromLeaf(clientANotYetValid, true), header: []string{header(clientA)},
+			wantReason: reasonNotYetValid, wantSource: sourceHandshake,
+		},
+		{
+			name:   "trustAny, unparseable connection certificate Envoy accepted, header carrying an accepted client",
+			policy: bypassPolicy, tls: &policy.DownstreamTLS{MTLS: true, PeerCertValid: boolPtr(true), PeerCertificatePEM: "not a certificate"}, header: []string{header(clientA)},
+			wantReason: reasonInvalidCert, wantSource: sourceHandshake,
+		},
+		{
+			name:   "relay mode, expired connection certificate Envoy accepted, header ignored",
+			policy: relayPolicy, tls: downstreamTLSFromLeaf(clientAExpired, true), header: []string{header(clientA)},
 			wantReason: reasonExpired, wantSource: sourceHandshake,
 		},
 

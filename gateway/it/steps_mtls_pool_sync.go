@@ -211,10 +211,8 @@ func envoyListenerNamesClientCASecret(state *TestState) (referenced bool, warmin
 // a replacement listener warms, Envoy serves new connections on the previous
 // instance, so a request sent then meets the configuration being replaced.
 func waitForEnvoyListenersActive(state *TestState) error {
-	const (
-		timeout  = 10 * time.Second
-		interval = 100 * time.Millisecond
-	)
+	const interval = 100 * time.Millisecond
+	timeout := envoySettleTimeout
 	deadline := time.Now().Add(timeout)
 	for {
 		_, warming, err := envoyListenerNamesClientCASecret(state)
@@ -228,6 +226,89 @@ func waitForEnvoyListenersActive(state *TestState) error {
 			return fmt.Errorf("Envoy listeners still warming after %s: %s", timeout, strings.Join(warming, ", "))
 		}
 		time.Sleep(interval)
+	}
+}
+
+// listenerMoveGrace bounds how long waitForEnvoySettled waits for Envoy's
+// listener version to move past a pre-mutation baseline. A mutation that
+// leaves the HTTPS listener unchanged, such as a second mtls-auth API, never
+// moves it.
+const listenerMoveGrace = 2 * time.Second
+
+// envoySettleTimeout bounds each of waitForEnvoySettled's waits on warming
+// resources.
+const envoySettleTimeout = 10 * time.Second
+
+// envoyListenersVersion returns the version_info of Envoy's listeners dump,
+// the version of the last listener update Envoy accepted.
+func envoyListenersVersion(state *TestState) (string, error) {
+	var dump struct {
+		Configs []struct {
+			Type        string `json:"@type"`
+			VersionInfo string `json:"version_info"`
+		} `json:"configs"`
+	}
+	if err := getJSON(state, envoyAdminURL()+"/config_dump?mask=version_info", &dump); err != nil {
+		return "", err
+	}
+	for _, c := range dump.Configs {
+		if strings.HasSuffix(c.Type, ".ListenersConfigDump") {
+			return c.VersionInfo, nil
+		}
+	}
+	return "", fmt.Errorf("Envoy's config dump has no listeners dump")
+}
+
+// waitForEnvoySettled waits for Envoy to apply the scenario's latest changes.
+// After a mutation that can change the HTTPS listener it first waits, within
+// listenerMoveGrace, for the listener version to move past the pre-mutation
+// baseline. It then waits until no listener and no cluster is warming: a new
+// connection is served by the previous listener until its replacement is
+// active, and a warming cluster answers 503.
+func waitForEnvoySettled(state *TestState) error {
+	if raw, ok := state.GetContextValue(listenerBaselineContextKey); ok {
+		baseline, _ := raw.(string)
+		deadline := time.Now().Add(listenerMoveGrace)
+		for time.Now().Before(deadline) {
+			if version, err := envoyListenersVersion(state); err == nil && version != baseline {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		state.DeleteContextValue(listenerBaselineContextKey)
+	}
+	if err := waitForEnvoyListenersActive(state); err != nil {
+		return err
+	}
+	return waitForEnvoyClustersActive(state)
+}
+
+// waitForEnvoyClustersActive waits until Envoy lists no warming cluster.
+func waitForEnvoyClustersActive(state *TestState) error {
+	deadline := time.Now().Add(envoySettleTimeout)
+	for {
+		var dump struct {
+			Configs []struct {
+				Cluster struct {
+					Name string `json:"name"`
+				} `json:"cluster"`
+			} `json:"configs"`
+		}
+		err := getJSON(state, envoyAdminURL()+"/config_dump?resource=dynamic_warming_clusters", &dump)
+		if err == nil && len(dump.Configs) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("reading Envoy's warming clusters: %w", err)
+			}
+			names := make([]string, 0, len(dump.Configs))
+			for _, c := range dump.Configs {
+				names = append(names, c.Cluster.Name)
+			}
+			return fmt.Errorf("Envoy clusters still warming after %s: %s", envoySettleTimeout, strings.Join(names, ", "))
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

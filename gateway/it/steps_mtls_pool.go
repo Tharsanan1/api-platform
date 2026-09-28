@@ -452,7 +452,10 @@ func (m *mtlsSteps) jsonFieldShouldBeSubjectOfFixture(field, fixture string) err
 }
 
 // clientAuthorityPoolIsEmpty deletes every "client" usage certificate as the
-// current user. A 404 is ignored and any other non-2xx status fails.
+// current user. A 404 is ignored. A 409, a reference that a configuration
+// deleted by this or the previous scenario can still hold, is retried until
+// certificateDeleteTimeout, first after those configurations have left the
+// controller's store. Any other non-2xx status fails.
 func (m *mtlsSteps) clientAuthorityPoolIsEmpty() error {
 	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates?usage=client"); err != nil {
 		return err
@@ -464,10 +467,24 @@ func (m *mtlsSteps) clientAuthorityPoolIsEmpty() error {
 		return fmt.Errorf("failed to parse certificate list while emptying the client authority pool: %w", err)
 	}
 
+	storeConverged := false
 	for _, item := range parsed.Certificates {
 		id := fmt.Sprint(item["id"])
-		if err := m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id); err != nil {
-			return err
+		deadline := time.Now().Add(certificateDeleteTimeout)
+		for {
+			if err := m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id); err != nil {
+				return err
+			}
+			resp := m.httpSteps.LastResponse()
+			if resp == nil || resp.StatusCode != http.StatusConflict || time.Now().After(deadline) {
+				break
+			}
+			if !storeConverged {
+				m.waitForDeletedConfigsToLeaveController(append(append([]string{}, m.previousConfigNames...), scenarioConfigNames(m.state)...))
+				storeConverged = true
+			} else {
+				time.Sleep(cleanupReferencePollInterval * 4)
+			}
 		}
 		resp := m.httpSteps.LastResponse()
 		if resp != nil && resp.StatusCode != http.StatusNotFound && (resp.StatusCode < 200 || resp.StatusCode >= 300) {

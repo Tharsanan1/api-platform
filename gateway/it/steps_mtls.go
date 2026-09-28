@@ -74,6 +74,10 @@ type mtlsSteps struct {
 	// resumingClient keeps a TLS session cache across requests so a later
 	// request on a new connection offers any session the gateway let it cache.
 	resumingClient *http.Client
+
+	// previousConfigNames holds the API and Agent names the previous @mtls
+	// scenario deployed, whose deletes may still be converging.
+	previousConfigNames []string
 }
 
 // RegisterMTLSSteps registers the mTLS step definitions and returns the
@@ -98,10 +102,10 @@ func RegisterMTLSSteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *
 		}
 		// The next scenario starts from a gateway that has applied every
 		// delete: routes gone, pool converged, no listener warming.
-		routes := scenarioAPIRoutes(m.state)
 		cleanupDeployedAPIs(m.state, m.httpSteps)
 		cleanupDeployedAgents(m.state, m.httpSteps)
-		if err := waitForRoutesRemoved(routes); err != nil {
+		m.previousConfigNames = scenarioConfigNames(m.state)
+		if err := waitForDeployedRoutesRemoved(m.state); err != nil {
 			return c, err
 		}
 		m.cleanupTrackedCertificates()

@@ -22,17 +22,20 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
-	"regexp"
-	"strings"
+	"sort"
 	"time"
 )
 
 // cleanupReferenceTimeout and cleanupReferencePollInterval bound each of
 // cleanupTrackedCertificates' waits for references to clear.
+// certificateDeleteTimeout bounds the retries of a delete refused as
+// referenced (409).
 const (
 	cleanupReferenceTimeout      = 5 * time.Second
 	cleanupReferencePollInterval = 25 * time.Millisecond
+	certificateDeleteTimeout     = 10 * time.Second
 )
 
 // waitForDeletedConfigsToLeaveController polls the controller's config dump
@@ -82,74 +85,30 @@ func (m *mtlsSteps) waitForDeletedConfigsToLeaveController(names []string) {
 	}
 }
 
-// deletedRouteTimeout bounds, per API, the wait for a deleted API's route to
-// leave the gateway's plain HTTP listener.
+// deletedRouteTimeout bounds, per configuration, the wait for a deleted
+// configuration's route to leave the gateway's plain HTTP listener.
 const deletedRouteTimeout = 10 * time.Second
 
-// pathParamPattern matches a {param} segment of an operation path.
-var pathParamPattern = regexp.MustCompile(`\{[^}/]*\}`)
-
-// apiRoute is one operation of a deployed API as the router serves it on the
-// plain HTTP listener.
-type apiRoute struct {
-	api    string
-	method string
-	url    string
-}
-
-// scenarioAPIRoutes reads from the controller the first operation of each
-// API this scenario deployed. An API the controller does not hold, or one
-// without operations, is skipped.
-func scenarioAPIRoutes(state *TestState) []apiRoute {
-	raw, ok := state.GetContextValue(deployedAPINamesContextKey)
-	if !ok {
-		return nil
+// waitForDeployedRoutesRemoved waits, up to deletedRouteTimeout each, until
+// the router answers the route of every API and Agent this scenario deployed
+// with 404, which it does once the gateway has applied the delete.
+func waitForDeployedRoutesRemoved(state *TestState) error {
+	routes := deployedRoutes(state)
+	names := make([]string, 0, len(routes))
+	for name := range routes {
+		names = append(names, name)
 	}
-	names, _ := raw.([]string)
-	admin, ok := state.Config.Users["admin"]
-	if !ok {
-		return nil
-	}
-	var routes []apiRoute
-	for _, name := range names {
-		req, err := http.NewRequest(http.MethodGet, state.Config.GatewayControllerURL+"/rest-apis/"+name, nil)
-		if err != nil {
-			continue
-		}
-		req.SetBasicAuth(admin.Username, admin.Password)
-		req.Header.Set("Accept", "application/json")
-		var api struct {
-			Spec struct {
-				Context    string `json:"context"`
-				Version    string `json:"version"`
-				Operations []struct {
-					Method string `json:"method"`
-					Path   string `json:"path"`
-				} `json:"operations"`
-			} `json:"spec"`
-		}
-		if err := doJSON(state.HTTPClient, req, &api); err != nil || len(api.Spec.Operations) == 0 {
-			continue
-		}
-		op := api.Spec.Operations[0]
-		path := strings.ReplaceAll(api.Spec.Context, "$version", api.Spec.Version) + pathParamPattern.ReplaceAllString(op.Path, "x")
-		routes = append(routes, apiRoute{api: name, method: strings.ToUpper(op.Method), url: state.Config.RouterURL + path})
-	}
-	return routes
-}
-
-// waitForRoutesRemoved waits, up to deletedRouteTimeout per route, until the
-// router answers each route with 404, which it does once the gateway has
-// applied the API's delete.
-func waitForRoutesRemoved(routes []apiRoute) error {
+	sort.Strings(names)
 	client := &http.Client{Timeout: 2 * time.Second}
-	for _, r := range routes {
+	for _, name := range names {
+		r := routes[name]
+		url := state.Config.RouterURL + r.path
 		deadline := time.Now().Add(deletedRouteTimeout)
 		lastStatus := 0
 		for {
-			req, err := http.NewRequest(r.method, r.url, nil)
+			req, err := http.NewRequest(r.method, url, nil)
 			if err != nil {
-				return fmt.Errorf("probing the route of deleted API %q: %w", r.api, err)
+				return fmt.Errorf("probing the route of deleted configuration %q: %w", name, err)
 			}
 			resp, err := client.Do(req)
 			if err == nil {
@@ -160,9 +119,9 @@ func waitForRoutesRemoved(routes []apiRoute) error {
 				}
 			}
 			if time.Now().After(deadline) {
-				return fmt.Errorf("deleted API %q: %s %s still answered %d after %s, expected 404", r.api, r.method, r.url, lastStatus, deletedRouteTimeout)
+				return fmt.Errorf("deleted configuration %q: %s %s still answered %d after %s, expected 404", name, r.method, url, lastStatus, deletedRouteTimeout)
 			}
-			time.Sleep(cleanupReferencePollInterval * 4)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 	return nil
@@ -185,10 +144,11 @@ func scenarioConfigNames(state *TestState) []string {
 // certificate this scenario attempted to upload. It first waits, within
 // cleanupReferenceTimeout, for the listing to show none of them referenced
 // by an API. A delete the controller still refuses as referenced, which a
-// reference the listing does not count can cause, is retried once after the
-// scenario's configurations have left the controller's store. Names that
-// were never stored are skipped, and the previous auth header is not
-// restored.
+// reference the listing does not count can cause, is retried until
+// certificateDeleteTimeout, first after the scenario's configurations have
+// left the controller's store; a certificate still refused then is logged
+// as leaked. Names that were never stored are skipped, and the previous auth
+// header is not restored.
 func (m *mtlsSteps) cleanupTrackedCertificates() {
 	if len(m.uploadedIdentityNames) == 0 && len(m.uploadedNames) == 0 {
 		return
@@ -241,15 +201,24 @@ func (m *mtlsSteps) cleanupTrackedCertificates() {
 			if !ok {
 				continue
 			}
-			_ = m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
-			if resp := m.httpSteps.LastResponse(); resp == nil || resp.StatusCode != http.StatusConflict {
-				continue
+			deadline := time.Now().Add(certificateDeleteTimeout)
+			for {
+				_ = m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
+				resp := m.httpSteps.LastResponse()
+				if resp == nil || resp.StatusCode != http.StatusConflict {
+					break
+				}
+				if time.Now().After(deadline) {
+					log.Printf("ERROR: cleanup could not delete certificate %q (id %s): still refused as referenced after %s", name, id, certificateDeleteTimeout)
+					break
+				}
+				if !storeConverged {
+					m.waitForDeletedConfigsToLeaveController(scenarioConfigNames(m.state))
+					storeConverged = true
+				} else {
+					time.Sleep(cleanupReferencePollInterval * 4)
+				}
 			}
-			if !storeConverged {
-				m.waitForDeletedConfigsToLeaveController(scenarioConfigNames(m.state))
-				storeConverged = true
-			}
-			_ = m.httpSteps.SendDELETEToService("gateway-controller", "/certificates/"+id)
 		}
 	}
 	deleteTracked(m.uploadedIdentityNames)

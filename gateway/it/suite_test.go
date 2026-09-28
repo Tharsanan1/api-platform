@@ -269,8 +269,8 @@ func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 			"mock-embedding-provider":    testState.Config.MockEmbeddingProviderURL,
 			"mock-platform-api":          testState.Config.MockPlatformAPIURL,
 		})
-		httpSteps.SetBeforeSend(func(req *http.Request) {
-			settlePendingPropagationBeforeGatewayRequest(testState, req)
+		httpSteps.SetBeforeSend(func(req *http.Request) error {
+			return beforeRequest(testState, req)
 		})
 		assertSteps = steps.NewAssertSteps(httpSteps)
 

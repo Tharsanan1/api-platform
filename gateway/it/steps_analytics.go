@@ -86,10 +86,11 @@ func RegisterAnalyticsSteps(ctx *godog.ScenarioContext, state *TestState, httpSt
 }
 
 // In an @mtls scenario the reset waits for the collector to stay empty this
-// long, since events published up to one interval after the reset belong to
-// earlier requests. The drain gives up after analyticsDrainBound.
+// long, since events that reach it within one pass of the pipeline (access
+// log flush 1 s, publish interval 2 s, publish timer 1 s) belong to earlier
+// requests. The drain gives up after analyticsDrainBound.
 const (
-	analyticsQuietWindow = 2500 * time.Millisecond
+	analyticsQuietWindow = 4500 * time.Millisecond
 	analyticsDrainBound  = 10 * time.Second
 )
 
@@ -230,12 +231,43 @@ func (a *AnalyticsSteps) theAnalyticsCollectorShouldReceiveAtLeastEventsWithin(m
 	for {
 		err := a.theAnalyticsCollectorShouldHaveReceivedAtLeastEvents(minCount)
 		if err == nil {
-			return nil
+			break
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("within %ds: %w", seconds, err)
 		}
 		time.Sleep(analyticsPollInterval)
+	}
+	if !isMTLSScenario(a.state) {
+		return nil
+	}
+	return a.waitForAnalyticsCountToHold()
+}
+
+// waitForAnalyticsCountToHold waits until the collector's event count stays
+// unchanged for analyticsQuietWindow, so the latest event is the last to
+// arrive. It gives up after analyticsDrainBound.
+func (a *AnalyticsSteps) waitForAnalyticsCountToHold() error {
+	deadline := time.Now().Add(analyticsDrainBound)
+	held, err := a.analyticsEventCount()
+	if err != nil {
+		return err
+	}
+	heldSince := time.Now()
+	for {
+		time.Sleep(analyticsPollInterval)
+		count, err := a.analyticsEventCount()
+		if err != nil {
+			return err
+		}
+		if count != held {
+			held, heldSince = count, time.Now()
+		} else if time.Since(heldSince) >= analyticsQuietWindow {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the analytics collector's event count did not hold for %s within %s", analyticsQuietWindow, analyticsDrainBound)
+		}
 	}
 }
 

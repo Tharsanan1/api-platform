@@ -20,6 +20,9 @@ package it
 
 import (
 	"encoding/base64"
+	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/cucumber/godog"
@@ -36,27 +39,63 @@ const policyPropagationDelay = 1 * time.Second
 // lives in TestState.Context so TestState.Reset clears it per scenario.
 const deployedAPINamesContextKey = "deployedAPINames"
 
-// apiConfigMetadata captures just enough of a RestApi configuration's YAML to
-// recover its name for cleanup tracking; every other field is ignored.
+// apiConfigMetadata captures just enough of a RestApi or Agent
+// configuration's YAML to recover its name, the route it serves and whether
+// it carries mtls-auth; every other field is ignored.
 type apiConfigMetadata struct {
+	Kind     string `yaml:"kind"`
 	Metadata struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
+	Spec struct {
+		Context    string `yaml:"context"`
+		Version    string `yaml:"version"`
+		Operations []struct {
+			Method string `yaml:"method"`
+			Path   string `yaml:"path"`
+		} `yaml:"operations"`
+		A2A struct {
+			OperationConfigs struct {
+				Transports []struct {
+					PathPrefix string `yaml:"pathPrefix"`
+				} `yaml:"transports"`
+			} `yaml:"operationConfigs"`
+		} `yaml:"a2a"`
+	} `yaml:"spec"`
+}
+
+// deployedRoutesContextKey holds the route of every API and Agent this
+// scenario deployed, keyed by the configuration's name, so cleanup can see
+// each delete reach the router.
+const deployedRoutesContextKey = "deployedRoutes"
+
+// deployedRoute is the plain-listener route a deployed configuration serves.
+type deployedRoute struct {
+	name     string
+	method   string
+	path     string
+	mtlsAuth bool
 }
 
 // deployedAgentNamesContextKey holds the Agent names this scenario deployed,
 // on the same terms as deployedAPINamesContextKey.
 const deployedAgentNamesContextKey = "deployedAgentNames"
 
-// recordDeployedAPIName records the configuration's metadata.name for
-// end-of-scenario cleanup. A body without a parseable name created nothing,
-// so it is skipped.
+// pathParamPattern matches a {param} segment of an operation path.
+var pathParamPattern = regexp.MustCompile(`\{[^}/]*\}`)
+
+// mtlsAuthPolicyPattern matches an mtls-auth policy entry in a configuration.
+var mtlsAuthPolicyPattern = regexp.MustCompile(`(?m)name:\s*["']?mtls-auth["']?\s*$`)
+
+// recordDeployedAPIName records the configuration's metadata.name and route
+// for end-of-scenario cleanup. A body without a parseable name created
+// nothing, so it is skipped.
 func recordDeployedAPIName(state *TestState, body string) {
 	recordDeployedName(state, deployedAPINamesContextKey, body)
 }
 
-// recordDeployedAgentName records an Agent configuration's metadata.name for
-// end-of-scenario cleanup.
+// recordDeployedAgentName records an Agent configuration's metadata.name and
+// route for end-of-scenario cleanup.
 func recordDeployedAgentName(state *TestState, body string) {
 	recordDeployedName(state, deployedAgentNamesContextKey, body)
 }
@@ -70,6 +109,65 @@ func recordDeployedName(state *TestState, key, body string) {
 	names, _ := existing.([]string)
 	names = append(names, cfg.Metadata.Name)
 	state.SetContextValue(key, names)
+
+	routes := deployedRoutes(state)
+	routes[cfg.Metadata.Name] = routeOf(cfg, body)
+	state.SetContextValue(deployedRoutesContextKey, routes)
+}
+
+// routeOf derives the route a configuration serves on the plain listener: an
+// API's first operation, or an Agent's first transport, which takes POST.
+func routeOf(cfg apiConfigMetadata, body string) deployedRoute {
+	route := deployedRoute{
+		name:     cfg.Metadata.Name,
+		method:   http.MethodGet,
+		path:     strings.ReplaceAll(cfg.Spec.Context, "$version", cfg.Spec.Version),
+		mtlsAuth: mtlsAuthPolicyPattern.MatchString(body),
+	}
+	switch {
+	case len(cfg.Spec.Operations) > 0:
+		op := cfg.Spec.Operations[0]
+		route.method = strings.ToUpper(op.Method)
+		route.path += pathParamPattern.ReplaceAllString(op.Path, "x")
+	case len(cfg.Spec.A2A.OperationConfigs.Transports) > 0:
+		route.method = http.MethodPost
+		route.path += strings.TrimSuffix(cfg.Spec.A2A.OperationConfigs.Transports[0].PathPrefix, "/")
+	}
+	return route
+}
+
+// deployedRoutes returns a copy of the routes this scenario recorded.
+func deployedRoutes(state *TestState) map[string]deployedRoute {
+	raw, _ := state.GetContextValue(deployedRoutesContextKey)
+	recorded, _ := raw.(map[string]deployedRoute)
+	routes := make(map[string]deployedRoute, len(recorded)+1)
+	for name, route := range recorded {
+		routes[name] = route
+	}
+	return routes
+}
+
+// deployedConfigCarriesMTLSAuth reports whether the named configuration, as
+// this scenario last deployed it, carries mtls-auth.
+func deployedConfigCarriesMTLSAuth(state *TestState, name string) bool {
+	route, ok := deployedRoutes(state)[name]
+	return ok && route.mtlsAuth
+}
+
+// recordUpdatedRoute replaces the recorded route of an API this scenario
+// deployed with the one its update serves.
+func recordUpdatedRoute(state *TestState, name, body string) {
+	routes := deployedRoutes(state)
+	if _, ok := routes[name]; !ok {
+		return
+	}
+	var cfg apiConfigMetadata
+	if err := yaml.Unmarshal([]byte(body), &cfg); err != nil {
+		return
+	}
+	cfg.Metadata.Name = name
+	routes[name] = routeOf(cfg, body)
+	state.SetContextValue(deployedRoutesContextKey, routes)
 }
 
 // deployAPIConfiguration POSTs a RestApi configuration to the gateway
@@ -81,7 +179,7 @@ func deployAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, body s
 	if err := httpSteps.SendPOSTToService("gateway-controller", "/rest-apis", &godog.DocString{Content: body}); err != nil {
 		return err
 	}
-	markPropagationPendingIfAccepted(state, httpSteps)
+	markPropagationPendingIfAccepted(state, httpSteps, mtlsAuthPolicyPattern.MatchString(body))
 	return nil
 }
 
@@ -90,21 +188,23 @@ func deployAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, body s
 // the gateway untouched, so nothing needs to wait for it. The wait itself is
 // paid by the next gateway request, unless an endpoint-wait step polls the
 // change into place first.
-func markPropagationPendingIfAccepted(state *TestState, httpSteps *steps.HTTPSteps) {
+func markPropagationPendingIfAccepted(state *TestState, httpSteps *steps.HTTPSteps, changesListener bool) {
 	if resp := httpSteps.LastResponse(); resp != nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
 		return
 	}
-	markPropagationPending(state)
+	markPropagationPending(state, changesListener)
 }
 
 // updateAPIConfiguration PUTs a RestApi configuration to the gateway
 // controller under the given API name and marks policy propagation pending.
 func updateAPIConfiguration(state *TestState, httpSteps *steps.HTTPSteps, apiName, body string) error {
 	httpSteps.SetHeader("Content-Type", "application/yaml")
+	changesListener := deployedConfigCarriesMTLSAuth(state, apiName) || mtlsAuthPolicyPattern.MatchString(body)
 	if err := httpSteps.SendPUTToService("gateway-controller", "/rest-apis/"+apiName, &godog.DocString{Content: body}); err != nil {
 		return err
 	}
-	markPropagationPendingIfAccepted(state, httpSteps)
+	markPropagationPendingIfAccepted(state, httpSteps, changesListener)
+	recordUpdatedRoute(state, apiName, body)
 	return nil
 }
 
@@ -155,7 +255,7 @@ func RegisterAPISteps(ctx *godog.ScenarioContext, state *TestState, httpSteps *s
 		if err != nil {
 			return err
 		}
-		markPropagationPendingIfAccepted(state, httpSteps)
+		markPropagationPendingIfAccepted(state, httpSteps, deployedConfigCarriesMTLSAuth(state, name))
 		return nil
 	}
 

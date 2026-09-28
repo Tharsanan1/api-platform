@@ -71,12 +71,13 @@ Feature: Seeing what client and backend certificates did
     Given I reset the analytics collector
     When I send a GET request to "https://localhost:8443/obs/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
+    And the "gateway-runtime" access log should show within 10 seconds:
+      | "peerSubj":"CN=client-wrong-ca" |
     When I send a GET request to "https://localhost:8443/obs/v1.0/anything" with client certificate "client-expired"
     Then the response status code should be 401
     And the "gateway-runtime" access log should show within 10 seconds:
-      | "peerSubj":"CN=client-wrong-ca" |
-      | thumbprint of "client-expired"  |
-    And the analytics collector should receive at least 2 events within 5 seconds
+      | thumbprint of "client-expired" |
+    And the analytics collector should receive at least 2 events within 10 seconds
     And the analytics collector should have received at least 2 events
     And the latest analytics event should have response status 401
 
@@ -137,10 +138,9 @@ Feature: Seeing what client and backend certificates did
     And the response should contain metric "cert_name=\"obs-partner-a\""
 
   Scenario: A policy deny is counted like any other policy deny and nothing more
+    Given I note the policy engine counter "policy_executions_total" for series labelled "policy_name=\"mtls-auth\",status=\"denied\""
     When I send a GET request to "https://localhost:8443/obs/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
+    And the policy engine counter "policy_executions_total" for series labelled "policy_name=\"mtls-auth\",status=\"denied\"" should have grown by at least 1 within 5 seconds
     When I send a GET request to the policy engine metrics endpoint
-    Then the response should contain metric "policy_executions_total{"
-    And the response should contain metric "policy_name=\"mtls-auth\""
-    And the response should contain metric "status=\"denied\""
-    And the response should not contain metric "mtls_auth_"
+    Then the response should not contain metric "mtls_auth_"

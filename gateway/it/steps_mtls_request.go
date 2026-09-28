@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -32,12 +33,14 @@ import (
 // TLS level to observe whether the server asks for a client certificate.
 const httpsListenerAddr = "localhost:8443"
 
-// mtlsListenerProbeRetries and mtlsListenerProbeInterval absorb xDS
+// mtlsListenerProbeTimeout and mtlsListenerProbeInterval absorb xDS
 // propagation lag in the polling listener probes. The single-shot
 // assertions probe once, after any pending propagation has settled.
+// tlsDialTimeout bounds each TLS handshake a probe makes.
 const (
-	mtlsListenerProbeRetries  = 10
+	mtlsListenerProbeTimeout  = 15 * time.Second
 	mtlsListenerProbeInterval = 500 * time.Millisecond
+	tlsDialTimeout            = 10 * time.Second
 )
 
 // probeClientCertRequested reports whether the HTTPS listener sent a
@@ -54,7 +57,7 @@ func (m *mtlsSteps) probeClientCertRequested() (bool, error) {
 			return &tls.Certificate{}, nil
 		},
 	}
-	conn, err := tls.Dial("tcp", httpsListenerAddr, conf)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: tlsDialTimeout}, "tcp", httpsListenerAddr, conf)
 	if err != nil {
 		return false, fmt.Errorf("failed to complete a TLS handshake against %s: %w", httpsListenerAddr, err)
 	}
@@ -64,7 +67,8 @@ func (m *mtlsSteps) probeClientCertRequested() (bool, error) {
 
 func (m *mtlsSteps) httpsListenerShouldRequestClientCertificate() error {
 	var lastErr error
-	for attempt := 0; attempt < mtlsListenerProbeRetries; attempt++ {
+	deadline := time.Now().Add(mtlsListenerProbeTimeout)
+	for attempt := 0; attempt == 0 || time.Now().Before(deadline); attempt++ {
 		if attempt > 0 {
 			time.Sleep(mtlsListenerProbeInterval)
 		}
@@ -85,7 +89,8 @@ func (m *mtlsSteps) httpsListenerShouldRequestClientCertificate() error {
 // listener no longer requests a client certificate.
 func (m *mtlsSteps) httpsListenerShouldStopRequestingClientCertificate() error {
 	var lastErr error
-	for attempt := 0; attempt < mtlsListenerProbeRetries; attempt++ {
+	deadline := time.Now().Add(mtlsListenerProbeTimeout)
+	for attempt := 0; attempt == 0 || time.Now().Before(deadline); attempt++ {
 		if attempt > 0 {
 			time.Sleep(mtlsListenerProbeInterval)
 		}
@@ -103,7 +108,9 @@ func (m *mtlsSteps) httpsListenerShouldStopRequestingClientCertificate() error {
 }
 
 func (m *mtlsSteps) httpsListenerShouldNotRequestClientCertificate() error {
-	settlePendingPropagation(m.state)
+	if err := settlePendingPropagation(m.state); err != nil {
+		return err
+	}
 	invoked, err := m.probeClientCertRequested()
 	if err != nil {
 		return err
@@ -270,8 +277,10 @@ func (m *mtlsSteps) httpsListenerShouldPresentCertificateFile(path string) error
 	}
 	expected := sha256.Sum256(block.Bytes)
 
-	settlePendingPropagation(m.state)
-	conn, err := tls.Dial("tcp", httpsListenerAddr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	if err := settlePendingPropagation(m.state); err != nil {
+		return err
+	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: tlsDialTimeout}, "tcp", httpsListenerAddr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		return fmt.Errorf("failed to complete a TLS handshake against %s: %w", httpsListenerAddr, err)
 	}

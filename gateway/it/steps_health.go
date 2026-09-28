@@ -300,7 +300,7 @@ func (h *HealthSteps) iWaitForEndpointToBeReadyWithMethodAndBody(url, method, bo
 // settleAfterEndpointResponds runs once a polled endpoint has answered as
 // expected. It waits for the policy snapshot to sync and, when this scenario
 // changed the client authority pool, for the gateway to apply the pool. In an
-// @mtls scenario it then waits for Envoy's listeners to become active. The
+// @mtls scenario it then waits for Envoy to settle. The
 // pending propagation the endpoint just observed is then released, so the
 // next gateway request does not wait for it again.
 func (h *HealthSteps) settleAfterEndpointResponds() error {
@@ -313,7 +313,7 @@ func (h *HealthSteps) settleAfterEndpointResponds() error {
 		}
 	}
 	if isMTLSScenario(h.state) {
-		if err := waitForEnvoyListenersActive(h.state); err != nil {
+		if err := waitForEnvoySettled(h.state); err != nil {
 			return err
 		}
 	}
@@ -322,35 +322,59 @@ func (h *HealthSteps) settleAfterEndpointResponds() error {
 }
 
 func (h *HealthSteps) waitForPolicySnapshotSync() error {
+	return waitForPolicySnapshotSync(h.state)
+}
+
+// snapshotControllerAdminURL is the admin API of the controller that feeds
+// xDS to gateway-runtime, whose policy-chain version the policy engine
+// echoes. In the two-controller Postgres topology the suite sets
+// PolicySnapshotControllerAdminURL to gateway-controller-xds (port 9093);
+// otherwise (single-controller topologies, unit tests) it is the management
+// controller.
+func snapshotControllerAdminURL(state *TestState) string {
+	if state.Config.PolicySnapshotControllerAdminURL != "" {
+		return state.Config.PolicySnapshotControllerAdminURL
+	}
+	return state.Config.GatewayControllerAdminURL
+}
+
+// snapshotControllerPolicyVersion reads the snapshot controller's current
+// policy chain version.
+func snapshotControllerPolicyVersion(state *TestState) (string, error) {
+	return getControllerPolicyVersion(state, snapshotControllerAdminURL(state)+"/xds_sync_status")
+}
+
+// waitForPolicySnapshotSync waits until the policy engine echoes the snapshot
+// controller's policy chain version. While an API mutation is pending with a
+// recorded pre-mutation version, the controller's version must also have
+// moved past it, so a mutation the controller has not yet published cannot
+// pass as synced.
+func waitForPolicySnapshotSync(state *TestState) error {
 	maxAttempts := 50
 	attemptInterval := 300 * time.Millisecond
 
-	// Probe the controller that actually feeds xDS to gateway-runtime, whose
-	// policy-chain version the policy engine echoes. In the two-controller
-	// Postgres topology the suite sets PolicySnapshotControllerAdminURL to
-	// gateway-controller-xds (port 9093); otherwise (single-controller
-	// topologies, unit tests) we fall back to the management controller.
-	adminBase := h.state.Config.PolicySnapshotControllerAdminURL
-	if adminBase == "" {
-		adminBase = h.state.Config.GatewayControllerAdminURL
+	baseline := ""
+	if pending, ok := currentPendingPropagation(state); ok {
+		baseline = pending.policyBaseline
 	}
-	controllerURL := fmt.Sprintf("%s/xds_sync_status", adminBase)
-	policyEngineURL := fmt.Sprintf("%s/xds_sync_status", h.state.Config.PolicyEngineURL)
+	controllerURL := snapshotControllerAdminURL(state) + "/xds_sync_status"
+	policyEngineURL := fmt.Sprintf("%s/xds_sync_status", state.Config.PolicyEngineURL)
 	lastControllerVersion := ""
 	lastRuntimeVersion := ""
 	var lastControllerErr error
 	var lastRuntimeErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		controllerVersion, controllerErr := h.getControllerPolicyVersion(controllerURL)
-		runtimeVersion, runtimeErr := h.getPolicyEnginePolicyVersion(policyEngineURL)
+		controllerVersion, controllerErr := getControllerPolicyVersion(state, controllerURL)
+		runtimeVersion, runtimeErr := getPolicyEnginePolicyVersion(state, policyEngineURL)
 		lastControllerVersion = controllerVersion
 		lastRuntimeVersion = runtimeVersion
 		lastControllerErr = controllerErr
 		lastRuntimeErr = runtimeErr
 
 		if controllerErr == nil && runtimeErr == nil &&
-			controllerVersion == runtimeVersion && controllerVersion != "" {
+			controllerVersion == runtimeVersion && controllerVersion != "" &&
+			(baseline == "" || controllerVersion != baseline) {
 			return nil
 		}
 
@@ -359,21 +383,21 @@ func (h *HealthSteps) waitForPolicySnapshotSync() error {
 		}
 	}
 
-	return fmt.Errorf("policy snapshot versions did not sync in time between controller and policy engine: controller_version=%q runtime_version=%q controller_err=%v runtime_err=%v",
-		lastControllerVersion, lastRuntimeVersion, lastControllerErr, lastRuntimeErr)
+	return fmt.Errorf("policy snapshot versions did not sync in time between controller and policy engine: controller_version=%q runtime_version=%q pre_mutation_version=%q controller_err=%v runtime_err=%v",
+		lastControllerVersion, lastRuntimeVersion, baseline, lastControllerErr, lastRuntimeErr)
 }
 
-func (h *HealthSteps) getControllerPolicyVersion(url string) (string, error) {
+func getControllerPolicyVersion(state *TestState, url string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
 
-	if admin, ok := h.state.Config.Users["admin"]; ok {
+	if admin, ok := state.Config.Users["admin"]; ok {
 		req.SetBasicAuth(admin.Username, admin.Password)
 	}
 
-	resp, err := h.state.HTTPClient.Do(req)
+	resp, err := state.HTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -393,8 +417,8 @@ func (h *HealthSteps) getControllerPolicyVersion(url string) (string, error) {
 	return *payload.PolicyChainVersion, nil
 }
 
-func (h *HealthSteps) getPolicyEnginePolicyVersion(url string) (string, error) {
-	resp, err := h.state.HTTPClient.Get(url)
+func getPolicyEnginePolicyVersion(state *TestState, url string) (string, error) {
+	resp, err := state.HTTPClient.Get(url)
 	if err != nil {
 		return "", err
 	}

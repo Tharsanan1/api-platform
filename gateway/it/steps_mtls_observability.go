@@ -36,8 +36,8 @@ type mtlsObservabilitySteps struct {
 	mtls           *mtlsSteps
 	analytics      *AnalyticsSteps
 
-	// scenarioStart bounds log polling so a line from an earlier scenario
-	// cannot satisfy this scenario's assertion.
+	// scenarioStart bounds log polling when the scenario has sent no request
+	// yet.
 	scenarioStart time.Time
 
 	// containerIDs caches each service's container id for the scenario.
@@ -48,10 +48,10 @@ type mtlsObservabilitySteps struct {
 // thumbprint rather than a literal substring.
 var logThumbprintRow = regexp.MustCompile(`^thumbprint of "([^"]+)"$`)
 
-// logExpectation is one thing a container log must show.
+// logExpectation is one thing a container log line must show.
 type logExpectation struct {
 	describe string
-	shownIn  func(logs string) bool
+	shownIn  func(line string) bool
 }
 
 // RegisterMTLSObservabilitySteps registers the mTLS observability steps.
@@ -79,8 +79,8 @@ func RegisterMTLSObservabilitySteps(ctx *godog.ScenarioContext, composeManager *
 		o.latestAnalyticsEventShouldHaveNoMetadataField)
 }
 
-// containerLogShouldContainWithin polls the service's log since the scenario
-// started until it contains substr, matched exactly and case-sensitively.
+// containerLogShouldContainWithin polls the service's log since the latest
+// request until a line contains substr, matched exactly and case-sensitively.
 func (o *mtlsObservabilitySteps) containerLogShouldContainWithin(service, substr string, seconds int) error {
 	return o.pollLogs(service, seconds, []logExpectation{logContains(unescapeGherkinQuotes(substr))})
 }
@@ -95,9 +95,9 @@ func (o *mtlsObservabilitySteps) containerLogShouldContainThumbprintOfFixtureWit
 	return o.pollLogs(service, seconds, []logExpectation{expectation})
 }
 
-// accessLogShouldShowWithin polls the service's log until it shows every
-// row of the one-column table: a literal substring, matched exactly and
-// case-sensitively, or `thumbprint of "fixture"`.
+// accessLogShouldShowWithin polls the service's log until one line shows
+// every row of the one-column table: a literal substring, matched exactly
+// and case-sensitively, or `thumbprint of "fixture"`.
 func (o *mtlsObservabilitySteps) accessLogShouldShowWithin(service string, seconds int, table *godog.Table) error {
 	expectations := make([]logExpectation, 0, len(table.Rows))
 	for _, row := range table.Rows {
@@ -121,7 +121,7 @@ func (o *mtlsObservabilitySteps) accessLogShouldShowWithin(service string, secon
 func logContains(substr string) logExpectation {
 	return logExpectation{
 		describe: fmt.Sprintf("%q", substr),
-		shownIn:  func(logs string) bool { return strings.Contains(logs, substr) },
+		shownIn:  func(line string) bool { return strings.Contains(line, substr) },
 	}
 }
 
@@ -136,45 +136,61 @@ func (o *mtlsObservabilitySteps) logContainsThumbprintOf(fixture string) (logExp
 	lowerThumbprint := strings.ToLower(thumbprint)
 	return logExpectation{
 		describe: fmt.Sprintf("the thumbprint of fixture %q (%s)", fixture, thumbprint),
-		shownIn:  func(logs string) bool { return strings.Contains(strings.ToLower(logs), lowerThumbprint) },
+		shownIn:  func(line string) bool { return strings.Contains(strings.ToLower(line), lowerThumbprint) },
 	}, nil
 }
 
-// pollLogs fetches the service's log since the scenario started every 500ms,
-// once per poll for all expectations, until every expectation is shown or
-// the timeout elapses.
+// pollLogs fetches, every 500ms, the service's log since the scenario's
+// latest request was sent, until one log line shows every expectation or the
+// timeout elapses.
 func (o *mtlsObservabilitySteps) pollLogs(service string, seconds int, expectations []logExpectation) error {
 	containerID, err := o.containerID(service)
 	if err != nil {
 		return err
 	}
+	since := o.scenarioStart
+	if at, ok := lastRequestAt(o.mtls.state); ok && at.After(since) {
+		since = at
+	}
 
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 	var lastErr error
 	for {
-		var missing []string
-		logs, err := ContainerLogs(containerID, o.scenarioStart)
+		read := false
+		logs, err := ContainerLogs(containerID, since)
 		if err != nil {
 			lastErr = err
 		} else {
-			for _, e := range expectations {
-				if !e.shownIn(logs) {
-					missing = append(missing, e.describe)
+			read = true
+			for _, line := range strings.Split(logs, "\n") {
+				if lineShowsAll(line, expectations) {
+					return nil
 				}
-			}
-			if len(missing) == 0 {
-				return nil
 			}
 		}
 
 		if time.Now().After(deadline) {
-			if lastErr != nil && missing == nil {
+			if !read {
 				return fmt.Errorf("%q container log could not be read within %ds: %v", service, seconds, lastErr)
 			}
-			return fmt.Errorf("%q container log did not show %s within %ds", service, strings.Join(missing, ", "), seconds)
+			described := make([]string, 0, len(expectations))
+			for _, e := range expectations {
+				described = append(described, e.describe)
+			}
+			return fmt.Errorf("no %q container log line since the latest request showed %s within %ds", service, strings.Join(described, " and "), seconds)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// lineShowsAll reports whether one log line shows every expectation.
+func lineShowsAll(line string, expectations []logExpectation) bool {
+	for _, e := range expectations {
+		if !e.shownIn(line) {
+			return false
+		}
+	}
+	return true
 }
 
 // containerID resolves the service's container once per scenario.

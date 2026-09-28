@@ -435,10 +435,30 @@ func (cm *ComposeManager) DumpLogs(outputFile string) error {
 	return nil
 }
 
-// serviceLogsSinceMargin widens the --since boundary so clock skew between
-// the test host and the Docker daemon cannot drop a line emitted after
-// `since`. Callers match by content, so extra earlier lines are harmless.
-const serviceLogsSinceMargin = 5 * time.Second
+// serviceLogsSinceMargin moves the --since boundary slightly earlier than
+// the instant asked for, beyond the uncertainty of daemonClockOffset.
+const serviceLogsSinceMargin = 100 * time.Millisecond
+
+// daemonClock is the Docker daemon's clock minus the test host's, and the
+// uncertainty of that reading, measured once with `docker info`. A --since
+// boundary is compared with the daemon's log timestamps, so a host instant
+// is shifted by the offset before it is passed.
+var daemonClock = sync.OnceValues(func() (offset, uncertainty time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	before := time.Now()
+	out, err := execCommandContext(ctx, "docker", "info", "--format", "{{.SystemTime}}").Output()
+	after := time.Now()
+	if err != nil {
+		return 0, time.Second
+	}
+	daemonNow, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, time.Second
+	}
+	half := after.Sub(before) / 2
+	return daemonNow.Sub(before.Add(half)), half
+})
 
 // ServiceContainerID returns the id of the service's running container.
 func (cm *ComposeManager) ServiceContainerID(service string) (string, error) {
@@ -462,13 +482,15 @@ func (cm *ComposeManager) ServiceContainerID(service string) (string, error) {
 	return id, nil
 }
 
-// ContainerLogs returns a container's log output emitted since roughly the
-// given time, for steps that poll for a line during a scenario.
+// ContainerLogs returns a container's log output emitted since the given
+// host time, for steps that poll for a line during a scenario.
 func ContainerLogs(containerID string, since time.Time) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cmd := execCommandContext(ctx, "docker", "logs", "--since", since.Add(-serviceLogsSinceMargin).UTC().Format(time.RFC3339Nano), containerID)
+	offset, uncertainty := daemonClock()
+	boundary := since.Add(offset - uncertainty - serviceLogsSinceMargin)
+	cmd := execCommandContext(ctx, "docker", "logs", "--since", boundary.UTC().Format(time.RFC3339Nano), containerID)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("failed to collect logs for container %s: %w", containerID, err)

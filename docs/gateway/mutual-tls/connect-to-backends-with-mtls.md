@@ -62,21 +62,19 @@ curl -X POST http://localhost:9090/api/management/v1/rest-apis \
 
 ## What the gateway checks at deploy time
 
-The gateway refuses a `tls` block that could never work, and returns `400` with the field path of each problem. The messages below show the wording, with this page's names filled in:
+The gateway refuses a `tls` block that could never work, and returns `400` with the field path of each problem. Each row shows the mistake, why the gateway won't accept it, and the message, with this page's names filled in:
 
-| Problem | Message |
-|---|---|
-| `tls` on an inline upstream | `tls is not supported on an inline upstream; move it to upstreamDefinitions and reference it` |
-| A target that isn't `https://` | `tls is configured but this target is http://; every target of a definition with tls must be https://` |
-| An identity that doesn't exist | `no gateway identity named gateway-billing exists on this gateway` |
-| An identity that names another usage | `billing-ca is not a gateway identity (usage: identity)` |
-| A trust certificate that doesn't exist | `no certificate named billing-ca exists on this gateway` |
-| A client authority in `trustedCAs` | `partner-a is a client authority (usage: client); trustedCAs takes usage: upstream certificates` |
-| An identity in `trustedCAs` | `gateway-billing is a gateway identity (usage: identity); trustedCAs takes usage: upstream certificates` |
-| An empty `trustedCAs` | `omit trustedCAs to use the gateway trust bundle, or list at least one certificate` |
-| A field other than the three above | `unknown parameter mode`, naming the field |
-
-The `tls` block always goes on an `upstreamDefinitions` entry, never on an inline upstream that sets `url` directly. Every target of a definition that carries `tls` must use `https://`.
+| Mistake | Why it's refused | Message |
+|---|---|---|
+| `tls` is placed on `upstream.main` or `upstream.sandbox` with a `url` | Backend TLS is configured on a named definition, so every target in it and every operation that references it get the same settings. | `tls is not supported on an inline upstream; move it to upstreamDefinitions and reference it` |
+| A target URL starts with `http://` | A certificate can only be presented or verified on a TLS connection. | `tls is configured but this target is http://; every target of a definition with tls must be https://` |
+| `identity` names an entry that doesn't exist | The gateway would have nothing to present. | `no gateway identity named gateway-billing exists on this gateway` |
+| `identity` names a client authority or a trust certificate | Only a `usage: identity` entry has a private key to present. | `billing-ca is not a gateway identity (usage: identity)` |
+| `trustedCAs` names an entry that doesn't exist | The gateway would trust nothing for this backend, so every connection to it would fail. | `no certificate named billing-ca exists on this gateway` |
+| `trustedCAs` names a client authority | A client authority says who may call the gateway. It says nothing about who may have issued the backend's certificate. | `partner-a is a client authority (usage: client); trustedCAs takes usage: upstream certificates` |
+| `trustedCAs` names a gateway identity | An identity is the certificate the gateway presents, not an authority that issues backend certificates. No backend certificate could ever be verified against it. | `gateway-billing is a gateway identity (usage: identity); trustedCAs takes usage: upstream certificates` |
+| `trustedCAs` is an empty list | An empty list could mean "use the gateway trust bundle" or "trust nothing". The gateway asks you to say which: omit the field, or list at least one certificate. | `omit trustedCAs to use the gateway trust bundle, or list at least one certificate` |
+| `tls` contains a field other than `identity`, `trustedCAs`, or `verifyHostName` | A misspelled field would otherwise be ignored, and the setting you meant would silently not apply. | `unknown parameter mode`, naming the field |
 
 Two findings don't block the deploy, and come back as warnings instead:
 

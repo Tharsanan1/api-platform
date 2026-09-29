@@ -16,9 +16,9 @@
   "deployedAt": "2026-04-24T07:21:13Z",
   "warnings": [
     {
-      "code": "MTLS_ACCEPT_INHERITS_POOL",
-      "field": "spec.policies[0].params.accept",
-      "message": "accept is omitted and the pool holds 2 authorities; this API accepts certificates from all of them"
+      "code": "TLS_VERIFY_HOSTNAME_DISABLED",
+      "field": "spec.upstreamDefinitions[0].tls.verifyHostName",
+      "message": "hostname verification is disabled for this upstream; the backend certificate's name is not checked against the target host"
     }
   ]
 }
@@ -54,9 +54,9 @@ Server-managed lifecycle information for a resource
 
 ```json
 {
-  "code": "MTLS_ACCEPT_INHERITS_POOL",
-  "field": "spec.policies[0].params.accept",
-  "message": "accept is omitted and the pool holds 2 authorities; this API accepts certificates from all of them"
+  "code": "TLS_VERIFY_HOSTNAME_DISABLED",
+  "field": "spec.upstreamDefinitions[0].tls.verifyHostName",
+  "message": "hostname verification is disabled for this upstream; the backend certificate's name is not checked against the target host"
 }
 
 ```
@@ -1975,9 +1975,9 @@ continued
     "deployedAt": "2026-04-24T07:21:13Z",
     "warnings": [
       {
-        "code": "MTLS_ACCEPT_INHERITS_POOL",
-        "field": "spec.policies[0].params.accept",
-        "message": "accept is omitted and the pool holds 2 authorities; this API accepts certificates from all of them"
+        "code": "TLS_VERIFY_HOSTNAME_DISABLED",
+        "field": "spec.upstreamDefinitions[0].tls.verifyHostName",
+        "message": "hostname verification is disabled for this upstream; the backend certificate's name is not checked against the target host"
       }
     ]
   }

@@ -3404,13 +3404,13 @@ components:
             - HEADER_CERT_BYPASS_ACTIVE
             - TLS_VERIFY_HOSTNAME_DISABLED
             - TLS_IDENTITY_EXPIRED
-          example: MTLS_ACCEPT_INHERITS_POOL
+          example: TLS_VERIFY_HOSTNAME_DISABLED
         field:
           type: string
-          example: spec.policies[0].params.accept
+          example: spec.upstreamDefinitions[0].tls.verifyHostName
         message:
           type: string
-          example: accept is omitted and the pool holds 2 authorities; this API accepts certificates from all of them
+          example: hostname verification is disabled for this upstream; the backend certificate's name is not checked against the target host
 
     # Request body for create/update: user/resource fields only (no server-managed status).
     RestAPIRequest:

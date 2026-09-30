@@ -20,21 +20,30 @@ package platformgateway
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/wso2/api-platform/tests/framework/core/cleanup"
 	"github.com/wso2/api-platform/tests/framework/core/components"
 	frameworkruntime "github.com/wso2/api-platform/tests/framework/core/runtime"
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
+	"github.com/wso2/api-platform/tests/framework/core/util/retry"
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
+	"github.com/wso2/api-platform/tests/framework/core/util/testpki"
 	stepscommon "github.com/wso2/api-platform/tests/framework/suites/it/steps/common"
 )
 
@@ -690,4 +699,511 @@ func TestServiceUnhealthy(t *testing.T) {
 
 	local.Set(healthResultsKey, map[string]bool{"policy-engine": false})
 	require.ErrorContains(t, steps.serviceUnhealthy(ctx, "policy-engine"), "stored as map[string]bool")
+}
+
+// fakeMTLSGateway answers the controller, policy engine and Envoy admin reads the mutual TLS
+// steps make, from state a test sets.
+type fakeMTLSGateway struct {
+	mu                sync.Mutex
+	pool              map[string][]string // controller and policy engine: name -> certificate PEMs
+	engineOmits       string
+	attachesMTLSAuth  bool
+	controllerVersion string
+	engineVersion     string
+	listenerNamesCA   bool
+	listenerWarming   bool
+	secret            []byte
+	clusterWarming    bool
+	uploadStatus      int
+	uploads           []map[string]string
+	engineCountDelta  int
+	controllerStatus  int
+}
+
+func (f *fakeMTLSGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r.Header.Get("Authorization") != BasicAuthHeader("admin", "secret") {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
+	switch {
+	case r.URL.Path == "/api/management/v1/certificates" && r.Method == http.MethodPost:
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.uploads = append(f.uploads, body)
+		w.WriteHeader(f.uploadStatus)
+		write(map[string]string{"id": "cert-1"})
+	case r.URL.Path == "/api/management/v1/certificates" && f.controllerStatus != 0:
+		w.WriteHeader(f.controllerStatus)
+	case r.URL.Path == "/api/management/v1/certificates":
+		var certs []map[string]any
+		for _, name := range sortedKeys(f.pool) {
+			certs = append(certs, map[string]any{"name": name, "role": "client", "count": len(f.pool[name])})
+		}
+		write(map[string]any{"certificates": certs})
+	case r.URL.Path == "/api/admin/v1/xds_sync_status":
+		write(map[string]string{"policy_chain_version": f.controllerVersion})
+	case r.URL.Path == "/api/admin/v1/config_dump":
+		var policies []map[string]string
+		if f.attachesMTLSAuth {
+			policies = []map[string]string{{"name": "mtls-auth"}}
+		}
+		write(map[string]any{"apis": []any{map[string]any{"configuration": map[string]any{
+			"spec": map[string]any{"operations": []any{map[string]any{"policies": policies}}},
+		}}}})
+	case r.URL.Path == "/xds_sync_status":
+		write(map[string]string{"policy_chain_version": f.engineVersion})
+	case r.URL.Path == "/config_dump" && r.URL.Query().Get("resource") == "":
+		var resources []any
+		for name, certs := range f.pool {
+			if name != f.engineOmits {
+				held := append([]string(nil), certs...)
+				for i := 0; i < f.engineCountDelta; i++ {
+					held = append(held, certs[0])
+				}
+				resources = append(resources, map[string]any{"id": name, "resource": map[string]any{"certificates": held, "role": "client"}})
+			}
+		}
+		write(map[string]any{"lazy_resources": map[string]any{"resources_by_type": map[string]any{clientAuthorityResourceType: resources}}})
+	case r.URL.Query().Get("resource") == "dynamic_listeners":
+		listener := map[string]any{"name": "https", "active_state": map[string]any{"listener": map[string]any{}}}
+		if f.listenerNamesCA {
+			listener["active_state"] = map[string]any{"listener": map[string]any{"name": downstreamClientCASecret}}
+		}
+		if f.listenerWarming {
+			listener["warming_state"] = map[string]any{"version_info": "2"}
+		}
+		write(map[string]any{"configs": []any{listener}})
+	case r.URL.Query().Get("resource") == "dynamic_active_secrets":
+		var configs []any
+		if f.secret != nil {
+			configs = append(configs, map[string]any{"name": downstreamClientCASecret, "secret": map[string]any{
+				"validation_context": map[string]any{"trusted_ca": map[string]any{"inline_bytes": f.secret}},
+			}})
+		}
+		write(map[string]any{"configs": configs})
+	case r.URL.Query().Get("resource") == "dynamic_warming_clusters":
+		var configs []any
+		if f.clusterWarming {
+			configs = append(configs, map[string]any{"cluster": map[string]string{"name": "backend"}})
+		}
+		write(map[string]any{"configs": configs})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// consistentMTLSGateway holds one pooled authority, attached by an API, applied everywhere.
+func consistentMTLSGateway(t *testing.T) *fakeMTLSGateway {
+	t.Helper()
+	caA := mtlsFixture(t, "ca-a")
+	return &fakeMTLSGateway{
+		pool:              map[string][]string{"pool-a": {string(caA.CertPEM)}},
+		attachesMTLSAuth:  true,
+		controllerVersion: "7", engineVersion: "7",
+		listenerNamesCA: true,
+		secret:          caA.CertPEM,
+		uploadStatus:    http.StatusCreated,
+	}
+}
+
+func mtlsFixture(t *testing.T, name string) *testpki.Fixture {
+	t.Helper()
+	set, err := testpki.Default()
+	require.NoError(t, err)
+	fixture, err := set.Get(name)
+	require.NoError(t, err)
+	return fixture
+}
+
+// mtlsGatewayUnderTest serves fake on every plain endpoint and https on the HTTPS endpoint.
+func mtlsGatewayUnderTest(t *testing.T, fake http.Handler, https *httptest.Server) (*Gateway, context.Context) {
+	t.Helper()
+	plain := httptest.NewServer(fake)
+	t.Cleanup(plain.Close)
+	port := func(raw string) int {
+		parsed, err := url.Parse(raw)
+		require.NoError(t, err)
+		p, err := strconv.Atoi(parsed.Port())
+		require.NoError(t, err)
+		return p
+	}
+	mapped := map[int]int{9090: port(plain.URL), 9092: port(plain.URL), 9002: port(plain.URL), 9901: port(plain.URL)}
+	if https != nil {
+		mapped[8443] = port(https.URL)
+	}
+	definition := &components.Definition{
+		Name: "platform-gateway", Alias: "platform-gateway",
+		Endpoints: []components.Endpoint{
+			{Name: "rest", Port: 9090, Scheme: "http"},
+			{Name: "admin", Port: 9092, Scheme: "http"},
+			{Name: "policy-admin", Port: 9002, Scheme: "http"},
+			{Name: "envoy-admin", Port: 9901, Scheme: "http"},
+			{Name: "https", Port: 8443, Scheme: "https"},
+		},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "127.0.0.1", mapped)
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+
+	shared := tcontext.NewShared("block")
+	shared.Set(frameworkruntime.KeyAdminUser, "admin")
+	shared.Set(frameworkruntime.KeyAdminPass, "secret")
+	ctx := tcontext.WithLocal(tcontext.WithShared(context.Background(), shared), tcontext.NewLocal("runner"))
+	require.NoError(t, cleanup.Install(ctx, cleanup.NewRegistry(nil)))
+	client := httpx.NewClient(httpx.Options{Timeout: 5 * time.Second})
+	return &Gateway{topo: &frameworkruntime.Topology{Instances: instances}, funnel: httpx.NewFunnel(client, 0, time.Millisecond), base: stubBase{}}, ctx
+}
+
+// stubBase supplies admin credentials as the scenario's headers, no Host override, and a
+// data plane at dataPlane.
+type stubBase struct {
+	Base
+	dataPlane string
+}
+
+func (b stubBase) GatewayURL(path string) (string, error) { return b.dataPlane + path, nil }
+
+func (stubBase) ScenarioHeaders(context.Context) map[string]string {
+	return map[string]string{"Authorization": BasicAuthHeader("admin", "secret")}
+}
+
+func (stubBase) RequestHost(context.Context) string { return "" }
+
+func TestParsePresentation(t *testing.T) {
+	for phrase, want := range map[string]presentation{
+		`with no client certificate`:                                         {},
+		`with client certificate "client-valid"`:                             {fixture: "client-valid"},
+		`with client certificate "client-via-intermediate" and its chain`:    {fixture: "client-via-intermediate", withChain: true},
+		`with client certificate "client-valid" on a resumable TLS session`:  {fixture: "client-valid", resumable: true},
+		`on a new connection from the same TLS session cache`:                {reuseSession: true},
+		`with client certificate "client-valid" and bearer token "${CTX:t}"`: {fixture: "client-valid", bearer: "${CTX:t}"},
+		`with no client certificate and bearer token "abc"`:                  {bearer: "abc"},
+	} {
+		got, err := parsePresentation(phrase)
+		require.NoError(t, err, phrase)
+		require.Equal(t, want, got, phrase)
+	}
+	for _, phrase := range []string{``, `with client certificate ""`, `with a certificate "x"`, `with no client certificate and its chain`} {
+		_, err := parsePresentation(phrase)
+		require.Error(t, err, phrase)
+	}
+}
+
+// outcome classifies an observation: "" satisfied, "tolerated" polled through, "fail" fatal.
+func outcome(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case retry.IsTransient(err):
+		return "tolerated"
+	default:
+		return "fail"
+	}
+}
+
+func TestObserveGatewayApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		shape   func(*fakeMTLSGateway)
+		outcome string
+		message string
+	}{
+		{name: "applied everywhere", shape: func(*fakeMTLSGateway) {}},
+		{name: "empty pool and a listener that does not ask", shape: func(f *fakeMTLSGateway) {
+			f.pool, f.listenerNamesCA, f.secret = map[string][]string{}, false, nil
+		}},
+		{name: "policy chain versions are left to the policy snapshot wait", shape: func(f *fakeMTLSGateway) { f.engineVersion = "6" }},
+		{name: "policy engine lags the pool", shape: func(f *fakeMTLSGateway) { f.engineOmits = "pool-a" },
+			outcome: "tolerated", message: `the policy engine does not hold client authority "pool-a" yet`},
+		{name: "listener still warming", shape: func(f *fakeMTLSGateway) { f.listenerWarming = true },
+			outcome: "tolerated", message: "Envoy listeners [https] are still warming"},
+		{name: "listener asks although no API attaches mtls-auth", shape: func(f *fakeMTLSGateway) { f.attachesMTLSAuth = false },
+			outcome: "tolerated", message: "the HTTPS listener requests a client certificate: true, the controller's configuration requires false"},
+		{name: "listener does not ask yet", shape: func(f *fakeMTLSGateway) { f.listenerNamesCA = false },
+			outcome: "tolerated", message: "the HTTPS listener requests a client certificate: false, the controller's configuration requires true"},
+		{name: "secret not served", shape: func(f *fakeMTLSGateway) { f.secret = nil },
+			outcome: "tolerated", message: "Envoy serves no downstream_client_ca secret yet"},
+		{name: "secret holds another authority", shape: func(f *fakeMTLSGateway) { f.secret = mtlsFixture(t, "ca-b").CertPEM },
+			outcome: "tolerated", message: "Envoy's downstream_client_ca holds"},
+		{name: "cluster still warming", shape: func(f *fakeMTLSGateway) { f.clusterWarming = true },
+			outcome: "tolerated", message: "Envoy clusters [backend] are still warming"},
+		{name: "policy engine holds another certificate count", shape: func(f *fakeMTLSGateway) { f.engineCountDelta = 1 },
+			outcome: "fail", message: `the policy engine holds "pool-a" with role "client" and 2 certificates, the controller with role "client" and 1`},
+		{name: "controller rejects the admin", shape: func(f *fakeMTLSGateway) { f.controllerStatus = http.StatusForbidden },
+			outcome: "fail", message: "-> 403"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := consistentMTLSGateway(t)
+			tc.shape(fake)
+			g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+			err := g.observeGatewayApplied(ctx)
+			require.Equal(t, tc.outcome, outcome(err), "%v", err)
+			if tc.message != "" {
+				require.ErrorContains(t, err, tc.message)
+			}
+		})
+	}
+}
+
+func TestAwaitGatewayAppliedFailsAtOnceOnAContradiction(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	fake.engineCountDelta = 1
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	started := time.Now()
+	require.ErrorContains(t, g.awaitGatewayApplied(ctx), "non-retryable")
+	require.Less(t, time.Since(started), 5*time.Second)
+}
+
+func TestReadJSONToleratesOnlyAnUnreadyComponent(t *testing.T) {
+	for status, want := range map[int]string{http.StatusServiceUnavailable: "tolerated", http.StatusUnauthorized: "fail", http.StatusInternalServerError: "fail", http.StatusNotFound: "fail"} {
+		g, ctx := mtlsGatewayUnderTest(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":"x"}`))
+		}), nil)
+		var out map[string]any
+		err := g.readJSON(ctx, "policy-engine", "/config_dump", &out)
+		require.Equal(t, want, outcome(err), "status %d: %v", status, err)
+		require.ErrorContains(t, err, strconv.Itoa(status))
+	}
+	g, ctx := mtlsGatewayUnderTest(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`not json`))
+	}), nil)
+	var out map[string]any
+	require.Equal(t, "fail", outcome(g.readJSON(ctx, "policy-engine", "/config_dump", &out)))
+}
+
+func TestPolicySyncObserve(t *testing.T) {
+	for _, tc := range []struct {
+		sync     policySync
+		baseline string
+		want     string
+	}{
+		{sync: policySync{controller: "8", engine: "8"}, baseline: "7", want: ""},
+		{sync: policySync{controller: "8", engine: "8"}, baseline: "", want: ""},
+		{sync: policySync{controller: "7", engine: "7"}, baseline: "7", want: "tolerated"},
+		{sync: policySync{controller: "8", engine: "7"}, baseline: "7", want: "tolerated"},
+		{sync: policySync{controller: "8", engine: "9"}, baseline: "7", want: "fail"},
+		{sync: policySync{controller: "", engine: "9"}, baseline: "", want: "fail"},
+		{sync: policySync{controller: "b", engine: "a"}, baseline: "", want: "tolerated"},
+	} {
+		require.Equal(t, tc.want, outcome(tc.sync.observe(tc.baseline)), "%s past %q", tc.sync, tc.baseline)
+	}
+}
+
+func TestRequireCleanGatewayNamesALeftoverAuthority(t *testing.T) {
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	err := g.requireCleanGateway(ctx)
+	require.ErrorContains(t, err, "the gateway still holds client authorities [pool-a] from an earlier scenario")
+}
+
+func TestPolicySnapshotSyncMovesPastTheBaselineAndForgetsIt(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, tcontext.Set(ctx, keyMTLSScenario, true))
+	require.NoError(t, g.beforeAPIMutation(ctx))
+	baseline, _ := tcontext.Get(ctx, keyPolicyBaseline)
+	require.Equal(t, "7", baseline)
+
+	fake.mu.Lock()
+	fake.controllerVersion, fake.engineVersion = "8", "8"
+	fake.mu.Unlock()
+	require.NoError(t, g.awaitPolicySnapshotSync(ctx))
+	require.False(t, tcontext.Contains(ctx, keyPolicyBaseline))
+
+	require.NoError(t, tcontext.Set(ctx, keyMTLSScenario, false))
+	require.NoError(t, g.beforeAPIMutation(ctx))
+	require.False(t, tcontext.Contains(ctx, keyPolicyBaseline))
+}
+
+func TestUploadFixturesRegistersAnAcceptedCertificate(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "pool-a", "poolA"))
+
+	require.ErrorContains(t, g.poolCertificateFixtures(ctx, "ca-a", "literal-name", "downstream"), "is not generated")
+	require.ErrorContains(t, g.poolCertificateFixtures(ctx, "no-such-fixture", "${CTX:poolA}", "downstream"), "unknown fixture")
+	require.NoError(t, g.poolCertificateFixtures(ctx, "ca-a-intermediate,ca-a", "${CTX:poolA}", "downstream"))
+
+	name, err := stepscommon.StoredValue(ctx, "poolA")
+	require.NoError(t, err)
+	require.Len(t, fake.uploads, 1)
+	require.Equal(t, name, fake.uploads[0]["name"])
+	require.Equal(t, "downstream", fake.uploads[0]["usage"])
+	require.Equal(t, string(mtlsFixture(t, "ca-a-intermediate").CertPEM)+"\n"+string(mtlsFixture(t, "ca-a").CertPEM),
+		fake.uploads[0]["certificate"])
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	pending := registry.Pending()
+	require.Len(t, pending, 1)
+	require.Equal(t, cleanup.KindCertificate.Name, pending[0].Kind.Name)
+	require.Equal(t, "cert-1", pending[0].ID)
+}
+
+func TestARejectedUploadIsPublishedAndNotRegistered(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	fake.uploadStatus = http.StatusConflict
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "pool-a", "poolA"))
+
+	require.NoError(t, g.uploadCertificateFixtures(ctx, "ca-a", "${CTX:poolA}", ""))
+	_, hasUsage := fake.uploads[0]["usage"]
+	require.False(t, hasUsage)
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, published.StatusCode)
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.Empty(t, registry.Pending())
+	require.ErrorContains(t, g.poolCertificateFixtures(ctx, "ca-a", "${CTX:poolA}", "downstream"), "status 201")
+}
+
+func TestSendHTTPSPresentsTheFixtureAndPublishesTheHandshake(t *testing.T) {
+	var authorization atomic.Value
+	https := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization.Store(r.Header.Get("Authorization"))
+		subject := "none"
+		if len(r.TLS.PeerCertificates) > 0 {
+			subject = r.TLS.PeerCertificates[0].Subject.CommonName + "/" + strconv.Itoa(len(r.TLS.PeerCertificates))
+		}
+		_, _ = w.Write([]byte(subject))
+	}))
+	https.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
+	https.StartTLS()
+	t.Cleanup(https.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), https)
+	require.NoError(t, tcontext.Set(ctx, "token", "abc"))
+
+	require.NoError(t, g.sendHTTPS(ctx, "get", "/anything", `with client certificate "client-via-intermediate" and its chain and bearer token "${CTX:token}"`))
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "client-via-intermediate/2", published.Text())
+	require.Equal(t, "Bearer abc", authorization.Load())
+	require.True(t, published.TLS.ClientCertificateRequested)
+	require.Equal(t, gatewaySNI, published.TLS.ServerName)
+	require.NoError(t, g.fullTLSHandshake(ctx))
+
+	require.NoError(t, g.sendHTTPS(ctx, "GET", "anything", "with no client certificate"))
+	published, err = httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "none", published.Text())
+	require.Equal(t, BasicAuthHeader("admin", "secret"), authorization.Load())
+
+	require.ErrorContains(t, g.sendHTTPS(ctx, "GET", "/anything", "on a new connection from the same TLS session cache"),
+		"send a request on a resumable TLS session first")
+	require.NoError(t, g.sendHTTPS(ctx, "GET", "/anything", `with client certificate "client-valid" on a resumable TLS session`))
+	require.NoError(t, g.sendHTTPS(ctx, "GET", "/anything", "on a new connection from the same TLS session cache"))
+	published, err = httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "client-valid/1", published.Text())
+	require.ErrorContains(t, g.sendHTTPS(ctx, "GET", "/anything", "with a certificate"), "unknown HTTPS request phrasing")
+}
+
+func TestFullTLSHandshakeRejectsResumedAndPlainResponses(t *testing.T) {
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	funnel := httpx.NewFunnel(httpx.NewClient(httpx.Options{}), 0, time.Millisecond)
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: 200, TLS: &httpx.TLSState{DidResume: true}}))
+	require.ErrorContains(t, g.fullTLSHandshake(ctx), "resumed the cached TLS session")
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: 200}))
+	require.ErrorContains(t, g.fullTLSHandshake(ctx), "did not arrive over an HTTPS request step")
+}
+
+func TestMTLSHelpers(t *testing.T) {
+	require.True(t, hasTag([]string{"@a", "@mtls"}, tagMTLS))
+	require.False(t, hasTag(nil, tagMTLS))
+
+	caA, caB := mtlsFixture(t, "ca-a"), mtlsFixture(t, "ca-b")
+	bundle := append(append(append([]byte{}, caA.CertPEM...), mtlsFixture(t, "client-valid").KeyPEM...), caB.CertPEM...)
+	require.Equal(t, []string{caA.Thumbprint, caB.Thumbprint}, pemThumbprints(bundle))
+	require.Empty(t, pemThumbprints(nil))
+
+	require.True(t, sameSet(map[string]bool{"a": true}, map[string]bool{"a": true}))
+	require.False(t, sameSet(map[string]bool{"a": true}, map[string]bool{"b": true}))
+	require.False(t, sameSet(map[string]bool{"a": true}, map[string]bool{}))
+	require.Equal(t, []string{"a", "b"}, sortedKeys(map[string]int{"b": 1, "a": 2}))
+
+	want := map[string]clientAuthority{"a": {role: "client", count: 1}}
+	require.NoError(t, compareClientAuthorities(want, map[string]clientAuthority{"a": {role: "client", count: 1}}))
+	relay := compareClientAuthorities(want, map[string]clientAuthority{"a": {role: "relay", count: 1}})
+	require.Equal(t, "fail", outcome(relay))
+	require.ErrorContains(t, relay, `with role "relay"`)
+	removed := compareClientAuthorities(map[string]clientAuthority{}, want)
+	require.Equal(t, "tolerated", outcome(removed))
+	require.ErrorContains(t, removed, `still holds removed client authority "a"`)
+	require.Equal(t, "fixture.client-valid.thumbprint", fixtureThumbprintKey("client-valid"))
+}
+
+// scriptedDataPlane answers each request with the next reply, repeating the last one.
+type scriptedDataPlane struct {
+	mu      sync.Mutex
+	replies []scriptedReply
+	served  int
+}
+
+type scriptedReply struct {
+	status   int
+	upstream bool
+	body     string
+}
+
+func (d *scriptedDataPlane) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	d.mu.Lock()
+	reply := d.replies[min(d.served, len(d.replies)-1)]
+	d.served++
+	d.mu.Unlock()
+	if reply.upstream {
+		w.Header().Set(headerUpstreamServiceTime, "3")
+	}
+	w.WriteHeader(reply.status)
+	_, _ = w.Write([]byte(reply.body))
+}
+
+func TestSendUntilRouteAnswers(t *testing.T) {
+	noRoute := scriptedReply{status: http.StatusNotFound, body: noRouteBody}
+	warming := scriptedReply{status: http.StatusServiceUnavailable, body: "no healthy upstream"}
+	for _, tc := range []struct {
+		name    string
+		want    int
+		replies []scriptedReply
+		err     string
+		served  int
+	}{
+		{name: "200 after no route and a warming upstream", want: 200,
+			replies: []scriptedReply{noRoute, warming, {status: 200, upstream: true}}, served: 3},
+		{name: "401 after no route", want: 401, replies: []scriptedReply{noRoute, {status: 401}}, served: 2},
+		{name: "a 200 while waiting for a rejection fails at once", want: 401,
+			replies: []scriptedReply{noRoute, {status: 200, upstream: true}}, err: "expected 401 once the route is live", served: 2},
+		{name: "a warming upstream is no rejection", want: 401, replies: []scriptedReply{warming}, err: "got GET", served: 1},
+		{name: "a backend 404 fails at once", want: 200,
+			replies: []scriptedReply{{status: 404, upstream: true, body: "not here"}}, err: "not here", served: 1},
+		{name: "a 404 with another body fails at once", want: 401,
+			replies: []scriptedReply{{status: 404, body: "gone"}}, err: "gone", served: 1},
+		{name: "a 403 fails at once", want: 200, replies: []scriptedReply{{status: 403}}, err: "-> 403", served: 1},
+		{name: "a 500 fails at once", want: 200, replies: []scriptedReply{{status: 500, upstream: true}}, err: "-> 500", served: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataPlane := &scriptedDataPlane{replies: tc.replies}
+			server := httptest.NewServer(dataPlane)
+			t.Cleanup(server.Close)
+			g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+			g.base = stubBase{dataPlane: server.URL}
+
+			err := g.sendUntilRouteAnswers(ctx, "get", "/anything", tc.want)
+			if tc.err == "" {
+				require.NoError(t, err)
+				published, pubErr := httpx.Published(ctx)
+				require.NoError(t, pubErr)
+				require.Equal(t, tc.want, published.StatusCode)
+			} else {
+				require.ErrorContains(t, err, tc.err)
+				require.ErrorContains(t, err, "non-retryable")
+			}
+			require.Equal(t, tc.served, dataPlane.served)
+		})
+	}
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	require.ErrorContains(t, g.sendUntilRouteAnswers(ctx, "GET", "/x", 404), "supports status 200 or 401")
 }

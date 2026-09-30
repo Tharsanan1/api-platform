@@ -245,3 +245,32 @@ func TestCanonicalResourceTemplates(t *testing.T) {
 		require.NotNil(t, spec, "template %q", name)
 	}
 }
+
+func TestEchoedHeaderAssertions(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantExact    bool
+		wantContains bool
+	}{
+		{name: "string value", body: `{"headers":{"X-Forwarded-Client-Cert":"Subject=\"CN=client\";URI=urn:a"}}`, wantContains: true},
+		{name: "array value", body: `{"headers":{"x-forwarded-client-cert":["URI=urn:a","other"]}}`, wantExact: true, wantContains: true},
+		{name: "other value", body: `{"headers":{"x-forwarded-client-cert":"URI=urn:b"}}`},
+		{name: "absent header", body: `{"headers":{}}`},
+		{name: "empty array", body: `{"headers":{"x-forwarded-client-cert":[]}}`},
+		{name: "not an echo", body: `{"other":{}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			local := tcontext.NewLocal("runner")
+			local.Set("uri", "URI=urn:a")
+			ctx := tcontext.WithLocal(context.Background(), local)
+			require.NoError(t, tcontext.Set(ctx, httpx.ResponseKey, &httpx.Response{Body: []byte(tt.body)}))
+
+			exactErr := (&Base{}).echoedHeaderEquals(ctx, "X-Forwarded-Client-Cert", "${CTX:uri}")
+			containsErr := (&Base{}).echoedHeaderContains(ctx, "X-Forwarded-Client-Cert", "${CTX:uri}")
+			require.Equal(t, tt.wantExact, exactErr == nil, "exact: %v", exactErr)
+			require.Equal(t, tt.wantContains, containsErr == nil, "contains: %v", containsErr)
+		})
+	}
+}

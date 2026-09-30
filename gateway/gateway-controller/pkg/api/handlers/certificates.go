@@ -217,8 +217,13 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		log.Warn("Client certificate authority warning", fields...)
 	}
 
-	// At most one gateway identity has role: default.
+	// At most one gateway identity has role: default. The lock covers this
+	// replica only; should two replicas each store one, every replica
+	// presents the first by name. The role conflict is checked before the
+	// name conflict, so it is the one reported when both apply.
 	if effectiveRole == models.CertificateRoleDefault {
+		s.defaultIdentityMu.Lock()
+		defer s.defaultIdentityMu.Unlock()
 		existingDefault, err := s.defaultGatewayIdentity()
 		if err != nil {
 			log.Error("Failed to look up the default gateway identity", slog.Any("error", err))
@@ -1462,6 +1467,7 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 		case req.Role != models.CertificateRoleClient && req.Role != models.CertificateRoleRelay && req.Role != models.CertificateRoleDefault:
 			v.addFieldError("role", "role must be client, relay or default")
 		case !usageValid:
+			// The usage error already reports the problem.
 		case req.Role == models.CertificateRoleDefault && effectiveUsage != models.CertificateUsageIdentity:
 			v.addFieldError("role", "role default applies only to usage: identity certificates")
 		case req.Role != models.CertificateRoleDefault && effectiveUsage != models.CertificateUsageDownstream:

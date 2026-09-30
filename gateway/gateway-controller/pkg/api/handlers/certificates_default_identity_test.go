@@ -20,14 +20,17 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/testutil/pki"
 )
 
@@ -223,4 +226,126 @@ func TestListCertificates_DefaultIdentity_ShowsRole(t *testing.T) {
 		roles[item["name"].(string)] = item["role"]
 	}
 	assert.Equal(t, map[string]any{"gateway-default": models.CertificateRoleDefault, "out-identity-a": nil}, roles)
+}
+
+// lockedCertificateStorage serialises the certificate calls of a
+// MockStorage so concurrent handlers can share it, and refuses a taken name
+// as the database does.
+type lockedCertificateStorage struct {
+	*MockStorage
+	mu sync.Mutex
+}
+
+func (l *lockedCertificateStorage) SaveCertificate(cert *models.StoredCertificate) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, existing := range l.certs {
+		if existing.Name == cert.Name {
+			return storage.ErrConflict
+		}
+	}
+	return l.MockStorage.SaveCertificate(cert)
+}
+
+func (l *lockedCertificateStorage) GetCertificate(id string) (*models.StoredCertificate, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.MockStorage.GetCertificate(id)
+}
+
+func (l *lockedCertificateStorage) GetCertificateByName(name string) (*models.StoredCertificate, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.MockStorage.GetCertificateByName(name)
+}
+
+func (l *lockedCertificateStorage) ListCertificatesByUsage(usage string) ([]*models.StoredCertificate, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.MockStorage.ListCertificatesByUsage(usage)
+}
+
+func (l *lockedCertificateStorage) ListCertificates() ([]*models.StoredCertificate, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	certs, err := l.MockStorage.ListCertificates()
+	return append([]*models.StoredCertificate(nil), certs...), err
+}
+
+// Concurrent role: default uploads on one replica store exactly one.
+func TestUploadCertificate_ConcurrentDefaultIdentities_OneStored(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
+	db := &lockedCertificateStorage{MockStorage: mockDB}
+	server := createTestAPIServerWithIdentitySupport(t, db)
+
+	const uploads = 8
+	requests := make([]UploadCertificateRequest, uploads)
+	for i := range requests {
+		name := fmt.Sprintf("gateway-default-%d", i)
+		leaf := gatewayIdentityLeaf(t, name)
+		requests[i] = UploadCertificateRequest{
+			Name: name, Usage: models.CertificateUsageIdentity, Role: models.CertificateRoleDefault,
+			Certificate: string(leaf.PEM()), PrivateKey: string(leaf.KeyPEM()),
+		}
+	}
+
+	codes := make([]int, uploads)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range requests {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			codes[i] = uploadCertificateBody(t, server, requests[i]).Code
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	counts := map[int]int{}
+	for _, code := range codes {
+		counts[code]++
+	}
+	assert.Equal(t, map[int]int{http.StatusCreated: 1, http.StatusConflict: uploads - 1}, counts)
+	var defaults int
+	for _, cert := range mockDB.certs {
+		if cert.IsDefaultIdentity() {
+			defaults++
+		}
+	}
+	assert.Equal(t, 1, defaults, "exactly one default identity is stored")
+}
+
+// A second role: default upload whose name is also taken reports the role
+// conflict, which is checked first.
+func TestUploadCertificate_SecondDefaultIdentityWithTakenName_ReportsRoleConflict(t *testing.T) {
+	mockDB := NewMockStorage()
+	mockDB.certs = []*models.StoredCertificate{
+		seedUpstreamCert(t),
+		defaultIdentityRow(t, "default-1", "gateway-default"),
+		identityRowForUpdate(t, "named-1"),
+	}
+	server := createTestAPIServerWithIdentitySupport(t, &lockedCertificateStorage{MockStorage: mockDB})
+	takenName := storedCertificateByName(t, mockDB, "out-identity-a").Name
+	leaf := gatewayIdentityLeaf(t, takenName)
+	upload := func(role string) map[string]any {
+		t.Helper()
+		w := uploadCertificateBody(t, server, UploadCertificateRequest{
+			Name: takenName, Usage: models.CertificateUsageIdentity, Role: role,
+			Certificate: string(leaf.PEM()), PrivateKey: string(leaf.KeyPEM()),
+		})
+		require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		return resp
+	}
+
+	assert.Equal(t, "a gateway identity named "+takenName+" already exists", upload("")["message"],
+		"without role: default the name conflict is reported")
+	assert.Equal(t,
+		"gateway identity gateway-default already has role: default; delete it before uploading another default identity",
+		upload(models.CertificateRoleDefault)["message"])
+	assert.Len(t, mockDB.certs, 3, "the refused identities must not be stored")
 }

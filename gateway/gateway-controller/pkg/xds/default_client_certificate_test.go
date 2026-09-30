@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -38,6 +39,7 @@ import (
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/constants"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/encryption"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/metrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
@@ -67,7 +69,7 @@ func (f fixedTransformer) Transform(cfg *models.StoredConfig) (*models.RuntimeDe
 // multi-endpoint definition, a tls block with only trustedCAs, a tls block
 // naming an identity, and a plain HTTP upstream.
 func upstreamShapesRDC(handle string) *models.RuntimeDeployConfig {
-	https := func() *models.UpstreamTLS { return &models.UpstreamTLS{Enabled: true} }
+	https := func() *models.UpstreamTLS { return &models.UpstreamTLS{Enabled: true, APITraffic: true} }
 	clusters := map[string]*models.UpstreamCluster{
 		handle + "_main": {Endpoints: []models.Endpoint{{Host: "main.backend", Port: 443}}, TLS: https()},
 		handle + "_sandbox": {Endpoints: []models.Endpoint{{Host: "sandbox.backend", Port: 443}},
@@ -78,11 +80,11 @@ func upstreamShapesRDC(handle string) *models.RuntimeDeployConfig {
 			Endpoints: []models.Endpoint{{Host: "w1.backend", Port: 443}, {Host: "w2.backend", Port: 443}},
 			TLS:       https()},
 		handle + "_def_trusted": {Name: "trusted", Endpoints: []models.Endpoint{{Host: "trusted.backend", Port: 443}},
-			TLS: &models.UpstreamTLS{Enabled: true, HasTLSBlock: true, TrustedCANames: []string{testBackendCAName}, VerifyHostName: true}},
+			TLS: &models.UpstreamTLS{Enabled: true, APITraffic: true, HasTLSBlock: true, TrustedCANames: []string{testBackendCAName}, VerifyHostName: true}},
 		handle + "_def_identity": {Name: "identity", Endpoints: []models.Endpoint{{Host: "identity.backend", Port: 443}},
-			TLS: &models.UpstreamTLS{Enabled: true, HasTLSBlock: true, IdentityName: testNamedIdentityName, VerifyHostName: true}},
+			TLS: &models.UpstreamTLS{Enabled: true, APITraffic: true, HasTLSBlock: true, IdentityName: testNamedIdentityName, VerifyHostName: true}},
 		handle + "_http": {Endpoints: []models.Endpoint{{Host: "http.backend", Port: 80}},
-			TLS: &models.UpstreamTLS{}},
+			TLS: &models.UpstreamTLS{APITraffic: true}},
 	}
 	return &models.RuntimeDeployConfig{
 		Metadata:         models.Metadata{Handle: handle},
@@ -107,8 +109,21 @@ type defaultIdentityTestCase struct {
 	logs           *bytes.Buffer
 }
 
-func (tc defaultIdentityTestCase) storage(t *testing.T) *fakeSDSStorage {
+// identityTestStorage carries the encryption manager its identity rows'
+// keys are encrypted under, which the translator's cert store is given.
+type identityTestStorage struct {
+	*fakeSDSStorage
+	mgr *encryption.ProviderManager
+}
+
+func (s *identityTestStorage) encryptionManager() *encryption.ProviderManager { return s.mgr }
+
+// testIdentityKeyPEM is the private key every test identity row stores.
+var testIdentityKeyPEM = []byte("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n")
+
+func (tc defaultIdentityTestCase) storage(t *testing.T) *identityTestStorage {
 	t.Helper()
+	mgr := testXDSEncryptionManager(t)
 	certs := []*models.StoredCertificate{
 		{UUID: "ca-1", Name: testBackendCAName, Certificate: pki.NewRootCA(t, "Backend CA").PEM(), Usage: models.CertificateUsageUpstream},
 		{UUID: "named-1", Name: testNamedIdentityName, Certificate: pki.NewSelfSignedLeaf(t, "partner").PEM(),
@@ -120,7 +135,12 @@ func (tc defaultIdentityTestCase) storage(t *testing.T) *fakeSDSStorage {
 			Usage: models.CertificateUsageIdentity, Role: models.CertificateRoleDefault,
 		})
 	}
-	return &fakeSDSStorage{certs: certs}
+	for _, cert := range certs {
+		if cert.Usage == models.CertificateUsageIdentity {
+			cert.PrivateKeyCiphertext = encryptForStorage(t, mgr, testIdentityKeyPEM)
+		}
+	}
+	return &identityTestStorage{fakeSDSStorage: &fakeSDSStorage{certs: certs}, mgr: mgr}
 }
 
 func (tc defaultIdentityTestCase) translator(t *testing.T, db storage.Storage) *Translator {
@@ -152,6 +172,11 @@ func (tc defaultIdentityTestCase) translator(t *testing.T, db storage.Storage) *
 	}
 	translator, err := NewTranslator(logger, routerCfg, db, cfg)
 	require.NoError(t, err)
+	if keyed, ok := db.(interface {
+		encryptionManager() *encryption.ProviderManager
+	}); ok {
+		translator.certStore.SetEncryptionManager(keyed.encryptionManager())
+	}
 
 	transformers := map[string]models.ConfigTransformer{}
 	fixed := fixedTransformer{}
@@ -293,8 +318,8 @@ func TestDefaultClientCertificate_SwitchOff_ClustersUnchanged(t *testing.T) {
 	}
 }
 
-// Only a cluster built for API traffic can present the default client
-// certificate: a nil tlsOpts marks one that is not.
+// A cluster that does not honour tls blocks passes a nil tlsOpts and never
+// presents the default client certificate.
 func TestDefaultClientCertificate_NotPresentedWithoutAPIWiring(t *testing.T) {
 	tc := defaultIdentityTestCase{presentDefault: true, httpsEnabled: true, defaultExists: true}
 	translator := tc.translator(t, tc.storage(t))
@@ -338,15 +363,7 @@ func TestDefaultClientCertificate_SecretsServedWhenReferenced(t *testing.T) {
 		{presentDefault: true, httpsEnabled: true},
 		{presentDefault: true, defaultExists: true},
 	} {
-		db := tc.storage(t)
-		mgr := testXDSEncryptionManager(t)
-		for _, cert := range db.certs {
-			if cert.Usage == models.CertificateUsageIdentity {
-				cert.PrivateKeyCiphertext = encryptForStorage(t, mgr, []byte("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n"))
-			}
-		}
-		translator := tc.translator(t, db)
-		translator.certStore.SetEncryptionManager(mgr)
+		translator := tc.translator(t, tc.storage(t))
 		resources := translateEveryKind(t, translator)
 
 		sds := NewSDSSecretManager(translator.certStore, nil, "router-node", createTestLogger(),
@@ -371,14 +388,7 @@ func TestDefaultClientCertificate_SecretsServedWhenReferenced(t *testing.T) {
 func TestDefaultClientCertificate_SnapshotFollowsDefaultIdentity(t *testing.T) {
 	tc := defaultIdentityTestCase{presentDefault: true, httpsEnabled: true, defaultExists: true}
 	db := tc.storage(t)
-	mgr := testXDSEncryptionManager(t)
-	for _, cert := range db.certs {
-		if cert.Usage == models.CertificateUsageIdentity {
-			cert.PrivateKeyCiphertext = encryptForStorage(t, mgr, []byte("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n"))
-		}
-	}
 	translator := tc.translator(t, db)
-	translator.certStore.SetEncryptionManager(mgr)
 
 	store := storage.NewConfigStore()
 	for _, cfg := range apiConfigsOfEveryKind() {
@@ -513,7 +523,7 @@ func TestDefaultClientCertificate_LoggedOnChange(t *testing.T) {
 // present a different certificate.
 func TestDefaultClientCertificate_LookupFailureFailsTranslation(t *testing.T) {
 	tc := defaultIdentityTestCase{presentDefault: true, httpsEnabled: true}
-	db := &failingIdentityListStorage{fakeSDSStorage: tc.storage(t)}
+	db := &failingIdentityListStorage{identityTestStorage: tc.storage(t)}
 	translator := tc.translator(t, db)
 	db.fail = true
 
@@ -523,7 +533,7 @@ func TestDefaultClientCertificate_LookupFailureFailsTranslation(t *testing.T) {
 }
 
 type failingIdentityListStorage struct {
-	*fakeSDSStorage
+	*identityTestStorage
 	fail bool
 }
 
@@ -532,4 +542,164 @@ func (f *failingIdentityListStorage) ListCertificatesByUsage(usage string) ([]*m
 		return nil, fmt.Errorf("database unavailable")
 	}
 	return f.fakeSDSStorage.ListCertificatesByUsage(usage)
+}
+
+// identityLookupStorage records every certificate looked up by name, which
+// is how a gateway identity's key is loaded for decryption.
+type identityLookupStorage struct {
+	*identityTestStorage
+	lookups []string
+}
+
+func (s *identityLookupStorage) GetCertificateByName(name string) (*models.StoredCertificate, error) {
+	s.lookups = append(s.lookups, name)
+	return s.identityTestStorage.GetCertificateByName(name)
+}
+
+func refIdentityNames(refs []UpstreamTLSSecretRef) []string {
+	var names []string
+	for _, ref := range refs {
+		if ref.IdentityName != "" {
+			names = append(names, ref.IdentityName)
+		}
+	}
+	return names
+}
+
+// With the switch off, translation requests no secret for the default
+// identity and never loads its key.
+func TestDefaultClientCertificate_SwitchOff_NoSecretRefsOrDecryption(t *testing.T) {
+	tc := defaultIdentityTestCase{httpsEnabled: true, defaultExists: true}
+	db := &identityLookupStorage{identityTestStorage: tc.storage(t)}
+	translator := tc.translator(t, db)
+	translateEveryKind(t, translator)
+
+	assert.Empty(t, db.lookups, "no gateway identity is loaded during translation")
+	for _, name := range refIdentityNames(translator.GetUpstreamTLSSecretRefs()) {
+		assert.Equal(t, testNamedIdentityName, name, "only tls blocks request identity secrets")
+	}
+}
+
+// The default identity's secret is requested only when a cluster presents
+// it.
+func TestDefaultClientCertificate_SecretRefOnlyWhenPresented(t *testing.T) {
+	tc := defaultIdentityTestCase{presentDefault: true, httpsEnabled: true, defaultExists: true}
+	translator := tc.translator(t, tc.storage(t))
+	plainHTTP := &models.RuntimeDeployConfig{
+		Metadata: models.Metadata{Handle: "plain"},
+		UpstreamClusters: map[string]*models.UpstreamCluster{
+			"plain_main": {Endpoints: []models.Endpoint{{Host: "http.backend", Port: 80}}, TLS: &models.UpstreamTLS{APITraffic: true}},
+		},
+	}
+	translator.SetTransformers(map[string]models.ConfigTransformer{models.KindRestApi: fixedTransformer{"plain": plainHTTP}})
+
+	_, err := translator.TranslateConfigs([]*models.StoredConfig{{UUID: "plain", Kind: models.KindRestApi, DesiredState: models.StateDeployed}}, "")
+	require.NoError(t, err)
+	assert.Equal(t, GatewayIdentitySecretName(testDefaultIdentityName), translator.defaultClientCert.SecretName)
+	assert.Empty(t, refIdentityNames(translator.GetUpstreamTLSSecretRefs()), "no cluster presents the default identity")
+
+	everyKind := tc.translator(t, tc.storage(t))
+	translateEveryKind(t, everyKind)
+	refs := everyKind.GetUpstreamTLSSecretRefs()
+	require.NotEmpty(t, refs)
+	assert.Equal(t, testDefaultIdentityName, refs[0].IdentityName, "the default identity's ref comes first")
+	assert.Equal(t, 1, strings.Count(strings.Join(refIdentityNames(refs), ","), testDefaultIdentityName))
+}
+
+// A default identity whose key cannot be loaded is skipped: clusters present
+// the next choice, and every secret a cluster presents is served.
+func TestDefaultClientCertificate_UndecryptableDefaultFallsBack(t *testing.T) {
+	corruptions := map[string]func(t *testing.T) string{
+		"unreadable ciphertext": func(t *testing.T) string { return "not-a-payload" },
+		"encrypted under another key": func(t *testing.T) string {
+			return encryptForStorage(t, testXDSEncryptionManager(t), testIdentityKeyPEM)
+		},
+	}
+	for name, corrupt := range corruptions {
+		for _, httpsEnabled := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, https %v", name, httpsEnabled), func(t *testing.T) {
+				tc := defaultIdentityTestCase{presentDefault: true, httpsEnabled: httpsEnabled, defaultExists: true, logs: &bytes.Buffer{}}
+				db := tc.storage(t)
+				for _, cert := range db.certs {
+					if cert.IsDefaultIdentity() {
+						cert.PrivateKeyCiphertext = corrupt(t)
+					}
+				}
+				translator := tc.translator(t, db)
+				resources := translateEveryKind(t, translator)
+
+				fallback := ""
+				if httpsEnabled {
+					fallback = SecretNameDownstreamListenerCert
+				}
+				got := normalizeSecrets(clientCertSecrets(t, resources[resource.ClusterType]))
+				assert.Equal(t, expectedClientCertSecrets(fallback), got)
+				assert.NotContains(t, refIdentityNames(translator.GetUpstreamTLSSecretRefs()), testDefaultIdentityName)
+
+				sds := NewSDSSecretManager(translator.certStore, nil, "router-node", createTestLogger(),
+					translator.routerConfig.DownstreamTLS.CertPath, translator.routerConfig.DownstreamTLS.KeyPath, httpsEnabled)
+				secrets, err := sds.GetSecrets(translator.GetUpstreamTLSSecretRefs())
+				require.NoError(t, err)
+				served := secretsByName(t, secrets)
+				for clusterName, names := range got {
+					for _, secret := range names {
+						_, ok := served[secret]
+						assert.True(t, ok, "cluster %s presents %s, which SDS does not serve", clusterName, secret)
+					}
+				}
+
+				logs := tc.logs.String()
+				assert.Contains(t, logs, "level=ERROR")
+				assert.Contains(t, logs, "Failed to load the default gateway identity")
+				assert.Contains(t, logs, "identity="+testDefaultIdentityName)
+				assert.NotContains(t, logs, "PRIVATE KEY")
+			})
+		}
+	}
+}
+
+// SDS serves the default identity's material exactly as the translator
+// loaded it, even when a later lookup of the row would fail.
+func TestDefaultClientCertificate_SDSServesLoadedMaterial(t *testing.T) {
+	tc := defaultIdentityTestCase{presentDefault: true, httpsEnabled: true, defaultExists: true}
+	db := tc.storage(t)
+	translator := tc.translator(t, db)
+	translateEveryKind(t, translator)
+
+	for _, cert := range db.certs {
+		if cert.IsDefaultIdentity() {
+			cert.PrivateKeyCiphertext = "not-a-payload"
+		}
+	}
+	sds := NewSDSSecretManager(translator.certStore, nil, "router-node", createTestLogger(),
+		translator.routerConfig.DownstreamTLS.CertPath, translator.routerConfig.DownstreamTLS.KeyPath, true)
+	secrets, err := sds.GetSecrets(translator.GetUpstreamTLSSecretRefs())
+	require.NoError(t, err)
+	secret, ok := secretsByName(t, secrets)[GatewayIdentitySecretName(testDefaultIdentityName)]
+	require.True(t, ok, "the default identity's secret is served")
+	assert.Equal(t, testIdentityKeyPEM, secret.GetTlsCertificate().GetPrivateKey().GetInlineBytes())
+}
+
+// Every internal cluster builder leaves APITraffic unset, so none presents
+// the default client certificate.
+func TestDefaultClientCertificate_InternalClustersNeverPresent(t *testing.T) {
+	tc := defaultIdentityTestCase{presentDefault: true, httpsEnabled: true, defaultExists: true}
+	translator := tc.translator(t, tc.storage(t))
+	translateEveryKind(t, translator)
+	require.NotEmpty(t, translator.defaultClientCert.SecretName)
+
+	hubURL := &url.URL{Scheme: "https", Host: "hub.internal:8443"}
+	internal := []types.Resource{
+		translator.createPolicyEngineCluster(),
+		translator.createALSCluster(),
+		translator.createOTELCollectorCluster(),
+		translator.CreateCluster("websub_hub", hubURL, nil, nil),
+	}
+	for name, secrets := range clientCertSecrets(t, internal) {
+		assert.NotContains(t, secrets, translator.defaultClientCert.SecretName, "internal cluster %s", name)
+	}
+
+	withoutAPITraffic, err := translator.createUpstreamTLSContext(nil, "internal.backend", &models.UpstreamTLS{Enabled: true}, "")
+	require.NoError(t, err)
+	assert.Empty(t, withoutAPITraffic.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs())
 }

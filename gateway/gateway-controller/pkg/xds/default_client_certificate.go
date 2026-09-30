@@ -41,11 +41,23 @@ type defaultClientCertificate struct {
 	IdentityName string
 	// leafPEM is the presented certificate chain, read only for logging.
 	leafPEM []byte
+	// material is the default identity's loaded chain and key, which SDS
+	// serves as is. It is nil unless IdentityName is set.
+	material *identityMaterial
+}
+
+// identityMaterial is a gateway identity's PEM certificate chain and
+// decrypted private key.
+type identityMaterial struct {
+	certChain  []byte
+	privateKey []byte
 }
 
 // resolveDefaultClientCertificate picks the certificate by precedence: the
 // role: default gateway identity, then the HTTPS listener certificate, then
-// none. With present_default_identity off it always picks none.
+// none. With present_default_identity off it always picks none. A default
+// identity whose key cannot be loaded is skipped, so no cluster names a
+// secret SDS cannot serve.
 func (t *Translator) resolveDefaultClientCertificate() (defaultClientCertificate, error) {
 	if !t.routerConfig.Upstream.TLS.PresentDefaultIdentity {
 		return defaultClientCertificate{}, nil
@@ -56,11 +68,17 @@ func (t *Translator) resolveDefaultClientCertificate() (defaultClientCertificate
 			return defaultClientCertificate{}, fmt.Errorf("failed to resolve the default gateway identity: %w", err)
 		}
 		if identity != nil {
-			return defaultClientCertificate{
-				SecretName:   GatewayIdentitySecretName(identity.Name),
-				IdentityName: identity.Name,
-				leafPEM:      identity.Certificate,
-			}, nil
+			certChain, privateKey, err := t.certStore.GetGatewayIdentityMaterial(identity.Name)
+			if err == nil {
+				return defaultClientCertificate{
+					SecretName:   GatewayIdentitySecretName(identity.Name),
+					IdentityName: identity.Name,
+					leafPEM:      certChain,
+					material:     &identityMaterial{certChain: certChain, privateKey: privateKey},
+				}, nil
+			}
+			t.logger.Error("Failed to load the default gateway identity; presenting the next choice instead",
+				slog.String("identity", identity.Name), slog.Any("error", err))
 		}
 	}
 	if t.routerConfig.HTTPSEnabled {

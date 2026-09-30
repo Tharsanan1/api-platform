@@ -792,11 +792,6 @@ func (t *Translator) TranslateConfigs(
 	}
 	t.defaultClientCert = defaultClientCert
 	t.logDefaultClientCertificate(defaultClientCert)
-	// The default identity is named by no tls block, so its secret is
-	// requested here; the snapshot keeps it only if a cluster references it.
-	if defaultClientCert.IdentityName != "" {
-		t.tlsSecretRefs = append(t.tlsSecretRefs, UpstreamTLSSecretRef{IdentityName: defaultClientCert.IdentityName})
-	}
 
 	var listeners []types.Resource
 	var clusters []types.Resource
@@ -845,7 +840,7 @@ func (t *Translator) TranslateConfigs(
 		if ok {
 			rdc, transformErr := transformer.Transform(cfg)
 			if transformErr != nil {
-				log.Error("Failed to transform config via RuntimeDeployConfig, falling back to legacy path",
+				log.Error("Failed to transform config via RuntimeDeployConfig, falling back to legacy path; tls settings and the default identity are not applied on that path",
 					slog.String("id", cfg.UUID),
 					slog.String("kind", cfg.Kind),
 					slog.Any("error", transformErr))
@@ -1067,6 +1062,15 @@ func (t *Translator) TranslateConfigs(
 		if otelCluster != nil {
 			clusters = append(clusters, otelCluster)
 		}
+	}
+
+	// The default identity is named by no tls block, so its secret is
+	// requested here, first, and only when a cluster presents it.
+	if defaultClientCert.IdentityName != "" && SnapshotReferencesSDSSecret(clusters, nil, defaultClientCert.SecretName) {
+		t.tlsSecretRefs = append([]UpstreamTLSSecretRef{{
+			IdentityName: defaultClientCert.IdentityName,
+			material:     defaultClientCert.material,
+		}}, t.tlsSecretRefs...)
 	}
 
 	resources[resource.ListenerType] = listeners
@@ -2399,8 +2403,8 @@ func (t *Translator) createOTELCollectorCluster() *cluster.Cluster {
 }
 
 // createUpstreamTLSContext creates an upstream TLS context. tlsOpts carries a
-// cluster's mTLS wiring and is nil for a cluster that carries no API traffic
-// or does not honour tls blocks, which never presents the default client
+// cluster's mTLS wiring and is nil for a cluster that does not honour tls
+// blocks. Only a tlsOpts with APITraffic set presents the default client
 // certificate. validationSecretName is the SDS secret for a non-empty
 // tlsOpts.TrustedCANames. It errors when a tls block has no trust source, since
 // a context without one would silently skip chain and hostname validation.
@@ -2436,7 +2440,7 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 	switch {
 	case hasTLSBlock && tlsOpts.IdentityName != "":
 		clientCertSecretName = GatewayIdentitySecretName(tlsOpts.IdentityName)
-	case tlsOpts != nil:
+	case tlsOpts != nil && tlsOpts.APITraffic:
 		clientCertSecretName = t.defaultClientCert.SecretName
 	}
 	if clientCertSecretName != "" {

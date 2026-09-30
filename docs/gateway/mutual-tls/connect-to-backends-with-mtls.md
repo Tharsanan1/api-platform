@@ -105,11 +105,11 @@ With it on, the gateway picks the certificate for each backend in this order:
 3. **The HTTPS listener certificate,** when no identity has `role: default`.
 4. **None,** when the HTTPS listener is disabled and no identity has `role: default`.
 
-This covers inline `upstream.main` and `upstream.sandbox` URLs, definitions with no `tls` block, and `tls` blocks that set only `trustedCAs` or `verifyHostName`. It applies to every API kind, including Agents, LLM providers and proxies, and MCP proxies. It never applies to the gateway's own internal connections, such as those to the policy engine and the telemetry collectors.
+This covers inline `upstream.main` and `upstream.sandbox` URLs, definitions with no `tls` block, and `tls` blocks that set only `trustedCAs` or `verifyHostName`. It applies to every API kind that routes to a backend, including Agents, LLM providers and proxies, and MCP proxies. WebSub APIs never present it, because their only upstream is the gateway's internal hub. It never applies to the gateway's own internal connections, such as those to the policy engine, the telemetry collectors, and the WebSub hub. An API whose configuration the gateway could not translate normally is served without a client certificate, and the controller logs an error for it.
 
 The gateway sends the certificate only to a backend that asks for one during the handshake. A backend that doesn't request a client certificate sees no change.
 
-Uploading, rotating, or deleting the default identity takes effect without a redeploy. Deleting it falls back to the HTTPS listener certificate.
+Uploading, rotating, or deleting the default identity takes effect without a redeploy. Deleting it falls back to the HTTPS listener certificate, or to none when the HTTPS listener is disabled. If the controller can't load the default identity's private key, it logs an error naming the identity and presents the next choice in the same way.
 
 At startup, and whenever the choice changes, the controller logs which certificate it presents. It logs a warning when it presents none.
 

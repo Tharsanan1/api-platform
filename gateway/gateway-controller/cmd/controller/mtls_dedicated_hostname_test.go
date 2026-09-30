@@ -56,13 +56,20 @@ func storedRestAPI(handle, vhostsMain string, sandbox *string, policies ...api.P
 }
 
 func dedicatedHostnameRouterConfig(required bool) *config.RouterConfig {
+	return dedicatedHostnameRouterConfigFor(required, config.ClientCertificateRequestMtlsHostnames)
+}
+
+func dedicatedHostnameRouterConfigFor(required bool, request string) *config.RouterConfig {
 	return &config.RouterConfig{
 		HTTPSEnabled: true,
 		VHosts: config.VHostsConfig{
 			Main:    config.VHostEntry{Default: "*"},
 			Sandbox: config.VHostEntry{Default: "sandbox-*"},
 		},
-		DownstreamTLS: config.DownstreamTLS{MtlsRequiresDedicatedHostname: required},
+		DownstreamTLS: config.DownstreamTLS{
+			MtlsRequiresDedicatedHostname: required,
+			ClientCertificateRequest:      request,
+		},
 	}
 }
 
@@ -124,4 +131,30 @@ func TestWarnMtlsAPIsWithoutDedicatedHostname_SettingOff(t *testing.T) {
 	var buf bytes.Buffer
 	warnMtlsAPIsWithoutDedicatedHostname(configs, dedicatedHostnameRouterConfig(false), slog.New(slog.NewJSONHandler(&buf, nil)))
 	assert.Empty(t, warnMessages(t, &buf))
+}
+
+// With all_connections the requirement has no effect: one warning says so,
+// and no stored API is named.
+func TestWarnMtlsAPIsWithoutDedicatedHostname_AllConnections(t *testing.T) {
+	configs := []*models.StoredConfig{
+		storedRestAPI("no-hostname", "", nil, api.Policy{Name: config.MtlsAuthPolicyName, Version: "v1"}),
+		storedRestAPI("also-no-hostname", "", nil, api.Policy{Name: config.MtlsAuthPolicyName, Version: "v1"}),
+	}
+	const combined = "router.downstream_tls.mtls_requires_dedicated_hostname has no effect while " +
+		"router.downstream_tls.client_certificate_request is all_connections"
+
+	t.Run("dedicated hostname required", func(t *testing.T) {
+		var buf bytes.Buffer
+		warnMtlsAPIsWithoutDedicatedHostname(configs,
+			dedicatedHostnameRouterConfigFor(true, config.ClientCertificateRequestAllConnections),
+			slog.New(slog.NewJSONHandler(&buf, nil)))
+		assert.Equal(t, []string{combined}, warnMessages(t, &buf))
+	})
+	t.Run("dedicated hostname not required", func(t *testing.T) {
+		var buf bytes.Buffer
+		warnMtlsAPIsWithoutDedicatedHostname(configs,
+			dedicatedHostnameRouterConfigFor(false, config.ClientCertificateRequestAllConnections),
+			slog.New(slog.NewJSONHandler(&buf, nil)))
+		assert.Empty(t, warnMessages(t, &buf))
+	})
 }

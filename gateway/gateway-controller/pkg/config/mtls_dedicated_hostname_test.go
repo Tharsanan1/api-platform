@@ -19,6 +19,7 @@
 package config
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -184,5 +185,29 @@ func TestUndedicatedHostnames(t *testing.T) {
 	}
 	if got := UndedicatedHostnames(*createValidRestAPIConfig(), scopeTestVHosts()); got != nil {
 		t.Fatalf("UndedicatedHostnames without mtls-auth = %+v, want nil", got)
+	}
+}
+
+// With client_certificate_request all_connections the listener asks every
+// connection, so no hostname is warned about or refused, whether or not a
+// dedicated hostname is required.
+func TestMtlsAuthValidator_AllConnectionsAsked(t *testing.T) {
+	apis := map[string]*api.RestAPI{
+		"no vhosts":              restAPIWithAPILevelPolicies(mtlsPolicy(nil)),
+		"IP address":             withVhosts(restAPIWithAPILevelPolicies(mtlsPolicy(nil)), "10.0.0.5", nil),
+		"sandbox on its default": withSandboxUpstream(withVhosts(restAPIWithAPILevelPolicies(mtlsPolicy(nil)), "pay.example.com", nil)),
+	}
+	for _, required := range []bool{false, true} {
+		for name, cfg := range apis {
+			t.Run(fmt.Sprintf("%s, dedicated hostname required %t", name, required), func(t *testing.T) {
+				v := dedicatedHostnameValidator(required).WithAllConnectionsAsked(true)
+				if errs := hostnameErrors(v, cfg); len(errs) != 0 {
+					t.Fatalf("hostname errors = %+v, want none", errs)
+				}
+				if w := v.HostnameScopeWarnings(*cfg); len(w) != 0 {
+					t.Fatalf("HostnameScopeWarnings = %+v, want none", w)
+				}
+			})
+		}
 	}
 }

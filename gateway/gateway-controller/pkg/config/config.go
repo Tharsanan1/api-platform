@@ -698,9 +698,31 @@ type DownstreamTLS struct {
 	// connection for a certificate.
 	MtlsRequiresDedicatedHostname bool `koanf:"mtls_requires_dedicated_hostname"`
 
+	// ClientCertificateRequest chooses which connections the HTTPS listener
+	// asks for a client certificate while asking is needed:
+	// ClientCertificateRequestMtlsHostnames or
+	// ClientCertificateRequestAllConnections.
+	ClientCertificateRequest string `koanf:"client_certificate_request"`
+
 	// ClientCertificateHeader configures the header carrying a client
 	// certificate relayed by a front proxy that terminates TLS.
 	ClientCertificateHeader ClientCertificateHeader `koanf:"client_certificate_header"`
+}
+
+// Values of router.downstream_tls.client_certificate_request.
+const (
+	// ClientCertificateRequestMtlsHostnames asks only connections for the
+	// hostnames of APIs attaching mtls-auth, when every such hostname can be
+	// matched on SNI.
+	ClientCertificateRequestMtlsHostnames = "mtls_hostnames"
+	// ClientCertificateRequestAllConnections asks every connection.
+	ClientCertificateRequestAllConnections = "all_connections"
+)
+
+// AsksAllConnections reports whether client_certificate_request is
+// all_connections.
+func (d DownstreamTLS) AsksAllConnections() bool {
+	return d.ClientCertificateRequest == ClientCertificateRequestAllConnections
 }
 
 // ClientCertificateHeader configures how the mtls-auth policy treats a client
@@ -1353,6 +1375,7 @@ func defaultConfig() *Config {
 				Ciphers:                       "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
 				EcdhCurves:                    "X25519,P-256",
 				MtlsRequiresDedicatedHostname: false,
+				ClientCertificateRequest:      ClientCertificateRequestMtlsHostnames,
 				ClientCertificateHeader: ClientCertificateHeader{
 					Name:     DefaultClientCertificateHeaderName,
 					TrustAny: false,
@@ -1841,6 +1864,14 @@ func (c *Config) Validate() error {
 	}
 	if err := ValidateClientCertificateHeaderName(c.Router.DownstreamTLS.ClientCertificateHeader.Name); err != nil {
 		return err
+	}
+
+	switch c.Router.DownstreamTLS.ClientCertificateRequest {
+	case ClientCertificateRequestMtlsHostnames, ClientCertificateRequestAllConnections:
+	default:
+		return fmt.Errorf("router.downstream_tls.client_certificate_request must be one of: %s, %s, got: %s",
+			ClientCertificateRequestMtlsHostnames, ClientCertificateRequestAllConnections,
+			c.Router.DownstreamTLS.ClientCertificateRequest)
 	}
 
 	// Validate EventHub configuration

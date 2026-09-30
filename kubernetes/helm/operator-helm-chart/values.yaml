@@ -267,6 +267,8 @@ gateway:
             # leading *. wildcard. Stored APIs that break this keep being served, with a
             # warning at startup.
             mtls_requires_dedicated_hostname: false
+            # Which connections the HTTPS listener asks for a client certificate: mtls_hostnames or all_connections.
+            client_certificate_request: mtls_hostnames
 
           # Upstream configuration (TLS and timeouts for Envoy upstream)
           upstream:

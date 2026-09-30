@@ -38,6 +38,7 @@ import (
 	anypb "google.golang.org/protobuf/types/known/anypb"
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/constants"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/testutil/pki"
@@ -94,9 +95,17 @@ func storedConfigs(apis ...scopeAPI) []*models.StoredConfig {
 
 func newScopeTestTranslator(t *testing.T, db *fakeSDSStorage) *Translator {
 	t.Helper()
+	return newScopeTestTranslatorFor(t, db, config.ClientCertificateRequestMtlsHostnames)
+}
+
+// newScopeTestTranslatorFor builds the test translator with
+// router.downstream_tls.client_certificate_request set to request.
+func newScopeTestTranslatorFor(t *testing.T, db *fakeSDSStorage, request string) *Translator {
+	t.Helper()
 	routerCfg := testRouterConfig()
 	routerCfg.HTTPSEnabled = true
 	routerCfg.HTTPSPort = scopeTestHTTPSPort
+	routerCfg.DownstreamTLS.ClientCertificateRequest = request
 	cfg := testConfig()
 	cfg.Router = *routerCfg
 	translator, err := NewTranslator(createTestLogger(), routerCfg, db, cfg)
@@ -580,6 +589,7 @@ func TestTranslator_ClientCertificateRequest_LogsModeChange(t *testing.T) {
 	require.Len(t, changes(), 1)
 	assert.Contains(t, changes()[0], "mode=SCOPED")
 	assert.Contains(t, changes()[0], "hostname_count=2")
+	assert.Contains(t, changes()[0], "client_certificate_request=mtls_hostnames")
 	assert.NotContains(t, changes()[0], "pay.example.com")
 
 	translateHTTPSListener(t, translator, storedConfigs(scopeAPI{uuid: "pay", mtls: "api"}))
@@ -610,4 +620,67 @@ func TestTranslator_ClientCertificateRequest_FailedBuildNotRecorded(t *testing.T
 	translateHTTPSListener(t, translator, scoped)
 	assert.Equal(t, 1, strings.Count(buf.String(), "client certificate request changed"))
 	assert.Contains(t, buf.String(), "mode=SCOPED")
+}
+
+// With all_connections, every case that asks builds the single asking chain
+// the listener builds when it asks everywhere, and every case that asks
+// nothing stays OFF.
+func TestTranslator_HTTPSListener_AllConnections(t *testing.T) {
+	tests := []struct {
+		name      string
+		apis      []scopeAPI
+		emptyPool bool
+		relay     bool
+		asks      bool
+	}{
+		{name: "scopable hostname", apis: []scopeAPI{{uuid: "pay", main: "pay.example.com", mtls: "api"}}, asks: true},
+		{name: "several scopable hostnames", apis: []scopeAPI{
+			{uuid: "pay", main: "pay.example.com;pay-eu.example.com", mtls: "api"},
+			{uuid: "settle", main: "*.settle.example.com", mtls: "operation"},
+			{uuid: "plain", main: "public.example.com"},
+		}, asks: true},
+		{name: "default hostname", apis: []scopeAPI{{uuid: "pay", mtls: "api"}}, asks: true},
+		{name: "relay entry", apis: []scopeAPI{{uuid: "pay", main: "pay.example.com", mtls: "api"}}, relay: true, asks: true},
+		{name: "no API attaches mtls-auth", apis: []scopeAPI{{uuid: "plain", main: "public.example.com"}}},
+		{name: "no API deployed"},
+		{name: "empty client-CA pool", apis: []scopeAPI{{uuid: "pay", main: "pay.example.com", mtls: "api"}}, emptyPool: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := clientPool(t, tt.relay)
+			if tt.emptyPool {
+				db = &fakeSDSStorage{}
+			}
+			translator := newScopeTestTranslatorFor(t, db, config.ClientCertificateRequestAllConnections)
+			configs := storedConfigs(tt.apis...)
+
+			req, err := translator.clientCertificateRequest(configs)
+			require.NoError(t, err)
+			if tt.asks {
+				assert.Equal(t, clientCertRequest{mode: clientCertEverywhere}, req)
+			} else {
+				assert.Equal(t, clientCertRequest{mode: clientCertOff}, req)
+			}
+
+			resources, err := translator.TranslateConfigs(configs, "")
+			require.NoError(t, err)
+			got := findListenerByPort(t, resources[resource.ListenerType], scopeTestHTTPSPort)
+			httpListener := findListenerByPort(t, resources[resource.ListenerType], translator.routerConfig.ListenerPort)
+			want := singleChainHTTPSListener(t, translator, httpListener, tt.asks)
+			assert.True(t, proto.Equal(want, got), "HTTPS listener differs from the single-chain listener")
+		})
+	}
+}
+
+// The mode-change log carries the configured client_certificate_request.
+func TestTranslator_ClientCertificateRequest_LogsSetting(t *testing.T) {
+	var buf bytes.Buffer
+	translator := newScopeTestTranslatorFor(t, clientPool(t, false), config.ClientCertificateRequestAllConnections)
+	translator.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	translateHTTPSListener(t, translator, storedConfigs(scopeAPI{uuid: "pay", main: "pay.example.com", mtls: "api"}))
+	require.Equal(t, 1, strings.Count(buf.String(), "client certificate request changed"))
+	assert.Contains(t, buf.String(), "mode=EVERYWHERE")
+	assert.Contains(t, buf.String(), "hostname_count=0")
+	assert.Contains(t, buf.String(), "client_certificate_request=all_connections")
 }

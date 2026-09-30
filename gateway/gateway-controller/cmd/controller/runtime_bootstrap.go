@@ -177,9 +177,18 @@ func supportsRuntimeBootstrapKind(kind string) bool {
 // warnMtlsAPIsWithoutDedicatedHostname logs one warning per stored mtls-auth
 // API that router.downstream_tls.mtls_requires_dedicated_hostname would refuse
 // to deploy. Such an API keeps being served. Pass rendered configurations.
+// With client_certificate_request all_connections the requirement has no
+// effect, and one warning says so instead.
 func warnMtlsAPIsWithoutDedicatedHostname(configs []*models.StoredConfig, routerConfig *config.RouterConfig, log *slog.Logger) {
-	if log == nil || routerConfig == nil || !routerConfig.HTTPSEnabled ||
-		!routerConfig.DownstreamTLS.MtlsRequiresDedicatedHostname {
+	if log == nil || routerConfig == nil || !routerConfig.DownstreamTLS.MtlsRequiresDedicatedHostname {
+		return
+	}
+	if routerConfig.DownstreamTLS.AsksAllConnections() {
+		log.Warn("router.downstream_tls.mtls_requires_dedicated_hostname has no effect while " +
+			"router.downstream_tls.client_certificate_request is all_connections")
+		return
+	}
+	if !routerConfig.HTTPSEnabled {
 		return
 	}
 	for _, cfg := range configs {

@@ -40,11 +40,19 @@ const dedicatedHostnameMainMessage = "this gateway requires every mtls-auth API 
 // client authority in the pool and HTTPS enabled.
 func createDedicatedHostnameTestServer(t *testing.T, required bool) (*APIServer, *MockStorage) {
 	t.Helper()
+	return createDedicatedHostnameTestServerFor(t, required, config.ClientCertificateRequestMtlsHostnames)
+}
+
+// createDedicatedHostnameTestServerFor is createDedicatedHostnameTestServer
+// with router.downstream_tls.client_certificate_request set to request.
+func createDedicatedHostnameTestServerFor(t *testing.T, required bool, request string) (*APIServer, *MockStorage) {
+	t.Helper()
 	server := createTestAPIServer()
 	mockDB := server.db.(*MockStorage)
 	attachTestEventHub(server, &mockEventHub{}, "test-gateway")
 	server.routerConfig.HTTPSEnabled = true
 	server.routerConfig.DownstreamTLS.MtlsRequiresDedicatedHostname = required
+	server.routerConfig.DownstreamTLS.ClientCertificateRequest = request
 	require.NoError(t, mockDB.SaveCertificate(&models.StoredCertificate{
 		UUID: "partner-a", Name: "partner-a",
 		Usage: models.CertificateUsageDownstream, Role: models.CertificateRoleClient,
@@ -55,7 +63,8 @@ func createDedicatedHostnameTestServer(t *testing.T, required bool) (*APIServer,
 	}
 	mtlsAuthValidator := config.NewMtlsAuthValidator(mockDB, true, false, nil).
 		WithVHosts(server.routerConfig.VHosts).
-		WithDedicatedHostnameRequired(required)
+		WithDedicatedHostnameRequired(required).
+		WithAllConnectionsAsked(server.routerConfig.DownstreamTLS.AsksAllConnections())
 	validator, ok := server.validator.(*config.APIValidator)
 	require.True(t, ok)
 	validator.SetPolicyValidator(config.NewPolicyValidator(defs, mtlsAuthValidator))
@@ -162,5 +171,22 @@ func TestRestAPI_MtlsRequiresDedicatedHostname_TemplatedVhost(t *testing.T) {
 		server, mockDB := createDedicatedHostnameTestServer(t, true)
 		w := updateMtlsAuthRestAPI(t, server, mockDB, "mtls-templated", templated)
 		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	})
+}
+
+// With all_connections the requirement has no effect: an API without its own
+// hostname deploys, and carries no hostname warning.
+func TestRestAPI_MtlsRequiresDedicatedHostname_AllConnections(t *testing.T) {
+	t.Run("create accepted without its own hostname", func(t *testing.T) {
+		server, _ := createDedicatedHostnameTestServerFor(t, true, config.ClientCertificateRequestAllConnections)
+		w := createMtlsAuthRestAPI(t, server, "mtls-create", "")
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		assert.NotContains(t, w.Body.String(), config.WarningCodeMTLSHostnameNotScoped)
+	})
+	t.Run("update accepted without its own hostname", func(t *testing.T) {
+		server, mockDB := createDedicatedHostnameTestServerFor(t, true, config.ClientCertificateRequestAllConnections)
+		w := updateMtlsAuthRestAPI(t, server, mockDB, "mtls-update", "")
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.NotContains(t, w.Body.String(), config.WarningCodeMTLSHostnameNotScoped)
 	})
 }

@@ -90,6 +90,10 @@ type MtlsAuthValidator struct {
 	// requireDedicatedHostname is
 	// router.downstream_tls.mtls_requires_dedicated_hostname.
 	requireDedicatedHostname bool
+
+	// asksAllConnections is true when
+	// router.downstream_tls.client_certificate_request is all_connections.
+	asksAllConnections bool
 }
 
 // NewMtlsAuthValidator creates a validator bound to the certificate store.
@@ -120,6 +124,15 @@ func (v *MtlsAuthValidator) WithVHosts(vhosts VHostsConfig) *MtlsAuthValidator {
 // and HostnameScopeWarnings reports nothing.
 func (v *MtlsAuthValidator) WithDedicatedHostnameRequired(required bool) *MtlsAuthValidator {
 	v.requireDedicatedHostname = required
+	return v
+}
+
+// WithAllConnectionsAsked records that
+// router.downstream_tls.client_certificate_request is all_connections. The
+// HTTPS listener then asks every connection whatever an API's hostname, so
+// no hostname warning or refusal is raised.
+func (v *MtlsAuthValidator) WithAllConnectionsAsked(all bool) *MtlsAuthValidator {
+	v.asksAllConnections = all
 	return v
 }
 
@@ -360,7 +373,7 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 		errs = append(errs, v.validateParams(occ.fieldPath, occ.params)...)
 	}
 
-	if v.requireDedicatedHostname && v.httpsEnabled && v.vhosts != nil {
+	if v.requireDedicatedHostname && !v.asksAllConnections && v.httpsEnabled && v.vhosts != nil {
 		for _, h := range UndedicatedHostnames(*apiConfig, *v.vhosts) {
 			errs = append(errs, ValidationError{
 				Field: h.Field,
@@ -715,9 +728,10 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 // HostnameScopeWarnings reports MTLS_HOSTNAME_NOT_SCOPED for each hostname
 // UndedicatedHostnames finds on apiConfig. Pass the rendered configuration
 // the translator uses. It reports nothing when a dedicated hostname is
-// required, since ValidateRestAPI refuses such an API.
+// required, since ValidateRestAPI refuses such an API, or when every
+// connection is asked.
 func (v *MtlsAuthValidator) HostnameScopeWarnings(apiConfig api.RestAPI) []clientca.Warning {
-	if !v.httpsEnabled || v.vhosts == nil || v.requireDedicatedHostname {
+	if !v.httpsEnabled || v.vhosts == nil || v.requireDedicatedHostname || v.asksAllConnections {
 		return nil
 	}
 	var warnings []clientca.Warning

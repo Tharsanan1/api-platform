@@ -589,7 +589,8 @@ func main() {
 	mtlsAuthValidator := config.NewMtlsAuthValidator(db, cfg.Router.HTTPSEnabled,
 		cfg.Router.DownstreamTLS.ClientCertificateHeader.TrustAny, config.MtlsAuthParameterSchema(policyDefinitions)).
 		WithVHosts(cfg.Router.VHosts).
-		WithDedicatedHostnameRequired(cfg.Router.DownstreamTLS.MtlsRequiresDedicatedHostname)
+		WithDedicatedHostnameRequired(cfg.Router.DownstreamTLS.MtlsRequiresDedicatedHostname).
+		WithAllConnectionsAsked(cfg.Router.DownstreamTLS.AsksAllConnections())
 	policyValidator := config.NewPolicyValidator(policyDefinitions, mtlsAuthValidator)
 	validator.SetPolicyValidator(policyValidator)
 	upstreamTLSValidator := config.NewUpstreamTLSValidator(db, cfg.Router.Upstream.TLS.DisableSslVerification)

@@ -2752,10 +2752,12 @@ func (r clientCertRequest) equal(o clientCertRequest) bool {
 // listener names no downstream_client_ca secret, so it never waits on a
 // secret that is not served, and mtls-auth denies for lack of a certificate.
 //
-// Asking is scoped to the SNI of the hostnames of those APIs. Every
-// connection is asked instead when one of those APIs is served on a default
-// hostname or on one that cannot be matched on SNI, or when the pool holds a
-// relay entry, whose front proxy connects on any hostname.
+// With client_certificate_request all_connections, every connection is
+// asked. With mtls_hostnames, asking is scoped to the SNI of the hostnames of
+// those APIs; every connection is asked instead when one of those APIs is
+// served on a default hostname or on one that cannot be matched on SNI, or
+// when the pool holds a relay entry, whose front proxy connects on any
+// hostname.
 //
 // A pool that cannot be read fails the translation, as it fails the SDS
 // secrets.
@@ -2793,7 +2795,7 @@ func (t *Translator) clientCertificateRequest(configs []*models.StoredConfig) (c
 	if len(bundle) == 0 {
 		return off, nil
 	}
-	if hasRelay || !scopable {
+	if hasRelay || !scopable || t.routerConfig.DownstreamTLS.AsksAllConnections() {
 		return clientCertRequest{mode: clientCertEverywhere}, nil
 	}
 
@@ -2837,7 +2839,8 @@ func (t *Translator) logClientCertRequestChange(log *slog.Logger, req clientCert
 	t.lastClientCertRequest = req
 	log.Info("HTTPS listener client certificate request changed",
 		slog.String("mode", req.mode.String()),
-		slog.Int("hostname_count", len(req.serverNames)))
+		slog.Int("hostname_count", len(req.serverNames)),
+		slog.String("client_certificate_request", t.routerConfig.DownstreamTLS.ClientCertificateRequest))
 }
 
 // configAttachesMTLSAuth reports whether cfg's RestAPI representation

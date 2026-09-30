@@ -35,10 +35,18 @@ import (
 // response.
 func hostnameWarningFields(t *testing.T, vhostsMain string) []string {
 	t.Helper()
+	return hostnameWarningFieldsFor(t, vhostsMain, config.ClientCertificateRequestMtlsHostnames)
+}
+
+// hostnameWarningFieldsFor is hostnameWarningFields with
+// router.downstream_tls.client_certificate_request set to request.
+func hostnameWarningFieldsFor(t *testing.T, vhostsMain, request string) []string {
+	t.Helper()
 	server := createTestAPIServer()
 	mockDB := server.db.(*MockStorage)
 	attachTestEventHub(server, &mockEventHub{}, "test-gateway")
 	server.routerConfig.HTTPSEnabled = true
+	server.routerConfig.DownstreamTLS.ClientCertificateRequest = request
 
 	existing := createTestStoredConfig("0000-mtls-host-0000-000000000000", "mtls-host", "v1.0.0", "/mtls-host")
 	existing.Handle = "mtls-host"
@@ -98,4 +106,14 @@ func TestUpdateRestAPI_MTLSHostnameNotScopedWarning_TemplatedVhost(t *testing.T)
 		t.Setenv("MTLS_HOSTNAME_TEST_HOST", "10.0.0.5")
 		assert.Equal(t, []string{"spec.vhosts.main"}, hostnameWarningFields(t, templated))
 	})
+}
+
+// With all_connections every connection is asked, so no hostname is warned
+// about.
+func TestUpdateRestAPI_MTLSHostnameNotScopedWarning_AllConnections(t *testing.T) {
+	for _, vhostsMain := range []string{"", "10.0.0.5", "pay.example.com"} {
+		t.Run("vhosts.main="+vhostsMain, func(t *testing.T) {
+			assert.Empty(t, hostnameWarningFieldsFor(t, vhostsMain, config.ClientCertificateRequestAllConnections))
+		})
+	}
 }

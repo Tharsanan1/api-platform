@@ -32,8 +32,8 @@ Feature: Believing the relayed certificate from any connection on a trusted netw
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
     And the client authority pool is empty
-    And the certificate fixture "ca-a" is pooled as "bypass-partner-a" with usage "client"
-    And the certificate fixture "ca-b" is pooled as "bypass-partner-b" with usage "client"
+    And the certificate fixture "ca-a" is pooled as "bypass-partner-a" with usage "downstream"
+    And the certificate fixture "ca-b" is pooled as "bypass-partner-b" with usage "downstream"
 
   Scenario: Every mtls-auth deployment warns that the bypass is active
     When I deploy this API configuration:

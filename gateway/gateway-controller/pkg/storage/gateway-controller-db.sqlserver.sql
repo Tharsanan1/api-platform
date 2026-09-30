@@ -137,7 +137,7 @@ CREATE TABLE dbo.certificates (
     -- certificate chain plus its encrypted private key presented to a
     -- backend requiring mutual TLS on outbound connections; the three
     -- purposes never share a trust bundle. role only applies to usage:
-    -- client. private_key_ciphertext/key_algorithm only apply to usage:
+    -- downstream. private_key_ciphertext/key_algorithm only apply to usage:
     -- identity and stay NULL for every other usage.
     usage NVARCHAR(20) NOT NULL DEFAULT 'upstream',
     role NVARCHAR(20) NOT NULL DEFAULT 'client',

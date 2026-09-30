@@ -26,9 +26,9 @@ const (
 	// CertificateUsageUpstream marks a certificate as backend/upstream trust.
 	CertificateUsageUpstream = "upstream"
 
-	// CertificateUsageClient marks a certificate as a pooled client
+	// CertificateUsageDownstream marks a certificate as a pooled client
 	// certificate authority, used to authenticate API callers over mTLS.
-	CertificateUsageClient = "client"
+	CertificateUsageDownstream = "downstream"
 
 	// CertificateUsageIdentity marks a row as a gateway identity: a chain and
 	// encrypted private key the gateway presents to a backend requiring
@@ -36,7 +36,7 @@ const (
 	CertificateUsageIdentity = "identity"
 )
 
-// Certificate role values. Role only applies to usage: client certificates
+// Certificate role values. Role only applies to usage: downstream certificates
 // and describes how the gateway is expected to use the authority.
 const (
 	// CertificateRoleClient is the default role: the authority validates a
@@ -65,8 +65,8 @@ type StoredCertificate struct {
 	NotBefore   time.Time         `json:"notBefore"`       // Certificate validity start
 	NotAfter    time.Time         `json:"notAfter"`        // Certificate validity end
 	CertCount   int               `json:"certCount"`       // Number of certs in bundle
-	Usage       string            `json:"usage"`           // "upstream" (default), "client" or "identity"
-	Role        string            `json:"role"`            // "client" (default) or "relay"; meaningful only for usage: client
+	Usage       string            `json:"usage"`           // "upstream" (default), "downstream" or "identity"
+	Role        string            `json:"role"`            // "client" (default) or "relay"; meaningful only for usage: downstream
 	Match       *CertificateMatch `json:"match,omitempty"` // Only meaningful for role: relay; nil means unnarrowed
 
 	// PrivateKeyCiphertext is a usage: identity row's encrypted private key.

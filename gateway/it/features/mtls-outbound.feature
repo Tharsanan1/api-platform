@@ -88,8 +88,9 @@ Feature: Presenting a gateway identity to backends that require a client certifi
       | {"name":"out-bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{key "key-mismatch"}}"}                                    | privateKey  | the private key does not match the certificate                                                                              |
       | {"name":"out-bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{encryptedkey "gw-identity-a"}}"}                          | privateKey  | passphrase-protected private keys are not supported; upload an unencrypted key (it is encrypted at rest by the gateway)     |
       | {"name":"out-bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}"}                                                                           | privateKey  | both certificate and privateKey are required for usage: identity                                                            |
-      | {"name":"out-bad","usage":"client","certificate":"{{pem "ca-a"}}","privateKey":"{{key "gw-identity-a"}}"}                                             | privateKey  | privateKey applies only to usage: identity certificates                                                                     |
+      | {"name":"out-bad","usage":"downstream","certificate":"{{pem "ca-a"}}","privateKey":"{{key "gw-identity-a"}}"}                                             | privateKey  | privateKey applies only to usage: identity certificates                                                                     |
       | {"name":"out-bad","usage":"identity","privateKey":"{{key "gw-identity-a"}}"}                                                                            | certificate | both certificate and privateKey are required for usage: identity                                                            |
+      | {"name":"out-bad","usage":"client","certificate":"{{pem "ca-a"}}"}                                                                                      | usage       | usage must be upstream, downstream or identity                                                                              |
       | {"name":"out bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}","privateKey":"{{key "gw-identity-a"}}"}                                    | name        | name may contain only letters, digits, ., _ and -                                                                           |
       | {"name":"out-bad","usage":"identity","certificate":"not a certificate","privateKey":"{{key "gw-identity-a"}}"}                                          | certificate | the value is not a PEM-encoded certificate                                                                                  |
       | {"name":"out-bad","usage":"identity","certificate":"{{pem "gw-identity-a"}}\\n{{key "gw-identity-a"}}","privateKey":"{{key "gw-identity-a"}}"} | certificate | the certificate field takes certificates only; the private key belongs in privateKey |
@@ -187,7 +188,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     And the response should list a validation error for field "spec.upstream.main.tls" with message "tls is not supported on an inline upstream; move it to upstreamDefinitions and reference it"
 
   Scenario: A trust certificate meant for clients cannot be used as backend trust
-    Given the certificate fixture "ca-a" is pooled as "out-client-authority" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "out-client-authority" with usage "downstream"
     And the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
     When I deploy this API configuration:
       """
@@ -214,10 +215,10 @@ Feature: Presenting a gateway identity to backends that require a client certifi
             path: /anything
       """
     Then the response status should be 400
-    And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.trustedCAs[0]" with message "out-client-authority is a client authority (usage: client); trustedCAs takes usage: upstream certificates"
+    And the response should list a validation error for field "spec.upstreamDefinitions[0].tls.trustedCAs[0]" with message "out-client-authority is a client authority (usage: downstream); trustedCAs takes usage: upstream certificates"
 
   Scenario: Only an identity can be presented, and an identity is not backend trust
-    Given the certificate fixture "ca-a" is pooled as "out-client-authority" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "out-client-authority" with usage "downstream"
     And the gateway identity fixture "gw-identity-a" is stored as "out-identity-a"
     When I deploy this API configuration:
       """

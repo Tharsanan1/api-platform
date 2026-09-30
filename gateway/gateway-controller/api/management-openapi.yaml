@@ -857,7 +857,7 @@ paths:
       description: |
         Retrieve custom TLS certificates currently loaded in the certificate store.
         With usage: upstream (or no usage filter), these are used for verifying
-        HTTPS upstream connections. With usage: client, these are the pooled
+        HTTPS upstream connections. With usage: downstream, these are the pooled
         client certificate authorities used to authenticate mutual-TLS callers.
       operationId: listCertificates
       x-basicauth-roles: [admin, developer]
@@ -870,7 +870,7 @@ paths:
           description: Filter the list to a single usage. Omit to list all certificates regardless of usage.
           schema:
             type: string
-            enum: [ upstream, client, identity ]
+            enum: [ upstream, downstream, identity ]
       responses:
         "200":
           description: List of certificates
@@ -897,7 +897,7 @@ paths:
         Upload a new TLS certificate (PEM format) to the Gateway. The certificate is
         loaded dynamically without restarting the Gateway. With usage: upstream (the
         default), it is used for verifying HTTPS upstream connections. With usage:
-        client, it becomes a pooled client certificate authority used to authenticate
+        downstream, it becomes a pooled client certificate authority used to authenticate
         mutual-TLS callers; the two purposes never share a trust bundle.
       operationId: uploadCertificate
       x-basicauth-roles: [admin]
@@ -6448,7 +6448,7 @@ components:
         - name
       example:
         name: partner-a-root
-        usage: client
+        usage: downstream
         certificate: |
           -----BEGIN CERTIFICATE-----
           MIIDXTCCAkWgAwIBAgIJAKL0UG+mRKtjMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
@@ -6474,18 +6474,18 @@ components:
           type: string
           description: |
             Whether this certificate is used to verify upstream/backend HTTPS
-            connections (the default), pooled as a client certificate
-            authority used to authenticate mutual-TLS callers, or (identity)
+            connections (upstream, the default), pooled as a client certificate
+            authority used to authenticate mutual-TLS callers (downstream), or (identity)
             a gateway identity — a certificate chain (leaf first) plus its
             private key that the gateway presents to a backend requiring
             mutual TLS on outbound connections.
-          enum: [ upstream, client, identity ]
+          enum: [ upstream, downstream, identity ]
           default: upstream
           example: upstream
         role:
           type: string
           description: |
-            Only meaningful when usage is client. "client" (the default)
+            Only meaningful when usage is downstream. "client" (the default)
             means the authority validates a client certificate presented
             directly on the mTLS connection; "relay" means it validates a
             client certificate relayed via a header (e.g. from a
@@ -6539,7 +6539,7 @@ components:
         issuer: CN=Partner A Root,O=Partner A,C=US
         notAfter: "2026-11-26 06:07:26"
         count: 1
-        usage: client
+        usage: downstream
         role: client
         isLeaf: false
         referencedByApis: 0
@@ -6574,11 +6574,11 @@ components:
         usage:
           type: string
           description: Whether this is upstream/backend trust, a pooled client certificate authority, or a gateway identity.
-          enum: [ upstream, client, identity ]
+          enum: [ upstream, downstream, identity ]
           example: upstream
         role:
           type: string
-          description: Only present for usage client. Whether the authority validates a directly-presented or header-relayed client certificate.
+          description: Only present for usage downstream. Whether the authority validates a directly-presented or header-relayed client certificate.
           enum: [ client, relay ]
           example: client
         match:
@@ -6604,7 +6604,7 @@ components:
             $ref: "#/components/schemas/CertificateWarning"
         referencedByApis:
           type: integer
-          description: Number of deployed APIs referencing this certificate — a client authority (accept/pool) or a gateway identity (upstreamDefinitions[].tls.identity). Only present for usage client or identity.
+          description: Number of deployed APIs referencing this certificate — a client authority (accept/pool) or a gateway identity (upstreamDefinitions[].tls.identity). Only present for usage downstream or identity.
           example: 0
         message:
           type: string

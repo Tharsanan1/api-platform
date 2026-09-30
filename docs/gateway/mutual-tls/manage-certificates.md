@@ -14,11 +14,11 @@ Names may contain letters, digits, `.`, `_`, and `-`, up to 100 characters. They
 
 ## Add a client authority
 
-A client authority is the certificate authority that issues your callers' certificates. Upload it with `usage: client`:
+A client authority is the certificate authority that issues your callers' certificates. Upload it with `usage: downstream`:
 
 ```bash
 jq -n --arg name partner-a --rawfile certificate partner-a-ca.pem \
-  '{name: $name, usage: "client", role: "client", certificate: $certificate}' |
+  '{name: $name, usage: "downstream", role: "client", certificate: $certificate}' |
 curl -s -X POST http://localhost:9090/api/management/v1/certificates \
   -u admin:<password> \
   -H "Content-Type: application/json" \
@@ -37,7 +37,7 @@ Upload the authority that issues the load balancer's own certificate with `role:
 
 ```bash
 jq -n --arg name edge-lb --rawfile certificate edge-lb-ca.pem \
-  '{name: $name, usage: "client", role: "relay",
+  '{name: $name, usage: "downstream", role: "relay",
     match: {dnsSANs: ["lb.example.com"]}, certificate: $certificate}' |
 curl -s -X POST http://localhost:9090/api/management/v1/certificates \
   -u admin:<password> \
@@ -91,11 +91,11 @@ Upstream trust certificates join the gateway-wide trust bundle that backends are
 List every entry, or filter by `usage`:
 
 ```bash
-curl -s "http://localhost:9090/api/management/v1/certificates?usage=client" \
+curl -s "http://localhost:9090/api/management/v1/certificates?usage=downstream" \
   -u admin:<password>
 ```
 
-`usage` takes `client`, `identity`, or `upstream`. Each entry carries its `id`, `name`, `usage`, `subject`, `issuer`, and `notAfter`, plus `role` and `match` for a client authority. For a client authority or an identity, `referencedByApis` counts the deployed APIs that name it. An API that omits `accept` and inherits the whole pool doesn't count toward it.
+`usage` takes `downstream`, `identity`, or `upstream`. Each entry carries its `id`, `name`, `usage`, `subject`, `issuer`, and `notAfter`, plus `role` and `match` for a client authority. For a client authority or an identity, `referencedByApis` counts the deployed APIs that name it. An API that omits `accept` and inherits the whole pool doesn't count toward it.
 
 ## Rotate a gateway identity
 

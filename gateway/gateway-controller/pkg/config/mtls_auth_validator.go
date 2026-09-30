@@ -306,7 +306,7 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 		}
 	}
 
-	clientAuthorities, err := v.store.ListCertificatesByUsage(models.CertificateUsageClient)
+	clientAuthorities, err := v.store.ListCertificatesByUsage(models.CertificateUsageDownstream)
 	poolEmpty := err != nil || countClientAuthorities(clientAuthorities) == 0
 
 	for _, occ := range occs {
@@ -327,7 +327,7 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 		if poolEmpty {
 			errs = append(errs, ValidationError{
 				Field:   occ.fieldPath,
-				Message: "mtls-auth requires at least one client authority; add one with POST /certificates and usage: client",
+				Message: "mtls-auth requires at least one client authority; add one with POST /certificates and usage: downstream",
 			})
 		}
 
@@ -436,21 +436,21 @@ func (v *MtlsAuthValidator) validateAcceptEntryCA(entryPath string, entry map[st
 	}
 
 	switch cert.EffectiveUsage() {
-	case models.CertificateUsageClient:
+	case models.CertificateUsageDownstream:
 	case models.CertificateUsageUpstream:
 		return []ValidationError{{
 			Field:   caPath,
-			Message: fmt.Sprintf("%s is a backend trust certificate (usage: upstream); accept takes usage: client authorities", caName),
+			Message: fmt.Sprintf("%s is a backend trust certificate (usage: upstream); accept takes usage: downstream authorities", caName),
 		}}
 	case models.CertificateUsageIdentity:
 		return []ValidationError{{
 			Field:   caPath,
-			Message: fmt.Sprintf("%s is a gateway identity (usage: identity); accept takes usage: client authorities", caName),
+			Message: fmt.Sprintf("%s is a gateway identity (usage: identity); accept takes usage: downstream authorities", caName),
 		}}
 	default:
 		return []ValidationError{{
 			Field:   caPath,
-			Message: fmt.Sprintf("%s has an unrecognized usage; accept takes usage: client authorities", caName),
+			Message: fmt.Sprintf("%s has an unrecognized usage; accept takes usage: downstream authorities", caName),
 		}}
 	}
 
@@ -578,7 +578,7 @@ func unknownParamError(basePath, key string) ValidationError {
 	}
 }
 
-// clientAuthorityPool is the usage: client part of the certificate store: the
+// clientAuthorityPool is the usage: downstream part of the certificate store: the
 // non-relay authorities an omitted accept inherits, every entry by name, and
 // the relay entries.
 type clientAuthorityPool struct {
@@ -587,12 +587,12 @@ type clientAuthorityPool struct {
 	relays []*models.StoredCertificate
 }
 
-// loadClientAuthorityPool reads every usage: client row once. A store error
+// loadClientAuthorityPool reads every usage: downstream row once. A store error
 // yields an empty pool: the deploy already validated, so the response then
 // simply carries no pool-derived echo or warnings.
 func (v *MtlsAuthValidator) loadClientAuthorityPool() clientAuthorityPool {
 	pool := clientAuthorityPool{byName: map[string]*models.StoredCertificate{}}
-	certs, err := v.store.ListCertificatesByUsage(models.CertificateUsageClient)
+	certs, err := v.store.ListCertificatesByUsage(models.CertificateUsageDownstream)
 	if err != nil {
 		return pool
 	}

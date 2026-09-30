@@ -26,7 +26,7 @@ Feature: Seeing what client and backend certificates did
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
     And the client authority pool is empty
-    And the certificate fixture "ca-a" is pooled as "obs-partner-a" with usage "client"
+    And the certificate fixture "ca-a" is pooled as "obs-partner-a" with usage "downstream"
     And I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -123,17 +123,17 @@ Feature: Seeing what client and backend certificates did
     And the "gateway-runtime" container log should contain "\"upTlsFail\":\"TLS_error" within 10 seconds
 
   Scenario: Certificate gauges follow the pool and expiry is warned on every channel
-    When I upload the certificate fixture "ca-expires-soon" as "obs-expiring" with usage "client"
+    When I upload the certificate fixture "ca-expires-soon" as "obs-expiring" with usage "downstream"
     Then the response status should be 201
     And the response should include a warning with code "CERT_EXPIRES_SOON"
     And the "gateway-controller" container log should contain "CERT_EXPIRES_SOON" within 10 seconds
     When I send a GET request to the gateway controller metrics endpoint
-    Then the response should contain metric "certificates_total{usage=\"client\"} 2"
+    Then the response should contain metric "certificates_total{usage=\"downstream\"} 2"
     And the response should contain metric "cert_name=\"obs-expiring\""
     And the response should contain metric "cert_name=\"obs-partner-a\""
     When I delete the certificate named "obs-expiring"
     And I send a GET request to the gateway controller metrics endpoint
-    Then the response should contain metric "certificates_total{usage=\"client\"} 1"
+    Then the response should contain metric "certificates_total{usage=\"downstream\"} 1"
     And the response should not contain metric "cert_name=\"obs-expiring\""
     And the response should contain metric "cert_name=\"obs-partner-a\""
 

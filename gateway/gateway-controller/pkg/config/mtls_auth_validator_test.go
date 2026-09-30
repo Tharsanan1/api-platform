@@ -67,11 +67,11 @@ func (s *fakeMtlsCertStore) ListCertificatesByUsage(usage string) ([]*models.Sto
 }
 
 func clientCA(name string) *models.StoredCertificate {
-	return &models.StoredCertificate{Name: name, Usage: models.CertificateUsageClient, Role: models.CertificateRoleClient}
+	return &models.StoredCertificate{Name: name, Usage: models.CertificateUsageDownstream, Role: models.CertificateRoleClient}
 }
 
 func relayCA(name string) *models.StoredCertificate {
-	return &models.StoredCertificate{Name: name, Usage: models.CertificateUsageClient, Role: models.CertificateRoleRelay}
+	return &models.StoredCertificate{Name: name, Usage: models.CertificateUsageDownstream, Role: models.CertificateRoleRelay}
 }
 
 func upstreamCA(name string) *models.StoredCertificate {
@@ -228,7 +228,7 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_AcceptNamesRelayAuthority(
 	partnerPEM, _, _ := generateXDSTestCA(t)
 
 	pooled := func(name, role string, pem []byte) *models.StoredCertificate {
-		return &models.StoredCertificate{Name: name, Usage: models.CertificateUsageClient, Role: role, Certificate: pem}
+		return &models.StoredCertificate{Name: name, Usage: models.CertificateUsageDownstream, Role: role, Certificate: pem}
 	}
 	acceptOf := func(ca string) *api.RestAPI {
 		return restAPIWithAPILevelPolicies(mtlsPolicy(map[string]interface{}{"accept": []interface{}{
@@ -373,7 +373,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_EmptyPool_ParamsStillValidated(t *tes
 	errs := v.ValidateRestAPI(cfg)
 
 	if !hasError(errs, "spec.policies[0]",
-		"mtls-auth requires at least one client authority; add one with POST /certificates and usage: client") {
+		"mtls-auth requires at least one client authority; add one with POST /certificates and usage: downstream") {
 		t.Fatalf("expected the empty-pool error, got %+v", errs)
 	}
 	if !hasError(errs, "spec.policies[0].params.acept", "unknown parameter acept") {
@@ -381,7 +381,7 @@ func TestMtlsAuthValidator_ValidateRestAPI_EmptyPool_ParamsStillValidated(t *tes
 	}
 }
 
-func TestMtlsAuthValidator_ValidateRestAPI_AcceptNamesNonClientUsage(t *testing.T) {
+func TestMtlsAuthValidator_ValidateRestAPI_AcceptNamesNonDownstreamUsage(t *testing.T) {
 	store := newFakeMtlsCertStore(
 		clientCA("listener-partner-a"),
 		&models.StoredCertificate{Name: "out-identity-a", Usage: models.CertificateUsageIdentity},
@@ -393,8 +393,8 @@ func TestMtlsAuthValidator_ValidateRestAPI_AcceptNamesNonClientUsage(t *testing.
 		ca      string
 		message string
 	}{
-		{ca: "out-identity-a", message: "out-identity-a is a gateway identity (usage: identity); accept takes usage: client authorities"},
-		{ca: "listener-odd", message: "listener-odd has an unrecognized usage; accept takes usage: client authorities"},
+		{ca: "out-identity-a", message: "out-identity-a is a gateway identity (usage: identity); accept takes usage: downstream authorities"},
+		{ca: "listener-odd", message: "listener-odd has an unrecognized usage; accept takes usage: downstream authorities"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ca, func(t *testing.T) {

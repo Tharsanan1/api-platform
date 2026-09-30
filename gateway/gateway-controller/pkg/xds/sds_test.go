@@ -136,7 +136,7 @@ func TestSDSSecretManager_GetSecrets_UpstreamAndClientRows_HTTPSEnabled(t *testi
 
 	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
 		{UUID: "upstream-1", Name: "upstream-ca", Certificate: upstreamCert.PEM(), Usage: models.CertificateUsageUpstream},
-		{UUID: "client-1", Name: "client-ca", Certificate: clientCert.PEM(), Usage: models.CertificateUsageClient},
+		{UUID: "client-1", Name: "client-ca", Certificate: clientCert.PEM(), Usage: models.CertificateUsageDownstream},
 	}}
 	cs := certstore.NewCertStore(logger, db, "", "")
 	_, err := cs.LoadCertificates()

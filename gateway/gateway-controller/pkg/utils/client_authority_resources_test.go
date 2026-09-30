@@ -80,10 +80,10 @@ func certificateRow(t *testing.T, name, usage, role string, pemCount int) *model
 }
 
 func TestClientAuthorityPublisher_PublishesOneResourcePerClientRow(t *testing.T) {
-	client := certificateRow(t, "partner-root", models.CertificateUsageClient, "", 2)
-	relayWithMatch := certificateRow(t, "edge-lb", models.CertificateUsageClient, models.CertificateRoleRelay, 1)
+	client := certificateRow(t, "partner-root", models.CertificateUsageDownstream, "", 2)
+	relayWithMatch := certificateRow(t, "edge-lb", models.CertificateUsageDownstream, models.CertificateRoleRelay, 1)
 	relayWithMatch.Match = &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}}
-	relayWithoutMatch := certificateRow(t, "edge-proxy", models.CertificateUsageClient, models.CertificateRoleRelay, 1)
+	relayWithoutMatch := certificateRow(t, "edge-proxy", models.CertificateUsageDownstream, models.CertificateRoleRelay, 1)
 	rows := &fakeCertificateRows{rows: []*models.StoredCertificate{
 		client, relayWithMatch, relayWithoutMatch,
 		certificateRow(t, "backend-ca", models.CertificateUsageUpstream, "", 1),
@@ -94,7 +94,7 @@ func TestClientAuthorityPublisher_PublishesOneResourcePerClientRow(t *testing.T)
 	require.NoError(t, publisher.Publish("corr"))
 
 	published := manager.GetResourcesByType(LazyResourceTypeClientCertificateAuthority)
-	require.Len(t, published, 3, "only usage: client rows are published")
+	require.Len(t, published, 3, "only usage: downstream rows are published")
 
 	root := published["partner-root"]
 	require.NotNil(t, root)
@@ -122,8 +122,8 @@ func TestClientAuthorityPublisher_PublishesOneResourcePerClientRow(t *testing.T)
 }
 
 func TestClientAuthorityPublisher_RemovesStaleAndSkipsUnchanged(t *testing.T) {
-	kept := certificateRow(t, "kept", models.CertificateUsageClient, "", 1)
-	removed := certificateRow(t, "removed", models.CertificateUsageClient, "", 1)
+	kept := certificateRow(t, "kept", models.CertificateUsageDownstream, "", 1)
+	removed := certificateRow(t, "removed", models.CertificateUsageDownstream, "", 1)
 	rows := &fakeCertificateRows{rows: []*models.StoredCertificate{kept, removed}}
 	publisher, manager, store := newTestClientAuthorityPublisher(t, rows)
 	require.NoError(t, publisher.Publish(""))
@@ -148,7 +148,7 @@ func TestClientAuthorityPublisher_RemovesStaleAndSkipsUnchanged(t *testing.T) {
 }
 
 func TestClientAuthorityPublisher_ListFailureLeavesPublishedSetAlone(t *testing.T) {
-	rows := &fakeCertificateRows{rows: []*models.StoredCertificate{certificateRow(t, "kept", models.CertificateUsageClient, "", 1)}}
+	rows := &fakeCertificateRows{rows: []*models.StoredCertificate{certificateRow(t, "kept", models.CertificateUsageDownstream, "", 1)}}
 	publisher, manager, _ := newTestClientAuthorityPublisher(t, rows)
 	require.NoError(t, publisher.Publish(""))
 

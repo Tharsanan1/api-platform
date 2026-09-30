@@ -32,7 +32,7 @@ import (
 )
 
 // ClientAuthorityPublisher publishes the client certificate authority pool to
-// the policy engine as one lazy resource per usage: client row, keyed by the
+// the policy engine as one lazy resource per usage: downstream row, keyed by the
 // row's name. Each resource holds "certificates" (one PEM per certificate),
 // "role", and "match" only for a relay row stored with narrowing. A pool
 // change reaches every API through this one push.
@@ -51,14 +51,14 @@ func NewClientAuthorityPublisher(certificates config.MtlsAuthCertificateStore, r
 	return &ClientAuthorityPublisher{certificates: certificates, resources: resources}
 }
 
-// Publish makes the published resources match the usage: client rows in the
+// Publish makes the published resources match the usage: downstream rows in the
 // database. It stores before it removes, so no intermediate snapshot lacks a
 // row that still exists.
 func (p *ClientAuthorityPublisher) Publish(correlationID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	rows, err := p.certificates.ListCertificatesByUsage(models.CertificateUsageClient)
+	rows, err := p.certificates.ListCertificatesByUsage(models.CertificateUsageDownstream)
 	if err != nil {
 		return fmt.Errorf("listing client certificate authorities: %w", err)
 	}
@@ -88,7 +88,7 @@ func (p *ClientAuthorityPublisher) Publish(correlationID string) error {
 }
 
 // clientAuthorityResource builds the published resource for one usage:
-// client row.
+// downstream row.
 func clientAuthorityResource(row *models.StoredCertificate) *storage.LazyResource {
 	role := row.EffectiveRole()
 	body := map[string]interface{}{

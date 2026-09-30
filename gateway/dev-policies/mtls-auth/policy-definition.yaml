@@ -17,7 +17,7 @@ parameters:
         narrowed to a subset of certificates issued by that authority. Omit
         entirely to accept a certificate issued by any client authority in
         this gateway's client-CA pool (POST /certificates with
-        usage: client).
+        usage: downstream).
       items:
         type: object
         additionalProperties: false

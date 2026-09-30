@@ -158,7 +158,7 @@ func (cs *CertStore) LoadCertificates() ([]byte, error) {
 }
 
 // loadDatabaseCertificates loads all upstream-trust certificates from the
-// database. usage: client rows are never included: the two trust purposes
+// database. usage: downstream rows are never included: the two trust purposes
 // must never share a bundle.
 func (cs *CertStore) loadDatabaseCertificates() ([]byte, int, error) {
 	if cs.db == nil {
@@ -339,14 +339,14 @@ func (cs *CertStore) GetCombinedCertificates() []byte {
 }
 
 // GetClientCABundle returns the concatenated PEM bundle of every usage:
-// client certificate, in store order. It returns (nil, nil) for an empty
+// downstream certificate, in store order. It returns (nil, nil) for an empty
 // pool or a store with no database; deploy-time validation keeps mtls-auth
 // off an empty pool.
 func (cs *CertStore) GetClientCABundle() ([]byte, error) {
 	if cs.db == nil {
 		return nil, nil
 	}
-	certs, err := cs.db.ListCertificatesByUsage(models.CertificateUsageClient)
+	certs, err := cs.db.ListCertificatesByUsage(models.CertificateUsageDownstream)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list client-CA pool: %w", err)
 	}

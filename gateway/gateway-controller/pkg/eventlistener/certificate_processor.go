@@ -29,7 +29,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/xds"
 )
 
-// ClientAuthorityPublisher republishes the usage: client certificate pool to
+// ClientAuthorityPublisher republishes the usage: downstream certificate pool to
 // the policy engine from the database.
 type ClientAuthorityPublisher interface {
 	Publish(correlationID string) error

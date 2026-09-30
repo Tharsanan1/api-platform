@@ -40,7 +40,7 @@ const (
 	LazyResourceTypeLLMProviderTemplate     = "LlmProviderTemplate"
 	LazyResourceTypeProviderTemplateMapping = "ProviderTemplateMapping"
 
-	// LazyResourceTypeClientCertificateAuthority is one usage: client
+	// LazyResourceTypeClientCertificateAuthority is one usage: downstream
 	// certificate row, published for the mtls-auth policy.
 	LazyResourceTypeClientCertificateAuthority = "ClientCertificateAuthority"
 )

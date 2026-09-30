@@ -39,7 +39,7 @@ const (
 )
 
 // clientAuthorityLazyResourceType is the lazy resource type the controller
-// publishes each usage: client row under.
+// publishes each usage: downstream row under.
 const clientAuthorityLazyResourceType = "ClientCertificateAuthority"
 
 // downstreamClientCASecret is the SDS secret the HTTPS listener validates
@@ -56,7 +56,7 @@ type clientAuthority struct {
 
 // waitForClientAuthorityPool polls until the policy engine's published pool
 // and Envoy's downstream client-CA secret both match the controller's usage:
-// client rows, or fails after clientAuthorityPoolTimeout.
+// downstream rows, or fails after clientAuthorityPoolTimeout.
 func waitForClientAuthorityPool(state *TestState) error {
 	deadline := time.Now().Add(clientAuthorityPoolTimeout)
 	for {
@@ -133,7 +133,7 @@ func clientAuthorityPoolMismatch(state *TestState) (string, error) {
 	return "", nil
 }
 
-// controllerClientAuthorities lists the controller's usage: client rows as
+// controllerClientAuthorities lists the controller's usage: downstream rows as
 // admin, keyed by name.
 func controllerClientAuthorities(state *TestState) (map[string]clientAuthority, error) {
 	var listing struct {
@@ -143,7 +143,7 @@ func controllerClientAuthorities(state *TestState) (map[string]clientAuthority, 
 			Count int    `json:"count"`
 		} `json:"certificates"`
 	}
-	if err := getJSONAsAdmin(state, state.Config.GatewayControllerURL+"/certificates?usage=client", &listing); err != nil {
+	if err := getJSONAsAdmin(state, state.Config.GatewayControllerURL+"/certificates?usage=downstream", &listing); err != nil {
 		return nil, err
 	}
 	out := make(map[string]clientAuthority, len(listing.Certificates))

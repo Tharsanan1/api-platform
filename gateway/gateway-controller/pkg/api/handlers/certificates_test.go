@@ -977,7 +977,7 @@ func TestUploadCertificate_BodyOverSizeLimit_Rejected(t *testing.T) {
 	oversized := strings.Repeat("A", (4<<10)+1)
 	w := uploadCertificateBody(t, server, UploadCertificateRequest{
 		Name:        "pool-too-big",
-		Usage:       models.CertificateUsageClient,
+		Usage:       models.CertificateUsageDownstream,
 		Certificate: oversized,
 	})
 
@@ -994,7 +994,7 @@ func TestUploadCertificate_BodyOverSizeLimit_Rejected(t *testing.T) {
 
 func clientAuthorityCert(name string) *models.StoredCertificate {
 	return &models.StoredCertificate{
-		UUID: name, Name: name, Usage: models.CertificateUsageClient, Role: models.CertificateRoleClient,
+		UUID: name, Name: name, Usage: models.CertificateUsageDownstream, Role: models.CertificateRoleClient,
 		NotAfter: time.Now().Add(365 * 24 * time.Hour),
 	}
 }
@@ -1167,7 +1167,7 @@ func TestUploadCertificate_MatchWithRoleClient_Rejected(t *testing.T) {
 	root := pki.NewRootCA(t, "Match Role Client CA")
 	w := uploadCertificateBody(t, server, UploadCertificateRequest{
 		Name:        "pool-match-role-client",
-		Usage:       models.CertificateUsageClient,
+		Usage:       models.CertificateUsageDownstream,
 		Role:        models.CertificateRoleClient,
 		Certificate: string(root.PEM()),
 		Match:       &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}},
@@ -1176,6 +1176,29 @@ func TestUploadCertificate_MatchWithRoleClient_Rejected(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	entry := firstFieldError(t, w.Body.Bytes(), "match")
 	assert.Equal(t, "match applies only to role: relay entries", entry["message"])
+}
+
+// client names a role, not a usage, so it is refused exactly like any other
+// unknown usage value and nothing is stored.
+func TestUploadCertificate_UnknownUsage_Rejected(t *testing.T) {
+	for _, usage := range []string{"client", "backend"} {
+		t.Run(usage, func(t *testing.T) {
+			mockDB := NewMockStorage()
+			server := createTestAPIServerWithDB(mockDB)
+
+			root := pki.NewRootCA(t, "Unknown Usage CA")
+			w := uploadCertificateBody(t, server, UploadCertificateRequest{
+				Name:        "pool-unknown-usage",
+				Usage:       usage,
+				Certificate: string(root.PEM()),
+			})
+
+			require.Equal(t, http.StatusBadRequest, w.Code)
+			entry := firstFieldError(t, w.Body.Bytes(), "usage")
+			assert.Equal(t, "usage must be upstream, downstream or identity", entry["message"])
+			assert.Empty(t, mockDB.certs, "a refused upload must not be stored")
+		})
+	}
 }
 
 // Raw JSON, because omitempty would drop an empty dnsSANs slice and test the
@@ -1188,7 +1211,7 @@ func TestUploadCertificate_EmptyDNSSANsList_Rejected(t *testing.T) {
 	certJSON, err := json.Marshal(string(root.PEM()))
 	require.NoError(t, err)
 
-	body := fmt.Sprintf(`{"name":"pool-empty-dns-sans","usage":"client","role":"relay","certificate":%s,"match":{"dnsSANs":[]}}`, certJSON)
+	body := fmt.Sprintf(`{"name":"pool-empty-dns-sans","usage":"downstream","role":"relay","certificate":%s,"match":{"dnsSANs":[]}}`, certJSON)
 	w := uploadCertificateRawJSON(t, server, body)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
@@ -1204,7 +1227,7 @@ func TestUploadCertificate_DNSSANsElementEmpty_RejectedAtIndexZero(t *testing.T)
 	certJSON, err := json.Marshal(string(root.PEM()))
 	require.NoError(t, err)
 
-	body := fmt.Sprintf(`{"name":"pool-dns-sans-empty-element","usage":"client","role":"relay","certificate":%s,"match":{"dnsSANs":[""]}}`, certJSON)
+	body := fmt.Sprintf(`{"name":"pool-dns-sans-empty-element","usage":"downstream","role":"relay","certificate":%s,"match":{"dnsSANs":[""]}}`, certJSON)
 	w := uploadCertificateRawJSON(t, server, body)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
@@ -1219,7 +1242,7 @@ func TestUploadCertificate_PrivateKeyInCertificateField_RejectedForEveryUsage(t 
 		privateKey bool
 		message    string
 	}{
-		{usage: models.CertificateUsageClient, message: "the upload contains a private key; a client-CA entry accepts certificates only"},
+		{usage: models.CertificateUsageDownstream, message: "the upload contains a private key; a client-CA entry accepts certificates only"},
 		{usage: models.CertificateUsageUpstream, message: certificateFieldCarriesKey},
 		{usage: models.CertificateUsageIdentity, privateKey: true, message: certificateFieldCarriesKey},
 	} {
@@ -1256,7 +1279,7 @@ func TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList(t *testing.T) 
 	root := pki.NewRootCA(t, "Relay With Match CA")
 	w := uploadCertificateBody(t, server, UploadCertificateRequest{
 		Name:        "pool-relay-with-match",
-		Usage:       models.CertificateUsageClient,
+		Usage:       models.CertificateUsageDownstream,
 		Role:        models.CertificateRoleRelay,
 		Certificate: string(root.PEM()),
 		Match:       &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}},
@@ -1273,7 +1296,7 @@ func TestUploadCertificate_RelayWithMatch_EchoedInResponseAndList(t *testing.T) 
 	assert.Equal(t, "lb.corp.test", dnsSANs[0])
 
 	listHandler := newCertListHandler(server)
-	listReq := httptest.NewRequest(http.MethodGet, "/certificates?usage=client", nil)
+	listReq := httptest.NewRequest(http.MethodGet, "/certificates?usage=downstream", nil)
 	listW := httptest.NewRecorder()
 	listHandler.ServeHTTP(listW, listReq)
 	require.Equal(t, http.StatusOK, listW.Code)
@@ -1721,7 +1744,7 @@ func TestReloadCertificates_PublishesClientAuthorities(t *testing.T) {
 	// upload handler becomes visible to the policy engine on reload.
 	mockDB.certs = append(mockDB.certs, &models.StoredCertificate{
 		UUID: "late-id", Name: "late", Certificate: pki.NewRootCA(t, "Late Root").PEM(),
-		Usage: models.CertificateUsageClient, NotAfter: time.Now().Add(time.Hour),
+		Usage: models.CertificateUsageDownstream, NotAfter: time.Now().Add(time.Hour),
 	})
 
 	handler := middleware.CorrelationIDMiddleware(server.logger)(http.HandlerFunc(server.ReloadCertificates))
@@ -1732,13 +1755,13 @@ func TestReloadCertificates_PublishesClientAuthorities(t *testing.T) {
 	assert.ElementsMatch(t, []string{"late"}, publishedClientAuthorities(manager))
 }
 
-func TestUploadCertificate_UsageClient_PublishFailureIsReported(t *testing.T) {
+func TestUploadCertificate_UsageDownstream_PublishFailureIsReported(t *testing.T) {
 	mockDB := NewMockStorage()
 	mockDB.certs = []*models.StoredCertificate{seedUpstreamCert(t)}
 	server := createTestAPIServerWithCertStore(t, mockDB)
 	server.clientAuthorities = utils.NewClientAuthorityPublisher(&failingCertificateList{MockStorage: mockDB}, nil)
 
-	w := postCertificate(t, server, "partner-root", models.CertificateUsageClient)
+	w := postCertificate(t, server, "partner-root", models.CertificateUsageDownstream)
 	assert.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
 }
 
@@ -1785,7 +1808,7 @@ func TestUploadCertificate_PublishesCertificateCreateEvent(t *testing.T) {
 	server := createTestAPIServerWithCertStore(t, mockDB)
 
 	body, err := json.Marshal(UploadCertificateRequest{
-		Name: "pool-partner", Usage: models.CertificateUsageClient,
+		Name: "pool-partner", Usage: models.CertificateUsageDownstream,
 		Certificate: string(pki.NewRootCA(t, "Replica Partner CA").PEM()),
 	})
 	require.NoError(t, err)

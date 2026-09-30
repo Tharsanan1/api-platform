@@ -35,8 +35,8 @@ Feature: Client certificates relayed in a header by a front proxy
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
     And the client authority pool is empty
-    And the certificate fixture "ca-a" is pooled as "relay-partner-a" with usage "client"
-    And the certificate fixture "ca-b" is pooled as "relay-partner-b" with usage "client"
+    And the certificate fixture "ca-a" is pooled as "relay-partner-a" with usage "downstream"
+    And the certificate fixture "ca-b" is pooled as "relay-partner-b" with usage "downstream"
     And I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -79,7 +79,7 @@ Feature: Client certificates relayed in a header by a front proxy
   # ==================== HEADER MODE ON: A RELAY ENTRY VOUCHES ====================
 
   Scenario Outline: With a relay entry, only a connection authenticated as the relay can make the header believed
-    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
     And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" <presenting>
@@ -100,7 +100,7 @@ Feature: Client certificates relayed in a header by a front proxy
       | with client certificate "edge-lb"                                                                                               | 401    |
 
   Scenario: A header that is not a certificate is rejected when the relay vouched for it
-    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
     And the gateway has applied the client authority pool
     And I set header "X-WSO2-CLIENT-CERTIFICATE" to "this-is-not-a-certificate"
@@ -112,7 +112,7 @@ Feature: Client certificates relayed in a header by a front proxy
       """
 
   Scenario: A relay entry narrowed by SAN vouches only for the proxy carrying that SAN
-    Given I upload the certificate fixture "corp-ca" as "relay-corp" with usage "client" and role "relay" and dns SAN "lb.corp.test"
+    Given I upload the certificate fixture "corp-ca" as "relay-corp" with usage "downstream" and role "relay" and dns SAN "lb.corp.test"
     And the response status should be 201
     And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb-corp" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
@@ -121,7 +121,7 @@ Feature: Client certificates relayed in a header by a front proxy
     Then the response status code should be 401
 
   Scenario: A believed header reaches the backend as X-Forwarded-Client-Cert where the policy evaluated it, and never on a public route
-    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
     And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"
@@ -156,7 +156,7 @@ Feature: Client certificates relayed in a header by a front proxy
     And the response should not contain echoed header "x-wso2-client-certificate"
 
   Scenario: A header from a connection that is not the relay never reaches a backend
-    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
     And the gateway has applied the client authority pool
     When I deploy this API configuration:
@@ -191,7 +191,7 @@ Feature: Client certificates relayed in a header by a front proxy
     And the backend's X-Forwarded-Client-Cert should not name certificate "client-wrong-ca"
 
   Scenario: An API that opts out of the certificate header receives neither header, even one it believed
-    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
     And the gateway has applied the client authority pool
     When I deploy this API configuration:
@@ -226,7 +226,7 @@ Feature: Client certificates relayed in a header by a front proxy
     And the response should not contain echoed header "x-forwarded-client-cert"
 
   Scenario: A relay entry cannot be accepted as a client
-    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
     When I deploy this API configuration:
       """
@@ -255,9 +255,9 @@ Feature: Client certificates relayed in a header by a front proxy
     And the response should list a validation error for field "spec.policies[0].params.accept[0].ca" with message "relay-edge-lb is a relay (front proxy) entry and cannot be accepted as a client"
 
   Scenario: One load balancer serves an API that accepts it and an API that accepts the clients it relays
-    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
-    And the certificate fixture "edge-lb-ca" is pooled as "relay-edge-lb-client" with usage "client"
+    And the certificate fixture "edge-lb-ca" is pooled as "relay-edge-lb-client" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -301,7 +301,7 @@ Feature: Client certificates relayed in a header by a front proxy
     Then the response status code should be 401
 
   Scenario: Removing the last relay entry turns header mode off again
-    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "client" and role "relay"
+    Given I upload the certificate fixture "edge-lb-ca" as "relay-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
     And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/relay/v1.0/anything" with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"

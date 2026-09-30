@@ -722,10 +722,10 @@ func TestSQLiteStorage_ListCertificatesByUsage(t *testing.T) {
 
 	clientCert := createTestStoredCertificate()
 	clientCert.Name = "usage-filter-client-cert"
-	clientCert.Usage = models.CertificateUsageClient
+	clientCert.Usage = models.CertificateUsageDownstream
 	assert.NilError(t, store.SaveCertificate(clientCert))
 
-	clientResults, err := store.ListCertificatesByUsage(models.CertificateUsageClient)
+	clientResults, err := store.ListCertificatesByUsage(models.CertificateUsageDownstream)
 	assert.NilError(t, err)
 	assert.Equal(t, len(clientResults), 1)
 	assert.Equal(t, clientResults[0].UUID, clientCert.UUID)
@@ -799,12 +799,12 @@ func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
 	}
 
 	newCert := createTestStoredCertificate()
-	newCert.Usage = models.CertificateUsageClient
+	newCert.Usage = models.CertificateUsageDownstream
 	assert.NilError(t, upgraded.SaveCertificate(newCert))
 
 	saved, err := upgraded.GetCertificate(newCert.UUID)
 	assert.NilError(t, err)
-	assert.Equal(t, saved.Usage, models.CertificateUsageClient)
+	assert.Equal(t, saved.Usage, models.CertificateUsageDownstream)
 
 	// Probe the match_json column directly, then round-trip a relay row.
 	sqlDB := upgraded.(*sqlStore).db
@@ -830,7 +830,7 @@ func TestSQLite_UpgradeAddsCertificateUsageColumns(t *testing.T) {
 	relayCert := createTestStoredCertificate()
 	relayCert.UUID = "post-upgrade-relay-cert"
 	relayCert.Name = "post-upgrade-relay-cert"
-	relayCert.Usage = models.CertificateUsageClient
+	relayCert.Usage = models.CertificateUsageDownstream
 	relayCert.Role = models.CertificateRoleRelay
 	relayCert.Match = &models.CertificateMatch{DNSSANs: []string{"lb.corp.test"}}
 	assert.NilError(t, upgraded.SaveCertificate(relayCert))

@@ -52,8 +52,8 @@ import (
 type UploadCertificateRequest struct {
 	Certificate string                   `json:"certificate" binding:"required"` // PEM-encoded certificate
 	Name        string                   `json:"name" binding:"required"`        // Unique certificate name
-	Usage       string                   `json:"usage"`                          // "upstream" (default), "client" or "identity"
-	Role        string                   `json:"role"`                           // "client" (default) or "relay"; usage: client only
+	Usage       string                   `json:"usage"`                          // "upstream" (default), "downstream" or "identity"
+	Role        string                   `json:"role"`                           // "client" (default) or "relay"; usage: downstream only
 	Match       *models.CertificateMatch `json:"match,omitempty"`                // Only valid for role: relay
 	PrivateKey  string                   `json:"privateKey,omitempty"`           // Required (and only valid) for usage: identity
 }
@@ -143,7 +143,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	certData := []byte(req.Certificate)
 
 	switch effectiveUsage {
-	case models.CertificateUsageClient:
+	case models.CertificateUsageDownstream:
 		subject = bundle.Identity.Subject.String()
 		issuer = bundle.Identity.Issuer.String()
 		notBefore = bundle.Identity.NotBefore
@@ -206,7 +206,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 
 	// A client authority or identity already inside its expiry horizon gets
 	// the same CERT_EXPIRES_SOON warning the listing endpoint reports.
-	if effectiveUsage == models.CertificateUsageClient || effectiveUsage == models.CertificateUsageIdentity {
+	if effectiveUsage == models.CertificateUsageDownstream || effectiveUsage == models.CertificateUsageIdentity {
 		if warning := clientca.ExpiryWarning(notAfter, time.Now()); warning != nil {
 			warnings = append(warnings, *warning)
 		}
@@ -252,7 +252,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		if storage.IsConflictError(err) {
 			message := fmt.Sprintf("a certificate named %s already exists", req.Name)
 			switch effectiveUsage {
-			case models.CertificateUsageClient:
+			case models.CertificateUsageDownstream:
 				message = fmt.Sprintf("a client-CA authority named %s already exists", req.Name)
 			case models.CertificateUsageIdentity:
 				message = fmt.Sprintf("a gateway identity named %s already exists", req.Name)
@@ -320,7 +320,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		log.Warn("Failed to refresh certificate metrics after upload", slog.Any("error", err))
 	}
 
-	if effectiveUsage == models.CertificateUsageClient {
+	if effectiveUsage == models.CertificateUsageDownstream {
 		if err := s.publishClientAuthorities(correlationID); err != nil {
 			log.Error("Failed to publish client certificate authorities", slog.Any("error", err))
 			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
@@ -344,7 +344,7 @@ func (s *APIServer) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 		Message:  "Certificate uploaded and SDS updated successfully",
 		Status:   "success",
 	}
-	if effectiveUsage == models.CertificateUsageClient {
+	if effectiveUsage == models.CertificateUsageDownstream {
 		resp.Role = effectiveRole
 		if effectiveRole == models.CertificateRoleRelay {
 			resp.Match = req.Match
@@ -368,10 +368,10 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 	if params.Usage != nil {
 		usageFilter = string(*params.Usage)
 	}
-	if usageFilter != "" && usageFilter != models.CertificateUsageUpstream && usageFilter != models.CertificateUsageClient && usageFilter != models.CertificateUsageIdentity {
+	if usageFilter != "" && usageFilter != models.CertificateUsageUpstream && usageFilter != models.CertificateUsageDownstream && usageFilter != models.CertificateUsageIdentity {
 		fieldErrors := []api.ValidationError{{
 			Field:   stringPtr("usage"),
-			Message: stringPtr("usage must be upstream, client or identity"),
+			Message: stringPtr("usage must be upstream, downstream or identity"),
 		}}
 		httputil.WriteJSON(w, http.StatusBadRequest, api.ErrorResponse{
 			Status:  "error",
@@ -418,7 +418,7 @@ func (s *APIServer) ListCertificates(w http.ResponseWriter, r *http.Request, par
 			Status:   "success",
 		}
 
-		if usage == models.CertificateUsageClient {
+		if usage == models.CertificateUsageDownstream {
 			role := cert.EffectiveRole()
 			item.Role = role
 			if role == models.CertificateRoleRelay {
@@ -531,7 +531,7 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 	if preDeleteCert != nil {
 		role := preDeleteCert.EffectiveRole()
 		usage := preDeleteCert.EffectiveUsage()
-		if usage == models.CertificateUsageClient && role != models.CertificateRoleRelay {
+		if usage == models.CertificateUsageDownstream && role != models.CertificateRoleRelay {
 			if errResp, statusCode, blocked := s.checkClientAuthorityDeletable(preDeleteCert); blocked {
 				httputil.WriteJSON(w, statusCode, errResp)
 				return
@@ -594,7 +594,7 @@ func (s *APIServer) DeleteCertificate(w http.ResponseWriter, r *http.Request, id
 		log.Warn("Failed to refresh certificate metrics after delete", slog.Any("error", err))
 	}
 
-	if preDeleteCert != nil && preDeleteCert.Usage == models.CertificateUsageClient {
+	if preDeleteCert != nil && preDeleteCert.Usage == models.CertificateUsageDownstream {
 		if err := s.publishClientAuthorities(correlationID); err != nil {
 			log.Error("Failed to publish client certificate authorities", slog.Any("error", err))
 			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{
@@ -1030,7 +1030,7 @@ func pluralDeployedAPIs(n int) string {
 }
 
 // checkClientAuthorityDeletable reports whether cert, a non-relay usage:
-// client authority, can be removed. It refuses when a deployed API names the
+// downstream authority, can be removed. It refuses when a deployed API names the
 // authority, or when it is the last non-relay authority and any deployed API
 // attaches mtls-auth. A failed read refuses with a 500. When refused it
 // returns the error body, the status and true.
@@ -1069,7 +1069,7 @@ func (s *APIServer) checkClientAuthorityDeletable(cert *models.StoredCertificate
 	}
 
 	remainingNonRelay := 0
-	if clientCerts, err := s.db.ListCertificatesByUsage(models.CertificateUsageClient); err == nil {
+	if clientCerts, err := s.db.ListCertificatesByUsage(models.CertificateUsageDownstream); err == nil {
 		for _, c := range clientCerts {
 			if c.UUID == cert.UUID {
 				continue // the one about to be deleted
@@ -1362,7 +1362,7 @@ func (v *certUploadValidation) validateMatchList(fieldPath string, list []string
 
 // validateCertificateUpload validates an upload's fields and its certificate
 // content for the given usage, collecting every problem for a single 400. It
-// returns the result, the defaulted usage and role, and for usage: client the
+// returns the result, the defaulted usage and role, and for usage: downstream the
 // inspected bundle.
 func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*certUploadValidation, string, string, *clientca.Bundle) {
 	v := &certUploadValidation{}
@@ -1384,11 +1384,11 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 	effectiveUsage := models.CertificateUsageUpstream
 	if usageProvided {
 		switch req.Usage {
-		case models.CertificateUsageUpstream, models.CertificateUsageClient, models.CertificateUsageIdentity:
+		case models.CertificateUsageUpstream, models.CertificateUsageDownstream, models.CertificateUsageIdentity:
 			effectiveUsage = req.Usage
 		default:
 			usageValid = false
-			v.addFieldError("usage", "usage must be upstream, client or identity")
+			v.addFieldError("usage", "usage must be upstream, downstream or identity")
 		}
 	}
 
@@ -1410,14 +1410,14 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 
 	roleProvided := req.Role != ""
 	effectiveRole := ""
-	if effectiveUsage == models.CertificateUsageClient {
+	if effectiveUsage == models.CertificateUsageDownstream {
 		effectiveRole = models.CertificateRoleClient
 	}
 	if roleProvided {
 		if req.Role != models.CertificateRoleClient && req.Role != models.CertificateRoleRelay {
 			v.addFieldError("role", "role must be client or relay")
-		} else if usageValid && effectiveUsage != models.CertificateUsageClient {
-			v.addFieldError("role", "role applies only to usage: client certificates")
+		} else if usageValid && effectiveUsage != models.CertificateUsageDownstream {
+			v.addFieldError("role", "role applies only to usage: downstream certificates")
 		} else if usageValid {
 			effectiveRole = req.Role
 		}
@@ -1434,7 +1434,7 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 	var bundle *clientca.Bundle
 	if usageValid {
 		switch {
-		case effectiveUsage == models.CertificateUsageClient && certProvided:
+		case effectiveUsage == models.CertificateUsageDownstream && certProvided:
 			b, err := clientca.Inspect([]byte(req.Certificate), time.Now())
 			if err != nil {
 				var fe *clientca.FieldError
@@ -1447,7 +1447,7 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 				bundle = b
 			}
 		case certProvided && pemCarriesPrivateKey([]byte(req.Certificate)):
-			// clientca.Inspect refuses a key for usage: client with its own message.
+			// clientca.Inspect refuses a key for usage: downstream with its own message.
 			v.addFieldError("certificate", msgCertificateFieldCarriesKey)
 		case effectiveUsage == models.CertificateUsageIdentity && certProvided && keyProvided:
 			ib, err := gatewayidentity.Inspect([]byte(req.Certificate), []byte(req.PrivateKey), time.Now())
@@ -1471,7 +1471,7 @@ func (s *APIServer) validateCertificateUpload(req *UploadCertificateRequest) (*c
 	return v, effectiveUsage, effectiveRole, bundle
 }
 
-// publishClientAuthorities republishes the usage: client pool to the policy
+// publishClientAuthorities republishes the usage: downstream pool to the policy
 // engine after a committed change.
 func (s *APIServer) publishClientAuthorities(correlationID string) error {
 	return s.clientAuthorities.Publish(correlationID)

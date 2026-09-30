@@ -20,7 +20,7 @@ curl -X GET http://localhost:9090/api/management/v1/certificates \
 
 Retrieve custom TLS certificates currently loaded in the certificate store.
 With usage: upstream (or no usage filter), these are used for verifying
-HTTPS upstream connections. With usage: client, these are the pooled
+HTTPS upstream connections. With usage: downstream, these are the pooled
 client certificate authorities used to authenticate mutual-TLS callers.
 
 ### Authentication
@@ -43,7 +43,7 @@ Required roles: `admin`, `developer`
 |Parameter|Value|
 |---|---|
 |usage|upstream|
-|usage|client|
+|usage|downstream|
 |usage|identity|
 
 > Example responses
@@ -60,7 +60,7 @@ Required roles: `admin`, `developer`
       "issuer": "CN=Partner A Root,O=Partner A,C=US",
       "notAfter": "2026-11-26 06:07:26",
       "count": 1,
-      "usage": "client",
+      "usage": "downstream",
       "role": "client",
       "isLeaf": false,
       "referencedByApis": 0,
@@ -103,7 +103,7 @@ curl -X POST http://localhost:9090/api/management/v1/certificates \
 Upload a new TLS certificate (PEM format) to the Gateway. The certificate is
 loaded dynamically without restarting the Gateway. With usage: upstream (the
 default), it is used for verifying HTTPS upstream connections. With usage:
-client, it becomes a pooled client certificate authority used to authenticate
+downstream, it becomes a pooled client certificate authority used to authenticate
 mutual-TLS callers; the two purposes never share a trust bundle.
 
 > Payload
@@ -111,7 +111,7 @@ mutual-TLS callers; the two purposes never share a trust bundle.
 ```json
 {
   "name": "partner-a-root",
-  "usage": "client",
+  "usage": "downstream",
   "certificate": "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAKL0UG+mRKtjMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\n...\n-----END CERTIFICATE-----\n"
 }
 ```
@@ -143,7 +143,7 @@ Required roles: `admin`
   "issuer": "CN=Partner A Root,O=Partner A,C=US",
   "notAfter": "2026-11-26 06:07:26",
   "count": 1,
-  "usage": "client",
+  "usage": "downstream",
   "role": "client",
   "isLeaf": false,
   "referencedByApis": 0,
@@ -187,7 +187,7 @@ Replace a usage: identity certificate's chain and private key in place, keeping 
 ```json
 {
   "name": "partner-a-root",
-  "usage": "client",
+  "usage": "downstream",
   "certificate": "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAKL0UG+mRKtjMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\n...\n-----END CERTIFICATE-----\n"
 }
 ```
@@ -220,7 +220,7 @@ Required roles: `admin`
   "issuer": "CN=Partner A Root,O=Partner A,C=US",
   "notAfter": "2026-11-26 06:07:26",
   "count": 1,
-  "usage": "client",
+  "usage": "downstream",
   "role": "client",
   "isLeaf": false,
   "referencedByApis": 0,

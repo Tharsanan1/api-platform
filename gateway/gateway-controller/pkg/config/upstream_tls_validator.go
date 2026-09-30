@@ -221,10 +221,10 @@ func (v *UpstreamTLSValidator) validateUpstreamDefinitionsTLS(defs *[]api.Upstre
 			switch usage {
 			case models.CertificateUsageUpstream:
 				// OK — trustedCAs takes usage: upstream certificates.
-			case models.CertificateUsageClient:
+			case models.CertificateUsageDownstream:
 				errs = append(errs, ValidationError{
 					Field:   caPath,
-					Message: fmt.Sprintf("%s is a client authority (usage: client); trustedCAs takes usage: upstream certificates", name),
+					Message: fmt.Sprintf("%s is a client authority (usage: downstream); trustedCAs takes usage: upstream certificates", name),
 				})
 			case models.CertificateUsageIdentity:
 				errs = append(errs, ValidationError{

@@ -85,7 +85,7 @@ func TestStoredCertificate_EffectiveUsageAndRole(t *testing.T) {
 	assert.Equal(t, CertificateUsageUpstream, empty.EffectiveUsage())
 	assert.Equal(t, CertificateRoleClient, empty.EffectiveRole())
 
-	relay := &StoredCertificate{Usage: CertificateUsageClient, Role: CertificateRoleRelay}
-	assert.Equal(t, CertificateUsageClient, relay.EffectiveUsage())
+	relay := &StoredCertificate{Usage: CertificateUsageDownstream, Role: CertificateRoleRelay}
+	assert.Equal(t, CertificateUsageDownstream, relay.EffectiveUsage())
 	assert.Equal(t, CertificateRoleRelay, relay.EffectiveRole())
 }

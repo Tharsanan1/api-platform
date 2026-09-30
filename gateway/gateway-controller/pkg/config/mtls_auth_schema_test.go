@@ -175,7 +175,7 @@ func TestPolicyValidator_MtlsAuth_EachProblemReportedOnce(t *testing.T) {
 		},
 		"upstream ca": {
 			params: entry(map[string]interface{}{"ca": "listener-backend-trust"}),
-			field:  "spec.policies[0].params.accept[0].ca", message: "listener-backend-trust is a backend trust certificate (usage: upstream); accept takes usage: client authorities",
+			field:  "spec.policies[0].params.accept[0].ca", message: "listener-backend-trust is a backend trust certificate (usage: upstream); accept takes usage: downstream authorities",
 		},
 		"empty uriSANs": {
 			params: entry(map[string]interface{}{"ca": "listener-partner-a", "match": map[string]interface{}{"uriSANs": []interface{}{}}}),

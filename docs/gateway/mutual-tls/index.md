@@ -24,7 +24,7 @@ Every pool entry has a name and a `usage`:
 
 | Usage | What it holds | Where it's named |
 |---|---|---|
-| `client` | A certificate authority that issues client certificates, with a `role` of `client` or `relay` | `accept[].ca` in the `mtls-auth` policy |
+| `downstream` | A certificate authority that issues client certificates, with a `role` of `client` or `relay` | `accept[].ca` in the `mtls-auth` policy |
 | `identity` | A certificate chain and private key the gateway presents to a backend | `tls.identity` in an upstream definition |
 | `upstream` | A certificate the gateway trusts when it verifies a backend | `tls.trustedCAs` in an upstream definition |
 
@@ -48,8 +48,8 @@ Names are one namespace across all three usages, so an authority and an identity
 │         ▼                                   ▼                       │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │ Certificate pool                                              │  │
-│  │   partner-a        usage: client, role: client                │  │
-│  │   edge-lb          usage: client, role: relay                 │  │
+│  │   partner-a        usage: downstream, role: client            │  │
+│  │   edge-lb          usage: downstream, role: relay             │  │
 │  │   gateway-billing  usage: identity                            │  │
 │  │   billing-ca       usage: upstream                            │  │
 │  └───────────────────────────────────────────────────────────────┘  │

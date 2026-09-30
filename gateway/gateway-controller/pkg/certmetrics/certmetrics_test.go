@@ -93,8 +93,8 @@ func TestRefresh_CountsPerUsageAndSetsExpiryGauges(t *testing.T) {
 	now := time.Now()
 	store := &fakeStore{certs: []*models.StoredCertificate{
 		{UUID: "u-1", Name: "upstream-a", Usage: models.CertificateUsageUpstream, NotAfter: now.Add(400 * 24 * time.Hour)},
-		{UUID: "c-1", Name: "client-a", Usage: models.CertificateUsageClient, NotAfter: now.Add(10 * 24 * time.Hour)},
-		{UUID: "c-2", Name: "client-b", Usage: models.CertificateUsageClient, NotAfter: now.Add(20 * 24 * time.Hour)},
+		{UUID: "c-1", Name: "client-a", Usage: models.CertificateUsageDownstream, NotAfter: now.Add(10 * 24 * time.Hour)},
+		{UUID: "c-2", Name: "client-b", Usage: models.CertificateUsageDownstream, NotAfter: now.Add(20 * 24 * time.Hour)},
 		{UUID: "i-1", Name: "identity-a", Usage: models.CertificateUsageIdentity, NotAfter: now.Add(30 * 24 * time.Hour)},
 	}}
 
@@ -102,8 +102,8 @@ func TestRefresh_CountsPerUsageAndSetsExpiryGauges(t *testing.T) {
 		t.Fatalf("Refresh returned error: %v", err)
 	}
 
-	if v, ok := gaugeValue(t, "gateway_controller_certificates_total", models.CertificateUsageClient); !ok || v != 2 {
-		t.Fatalf("expected certificates_total{usage=client}=2, got %v (found=%v)", v, ok)
+	if v, ok := gaugeValue(t, "gateway_controller_certificates_total", models.CertificateUsageDownstream); !ok || v != 2 {
+		t.Fatalf("expected certificates_total{usage=downstream}=2, got %v (found=%v)", v, ok)
 	}
 	if v, ok := gaugeValue(t, "gateway_controller_certificates_total", models.CertificateUsageUpstream); !ok || v != 1 {
 		t.Fatalf("expected certificates_total{usage=upstream}=1, got %v (found=%v)", v, ok)
@@ -127,8 +127,8 @@ func TestSweep_LogsOneWarnPerExpiringCertificate(t *testing.T) {
 
 	now := time.Now()
 	store := &fakeStore{certs: []*models.StoredCertificate{
-		{UUID: "c-1", Name: "expiring-soon", Usage: models.CertificateUsageClient, NotAfter: now.Add(5 * 24 * time.Hour)},
-		{UUID: "c-2", Name: "not-expiring", Usage: models.CertificateUsageClient, NotAfter: now.Add(400 * 24 * time.Hour)},
+		{UUID: "c-1", Name: "expiring-soon", Usage: models.CertificateUsageDownstream, NotAfter: now.Add(5 * 24 * time.Hour)},
+		{UUID: "c-2", Name: "not-expiring", Usage: models.CertificateUsageDownstream, NotAfter: now.Add(400 * 24 * time.Hour)},
 		{UUID: "i-1", Name: "identity-expiring", Usage: models.CertificateUsageIdentity, NotAfter: now.Add(1 * time.Hour)},
 	}}
 

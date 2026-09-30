@@ -36,7 +36,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
   # ==================== ASKING FOR A CERTIFICATE IS DERIVED, NOT CONFIGURED ====================
 
   Scenario: The listener asks for a client certificate only while an API attaches mtls-auth
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     And the HTTPS listener should not request a client certificate
     When I deploy this API configuration:
       """
@@ -69,7 +69,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     And the HTTPS listener should not request a client certificate
 
   Scenario: Callers of other APIs are not affected while the listener asks for certificates
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -124,7 +124,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     And I delete the API "mtls-listener-api"
 
   Scenario: A protected operation denies a caller who presents no certificate with the uniform body
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -164,7 +164,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
   # ==================== THE LISTENER'S OWN CONFIGURATION ====================
 
   Scenario: The listener validates against the pool without requiring a certificate and never drops a connection over it
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -231,11 +231,11 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
       """
     Then the response status should be 400
     And the JSON response field "status" should be "error"
-    And the response should list a validation error for field "spec.policies[0]" with message "mtls-auth requires at least one client authority; add one with POST /certificates and usage: client"
+    And the response should list a validation error for field "spec.policies[0]" with message "mtls-auth requires at least one client authority; add one with POST /certificates and usage: downstream"
 
   Scenario Outline: An accept list that cannot select anyone is refused with the offending path
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
-    And I upload the certificate fixture "ca-b" as "listener-edge-lb" with usage "client" and role "relay"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
+    And I upload the certificate fixture "ca-b" as "listener-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
     And the certificate fixture "backend-ca" is pooled as "listener-backend-trust"
     When I deploy this API configuration:
@@ -269,7 +269,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
       | accept: [{ match: { uriSANs: ["urn:x"] } }]                         | spec.policies[0].params.accept[0].ca                 | ca is required and must name an authority in this gateway's client-CA pool                                       |
       | accept: [{ ca: listener-partner-b }]                                | spec.policies[0].params.accept[0].ca                 | no client-CA authority named listener-partner-b exists on this gateway                                           |
       | accept: [{ ca: listener-edge-lb }]                                  | spec.policies[0].params.accept[0].ca                 | listener-edge-lb is a relay (front proxy) entry and cannot be accepted as a client                               |
-      | accept: [{ ca: listener-backend-trust }]                            | spec.policies[0].params.accept[0].ca                 | listener-backend-trust is a backend trust certificate (usage: upstream); accept takes usage: client authorities  |
+      | accept: [{ ca: listener-backend-trust }]                            | spec.policies[0].params.accept[0].ca                 | listener-backend-trust is a backend trust certificate (usage: upstream); accept takes usage: downstream authorities  |
       | accept: [{ ca: listener-partner-a, match: { uriSANs: [] } }]        | spec.policies[0].params.accept[0].match.uriSANs      | list at least one non-empty SAN, or remove match to accept any certificate from this authority                   |
       | accept: [{ ca: listener-partner-a, match: { dnsSANs: ["a", ""] } }] | spec.policies[0].params.accept[0].match.dnsSANs[1]   | list at least one non-empty SAN, or remove match to accept any certificate from this authority                   |
       | accept: [{ ca: listener-partner-a, thumbprints: [] }]               | spec.policies[0].params.accept[0].thumbprints        | list at least one thumbprint, or remove thumbprints to accept any certificate from this authority               |
@@ -285,7 +285,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
       | accept: [{ ca: listener-partner-a, match: "urn:x" }]                | spec.policies[0].params.accept[0].match              | match must be an object listing uriSANs or dnsSANs                                               |
 
   Scenario: mtls-auth cannot be made conditional
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -314,7 +314,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     And the response should list a validation error for field "spec.policies[0].executionCondition" with message "mtls-auth runs on every request and cannot carry an executionCondition"
 
   Scenario: Attaching mtls-auth while the pool holds only relay entries is refused
-    Given I upload the certificate fixture "edge-lb-ca" as "listener-edge-lb" with usage "client" and role "relay"
+    Given I upload the certificate fixture "edge-lb-ca" as "listener-edge-lb" with usage "downstream" and role "relay"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -339,7 +339,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     And the response should list a validation error for field "spec.policies[0]" containing "requires at least one client authority"
 
   Scenario: mtls-auth may appear once per scope
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -368,7 +368,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     And the response should list a validation error for field "spec.policies[1]" with message "mtls-auth may appear once per scope; use several accept entries instead"
 
   Scenario: mtls-auth attached at both API and operation level is refused
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -424,8 +424,8 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
   # ==================== WARNINGS ON THE DEPLOY RESPONSE ====================
 
   Scenario: Omitting accept while the pool holds several authorities warns and echoes the resolved list
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
-    And the certificate fixture "ca-b" is pooled as "listener-partner-b" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
+    And the certificate fixture "ca-b" is pooled as "listener-partner-b" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -452,8 +452,8 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     When I delete the API "mtls-warned-api"
 
   Scenario: An entry with neither match nor thumbprints warns
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
-    And the certificate fixture "ca-b" is pooled as "listener-partner-b" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
+    And the certificate fixture "ca-b" is pooled as "listener-partner-b" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -483,7 +483,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
 
   Scenario: An explicit entry is warned as unnarrowed even when the pool holds one authority
     Given the client authority pool is empty
-    And the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    And the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -513,7 +513,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
 
   Scenario: A single-authority pool produces no inheritance warning
     Given the client authority pool is empty
-    And the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    And the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -539,7 +539,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     When I delete the API "mtls-warned-api"
 
   Scenario: Another authentication policy ahead of mtls-auth in the chain warns
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -574,7 +574,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
     When I delete the API "mtls-warned-api"
 
   Scenario: A thumbprint written with colons or a prefix is accepted and normalised with a warning
-    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "listener-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1

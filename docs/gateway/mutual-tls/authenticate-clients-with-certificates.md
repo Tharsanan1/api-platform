@@ -6,12 +6,12 @@ This page is for the **AI developer** who protects an API with client certificat
 
 ## Before you start
 
-The policy holds no certificates. It names entries from the gateway's certificate pool, so the authority that issues your callers' certificates must be in the pool as a `usage: client` entry before you deploy. See [Add a client authority](manage-certificates.md#add-a-client-authority). The examples on this page use an authority named `partner-a`.
+The policy holds no certificates. It names entries from the gateway's certificate pool, so the authority that issues your callers' certificates must be in the pool as a `usage: downstream` entry before you deploy. See [Add a client authority](manage-certificates.md#add-a-client-authority). The examples on this page use an authority named `partner-a`.
 
 Callers must connect to the gateway's HTTPS listener, on port 8443 by default. The gateway refuses to deploy the policy in two cases:
 
 - when the HTTPS listener is disabled: `mtls-auth requires the HTTPS listener, which is disabled on this gateway`
-- when the pool holds no client authority: `mtls-auth requires at least one client authority; add one with POST /certificates and usage: client`
+- when the pool holds no client authority: `mtls-auth requires at least one client authority; add one with POST /certificates and usage: downstream`
 
 ## Require a client certificate
 

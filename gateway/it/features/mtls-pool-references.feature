@@ -30,8 +30,8 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
   # ==================== WHO REFERENCES WHAT ====================
 
   Scenario: The listing counts the APIs that name an authority, not the ones that inherit the pool
-    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
-    And the certificate fixture "ca-b" is pooled as "ref-partner-b" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "downstream"
+    And the certificate fixture "ca-b" is pooled as "ref-partner-b" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -77,12 +77,12 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
             path: /anything
       """
     Then the response should be successful
-    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=downstream"
     Then the listed certificate "ref-partner-a" should have "referencedByApis" equal to 1
     And the listed certificate "ref-partner-b" should have "referencedByApis" equal to 0
 
   Scenario: An authority named in an API's accept list cannot be removed while the reference stands
-    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -120,8 +120,8 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
     Then the response should be successful
 
   Scenario: An authority referenced only by inheriting APIs can be removed, and they stop accepting it on the next request
-    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
-    And the certificate fixture "ca-b" is pooled as "ref-partner-b" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "downstream"
+    And the certificate fixture "ca-b" is pooled as "ref-partner-b" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -156,7 +156,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
 
   Scenario: The last client authority cannot be removed while any API attaches mtls-auth
     Given the client authority pool is empty
-    And the certificate fixture "ca-a" is pooled as "ref-only-authority" with usage "client"
+    And the certificate fixture "ca-a" is pooled as "ref-only-authority" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -182,16 +182,16 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
     Then the response status should be 409
     And the JSON response field "message" should contain "cannot remove the last client-CA authority while 1 deployed API"
     And the response should list a validation error for field "spec.policies[0]" containing "ref-inheriting-api"
-    When I send a GET request to the "gateway-controller" service at "/certificates?usage=client"
+    When I send a GET request to the "gateway-controller" service at "/certificates?usage=downstream"
     Then the certificate list should contain "ref-only-authority"
-    Given the certificate fixture "ca-b" is pooled as "ref-replacement" with usage "client"
+    Given the certificate fixture "ca-b" is pooled as "ref-replacement" with usage "downstream"
     When I delete the certificate named "ref-only-authority"
     Then the response should be successful
 
   Scenario: A relay entry can be removed even when it is the last one, since header mode simply turns off
     Given the client authority pool is empty
-    And the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
-    And I upload the certificate fixture "edge-lb-ca" as "ref-edge-lb" with usage "client" and role "relay"
+    And the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "downstream"
+    And I upload the certificate fixture "edge-lb-ca" as "ref-edge-lb" with usage "downstream" and role "relay"
     And the response status should be 201
     When I deploy this API configuration:
       """
@@ -228,7 +228,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
   # ==================== REVOKING ONE CLIENT IS AN EDIT ====================
 
   Scenario: Removing one SAN from the list cuts off exactly the clients carrying it
-    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -293,8 +293,8 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
     Then the response status code should be 200
 
   Scenario: Removing one partner's entry leaves the other partner untouched
-    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
-    And the certificate fixture "ca-b" is pooled as "ref-partner-b" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "downstream"
+    And the certificate fixture "ca-b" is pooled as "ref-partner-b" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -354,7 +354,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
     Then the response status code should be 200
 
   Scenario: A thumbprint cut-over lists old and new, then drops the old
-    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "downstream"
     When I deploy this API configuration with fixture values:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -419,7 +419,7 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
   # ==================== EDGE CASES IN THE ACCEPT LIST ====================
 
   Scenario: Listing the same authority twice is accepted and evaluates once
-    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -452,8 +452,8 @@ Feature: Pool entries referenced by APIs, and the levers that revoke a client
     Then the response status code should be 200
 
   Scenario: The same authority pooled under two names is usable by either name
-    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "client"
-    And the certificate fixture "ca-a" is pooled as "ref-partner-a-again" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "ref-partner-a" with usage "downstream"
+    And the certificate fixture "ca-a" is pooled as "ref-partner-a-again" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1

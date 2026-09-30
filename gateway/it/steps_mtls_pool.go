@@ -68,7 +68,7 @@ func (m *mtlsSteps) uploadRaw(name, certPEM, usage, role string, match map[strin
 // notePoolChangeIfAccepted records a client authority pool change when the
 // last certificate mutation, on a certificate of the given usage, succeeded.
 func (m *mtlsSteps) notePoolChangeIfAccepted(usage string) {
-	if usage != "client" {
+	if usage != "downstream" {
 		return
 	}
 	if resp := m.httpSteps.LastResponse(); resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -451,13 +451,13 @@ func (m *mtlsSteps) jsonFieldShouldBeSubjectOfFixture(field, fixture string) err
 	return nil
 }
 
-// clientAuthorityPoolIsEmpty deletes every "client" usage certificate as the
+// clientAuthorityPoolIsEmpty deletes every usage: downstream certificate as the
 // current user. A 404 is ignored. A 409, a reference that a configuration
 // deleted by this or the previous scenario can still hold, is retried until
 // certificateDeleteTimeout, first after those configurations have left the
 // controller's store. Any other non-2xx status fails.
 func (m *mtlsSteps) clientAuthorityPoolIsEmpty() error {
-	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates?usage=client"); err != nil {
+	if err := m.httpSteps.SendGETToService("gateway-controller", "/certificates?usage=downstream"); err != nil {
 		return err
 	}
 	var parsed struct {
@@ -490,7 +490,7 @@ func (m *mtlsSteps) clientAuthorityPoolIsEmpty() error {
 		if resp != nil && resp.StatusCode != http.StatusNotFound && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
 			return fmt.Errorf("failed to delete certificate %q (id %s) while emptying the client authority pool: status %d", item["name"], id, resp.StatusCode)
 		}
-		m.notePoolChangeIfAccepted("client")
+		m.notePoolChangeIfAccepted("downstream")
 	}
 	return nil
 }

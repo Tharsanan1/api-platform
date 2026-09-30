@@ -4943,7 +4943,7 @@ and
 ```json
 {
   "name": "partner-a-root",
-  "usage": "client",
+  "usage": "downstream",
   "certificate": "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAKL0UG+mRKtjMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\n...\n-----END CERTIFICATE-----\n"
 }
 
@@ -4955,8 +4955,8 @@ and
 |---|---|---|---|---|
 |name|string|true|none|Unique name for the certificate. Must be unique across all certificates, regardless of usage.|
 |certificate|string|true|none|PEM-encoded X.509 certificate(s). Can contain multiple certificates.|
-|usage|string|false|none|Whether this certificate is used to verify upstream/backend HTTPS<br>connections (the default), pooled as a client certificate<br>authority used to authenticate mutual-TLS callers, or (identity)<br>a gateway identity — a certificate chain (leaf first) plus its<br>private key that the gateway presents to a backend requiring<br>mutual TLS on outbound connections.|
-|role|string|false|none|Only meaningful when usage is client. "client" (the default)<br>means the authority validates a client certificate presented<br>directly on the mTLS connection; "relay" means it validates a<br>client certificate relayed via a header (e.g. from a<br>terminating load balancer) instead.|
+|usage|string|false|none|Whether this certificate is used to verify upstream/backend HTTPS<br>connections (upstream, the default), pooled as a client certificate<br>authority used to authenticate mutual-TLS callers (downstream), or (identity)<br>a gateway identity — a certificate chain (leaf first) plus its<br>private key that the gateway presents to a backend requiring<br>mutual TLS on outbound connections.|
+|role|string|false|none|Only meaningful when usage is downstream. "client" (the default)<br>means the authority validates a client certificate presented<br>directly on the mTLS connection; "relay" means it validates a<br>client certificate relayed via a header (e.g. from a<br>terminating load balancer) instead.|
 |match|[CertificateMatch](#schemacertificatematch)|false|none|Only valid for role: relay. Narrows which connections<br>authenticated as this relay entry can make a relayed header<br>believed. Omit to accept any connection presenting a certificate<br>from this authority, with no further narrowing.|
 |privateKey|string|false|write-only|Required (and only valid) when usage is identity: a PEM-encoded, unencrypted private key matching the leaf certificate (RSA/ECDSA/Ed25519, PKCS#8/PKCS#1/SEC1). Encrypted at rest by the gateway; never returned by any response.|
 
@@ -4965,7 +4965,7 @@ and
 |Property|Value|
 |---|---|
 |usage|upstream|
-|usage|client|
+|usage|downstream|
 |usage|identity|
 |role|client|
 |role|relay|
@@ -5014,7 +5014,7 @@ Each list, when present, must name at least one non-empty SAN.
   "issuer": "CN=Partner A Root,O=Partner A,C=US",
   "notAfter": "2026-11-26 06:07:26",
   "count": 1,
-  "usage": "client",
+  "usage": "downstream",
   "role": "client",
   "isLeaf": false,
   "referencedByApis": 0,
@@ -5035,13 +5035,13 @@ Each list, when present, must name at least one non-empty SAN.
 |notAfter|string(date-time)|false|none|Certificate expiration date (identity certificate, for a client-CA bundle)|
 |count|integer|false|none|Number of certificates in the file|
 |usage|string|false|none|Whether this is upstream/backend trust, a pooled client certificate authority, or a gateway identity.|
-|role|string|false|none|Only present for usage client. Whether the authority validates a directly-presented or header-relayed client certificate.|
+|role|string|false|none|Only present for usage downstream. Whether the authority validates a directly-presented or header-relayed client certificate.|
 |match|[CertificateMatch](#schemacertificatematch)|false|none|Only present for role relay entries that were stored with a narrowing match.|
 |isLeaf|boolean|false|none|True when the identity certificate is not itself a certificate authority (pooled as a one-member authority).|
 |keyAlgorithm|string|false|none|Only present for usage identity. The leaf private key's algorithm (RSA, ECDSA or Ed25519).|
 |chainLength|integer|false|none|Only present for usage identity. Number of certificates in the uploaded chain.|
 |warnings|[[CertificateWarning](#schemacertificatewarning)]|false|none|Non-fatal findings about the upload (e.g. leaf certificate, not yet valid). Omitted when there are none.|
-|referencedByApis|integer|false|none|Number of deployed APIs referencing this certificate — a client authority (accept/pool) or a gateway identity (upstreamDefinitions[].tls.identity). Only present for usage client or identity.|
+|referencedByApis|integer|false|none|Number of deployed APIs referencing this certificate — a client authority (accept/pool) or a gateway identity (upstreamDefinitions[].tls.identity). Only present for usage downstream or identity.|
 |message|string|false|none|Success or informational message|
 |status|string|false|none|none|
 
@@ -5050,7 +5050,7 @@ Each list, when present, must name at least one non-empty SAN.
 |Property|Value|
 |---|---|
 |usage|upstream|
-|usage|client|
+|usage|downstream|
 |usage|identity|
 |role|client|
 |role|relay|
@@ -5107,7 +5107,7 @@ Each list, when present, must name at least one non-empty SAN.
       "issuer": "CN=Partner A Root,O=Partner A,C=US",
       "notAfter": "2026-11-26 06:07:26",
       "count": 1,
-      "usage": "client",
+      "usage": "downstream",
       "role": "client",
       "isLeaf": false,
       "referencedByApis": 0,

@@ -3748,7 +3748,7 @@ func TestTranslator_TranslateConfigs_HTTPSListener_MTLSAuthAttached_RequiresClie
 	cfg.Router = *routerCfg
 	clientCA := pki.NewRootCA(t, "Listener Client CA")
 	db := &fakeSDSStorage{certs: []*models.StoredCertificate{
-		{UUID: "client-1", Name: "client-ca", Certificate: clientCA.PEM(), Usage: models.CertificateUsageClient},
+		{UUID: "client-1", Name: "client-ca", Certificate: clientCA.PEM(), Usage: models.CertificateUsageDownstream},
 	}}
 	translator, err := NewTranslator(logger, routerCfg, db, cfg)
 	require.NoError(t, err)

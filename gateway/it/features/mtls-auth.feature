@@ -37,9 +37,9 @@ Feature: Authenticating API callers with a client certificate
   # ==================== AN AUTHORITY NARROWED BY SAN ====================
 
   Scenario Outline: An API accepting one authority narrowed by URI SAN decides per certificate
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
-    And the certificate fixture "ca-b" is pooled as "auth-ca-b" with usage "client"
-    And the certificate fixture "ca-b-same-dn" is pooled as "auth-lookalike" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
+    And the certificate fixture "ca-b" is pooled as "auth-ca-b" with usage "downstream"
+    And the certificate fixture "ca-b-same-dn" is pooled as "auth-lookalike" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -89,7 +89,7 @@ Feature: Authenticating API callers with a client certificate
       | with client certificate "client-via-intermediate" and its chain | 401 |
 
   Scenario: Every rejection carries the same body and an accepted certificate is described to the backend
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -148,7 +148,7 @@ Feature: Authenticating API callers with a client certificate
     And the response should contain echoed header "x-forwarded-client-cert" containing "Cert="
 
   Scenario: An API can keep the certificate header away from its backend
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -184,7 +184,7 @@ Feature: Authenticating API callers with a client certificate
   # ==================== EXACT CERTIFICATES BY THUMBPRINT ====================
 
   Scenario: An API accepting exact thumbprints admits those certificates and nothing else from the authority
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration with fixture values:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -221,7 +221,7 @@ Feature: Authenticating API callers with a client certificate
     Then the response status code should be 401
 
   Scenario: A renewed certificate is admitted once its thumbprint is listed alongside the old one
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration with fixture values:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -256,7 +256,7 @@ Feature: Authenticating API callers with a client certificate
   # ==================== THE ACCEPT LIST IS EVALUATED ON EVERY REQUEST ====================
 
   Scenario: Narrowing the accept list takes effect on the caller's next request
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -317,7 +317,7 @@ Feature: Authenticating API callers with a client certificate
     Then the response status code should be 200
 
   Scenario: A client that caches its TLS session is accepted again on a new connection
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -350,7 +350,7 @@ Feature: Authenticating API callers with a client certificate
     And the response status code should be 200
 
   Scenario: Adding an authority to the pool grants no access to an API that does not accept it
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -378,7 +378,7 @@ Feature: Authenticating API callers with a client certificate
     And I wait for the endpoint "http://localhost:8080/mtls-san/v1.0/anything" to respond with status 401
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
-    Given the certificate fixture "ca-b" is pooled as "auth-ca-b" with usage "client"
+    Given the certificate fixture "ca-b" is pooled as "auth-ca-b" with usage "downstream"
     And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/mtls-san/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
@@ -386,7 +386,7 @@ Feature: Authenticating API callers with a client certificate
     Then the response status code should be 200
 
   Scenario: An API that inherits the whole pool follows the pool as it changes
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -413,7 +413,7 @@ Feature: Authenticating API callers with a client certificate
     Then the response status code should be 200
     When I send a GET request to "https://localhost:8443/mtls-pool/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 401
-    Given the certificate fixture "ca-b" is pooled as "auth-ca-b" with usage "client"
+    Given the certificate fixture "ca-b" is pooled as "auth-ca-b" with usage "downstream"
     And the gateway has applied the client authority pool
     When I send a GET request to "https://localhost:8443/mtls-pool/v1.0/anything" with client certificate "client-wrong-ca"
     Then the response status code should be 200
@@ -421,7 +421,7 @@ Feature: Authenticating API callers with a client certificate
   # ==================== PUBLIC APIS AND THE FORWARDED-CERTIFICATE HEADER ====================
 
   Scenario Outline: A public API ignores whatever certificate arrives and its backend never sees the header
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -476,7 +476,7 @@ Feature: Authenticating API callers with a client certificate
       | with client certificate "client-serverauth-only"    |
 
   Scenario: A forged forwarded-certificate header never reaches a backend or stands in for a handshake
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -541,7 +541,7 @@ Feature: Authenticating API callers with a client certificate
   # ==================== WHICH SHAPES OF POOL ENTRY ANCHOR WHICH CERTIFICATES ====================
 
   Scenario Outline: A pool entry holding only the root anchors everything the root signed, when the client sends its intermediate
-    Given the certificate fixture "ca-a" is pooled as "anchor-entry" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "anchor-entry" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -580,7 +580,7 @@ Feature: Authenticating API callers with a client certificate
       | with client certificate "client-wrong-ca"                             | 401    |
 
   Scenario Outline: A pool entry holding the root and its issuing intermediate supplies the intermediate itself
-    Given I upload the certificate fixtures "ca-a-intermediate,ca-a" as "anchor-entry" with usage "client"
+    Given I upload the certificate fixtures "ca-a-intermediate,ca-a" as "anchor-entry" with usage "downstream"
     And the response status should be 201
     When I deploy this API configuration:
       """
@@ -619,7 +619,7 @@ Feature: Authenticating API callers with a client certificate
       | with client certificate "client-via-other-intermediate" and its chain | 200    |
 
   Scenario Outline: A pool entry holding only an issuing intermediate trusts exactly what that intermediate signed
-    Given the certificate fixture "ca-a-intermediate" is pooled as "anchor-entry" with usage "client"
+    Given the certificate fixture "ca-a-intermediate" is pooled as "anchor-entry" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -657,7 +657,7 @@ Feature: Authenticating API callers with a client certificate
       | with client certificate "client-valid"                                | 401    |
 
   Scenario Outline: A self-signed certificate pooled as its own authority admits exactly itself
-    Given the certificate fixture "client-selfsigned" is pooled as "anchor-entry" with usage "client"
+    Given the certificate fixture "client-selfsigned" is pooled as "anchor-entry" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -694,8 +694,8 @@ Feature: Authenticating API callers with a client certificate
       | with client certificate "client-signed-by-leaf" and its chain     | 401    |
 
   Scenario Outline: With the root and the intermediate pooled separately, the named entry decides how wide the trust is
-    Given the certificate fixture "ca-a" is pooled as "anchor-root" with usage "client"
-    And the certificate fixture "ca-a-intermediate" is pooled as "anchor-intermediate" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "anchor-root" with usage "downstream"
+    And the certificate fixture "ca-a-intermediate" is pooled as "anchor-intermediate" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -734,7 +734,7 @@ Feature: Authenticating API callers with a client certificate
   # ==================== COMPOSITION AND SCOPE ====================
 
   Scenario: A certificate and a token are both required when both policies are attached
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1
@@ -788,7 +788,7 @@ Feature: Authenticating API callers with a client certificate
       """
 
   Scenario: Attached to one operation, the policy protects that operation only
-    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "client"
+    Given the certificate fixture "ca-a" is pooled as "auth-ca-a" with usage "downstream"
     When I deploy this API configuration:
       """
       apiVersion: gateway.api-platform.wso2.com/v1

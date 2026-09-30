@@ -226,7 +226,7 @@ Feature: Client certificate authority pool
       }
       """
     Then the response status should be 400
-    And the response should list a validation error for field "role" with message "role must be client or relay"
+    And the response should list a validation error for field "role" with message "role must be client, relay or default"
 
   Scenario: A role given on an upstream certificate is rejected
     When I upload to the certificates endpoint the body:
@@ -239,7 +239,7 @@ Feature: Client certificate authority pool
       }
       """
     Then the response status should be 400
-    And the response should list a validation error for field "role" with message "role applies only to usage: downstream certificates"
+    And the response should list a validation error for field "role" with message "role relay applies only to usage: downstream certificates"
 
   Scenario: A name with characters outside letters, digits, dot, underscore and hyphen is rejected
     When I upload to the certificates endpoint the body:

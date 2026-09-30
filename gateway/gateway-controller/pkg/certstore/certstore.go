@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -390,6 +391,34 @@ func (cs *CertStore) GetGatewayIdentityMaterial(name string) (certChainPEM []byt
 	}
 
 	return cert.Certificate, plaintext, nil
+}
+
+// GetDefaultGatewayIdentity returns the role: default gateway identity, or
+// nil when there is none or the store has no database. Should two replicas
+// each have stored one, the first by name is returned.
+func (cs *CertStore) GetDefaultGatewayIdentity() (*models.StoredCertificate, error) {
+	if cs.db == nil {
+		return nil, nil
+	}
+	identities, err := cs.db.ListCertificatesByUsage(models.CertificateUsageIdentity)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list gateway identities: %w", err)
+	}
+	var found []*models.StoredCertificate
+	for _, cert := range identities {
+		if cert.IsDefaultIdentity() {
+			found = append(found, cert)
+		}
+	}
+	if len(found) == 0 {
+		return nil, nil
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].Name < found[j].Name })
+	if len(found) > 1 {
+		cs.logger.Warn("More than one gateway identity has role: default; presenting the first by name",
+			slog.String("presented", found[0].Name), slog.Int("count", len(found)))
+	}
+	return found[0], nil
 }
 
 // GetUpstreamTrustBundle concatenates the PEM certificates of the named

@@ -114,6 +114,14 @@ type Translator struct {
 	// TranslateConfigs call, so SDS builds exactly the secrets its clusters
 	// reference.
 	tlsSecretRefs []UpstreamTLSSecretRef
+
+	// defaultClientCert is the certificate the current TranslateConfigs call
+	// presents to HTTPS backends whose upstream definition names no tls
+	// identity.
+	defaultClientCert defaultClientCertificate
+	// loggedDefaultClientCertificate identifies the last logged choice of
+	// defaultClientCert, so a change is logged once.
+	loggedDefaultClientCertificate string
 }
 
 // GetUpstreamTLSSecretRefs returns the per-cluster mTLS wiring collected by
@@ -778,6 +786,18 @@ func (t *Translator) TranslateConfigs(
 
 	t.tlsSecretRefs = nil
 
+	defaultClientCert, err := t.resolveDefaultClientCertificate()
+	if err != nil {
+		return nil, err
+	}
+	t.defaultClientCert = defaultClientCert
+	t.logDefaultClientCertificate(defaultClientCert)
+	// The default identity is named by no tls block, so its secret is
+	// requested here; the snapshot keeps it only if a cluster references it.
+	if defaultClientCert.IdentityName != "" {
+		t.tlsSecretRefs = append(t.tlsSecretRefs, UpstreamTLSSecretRef{IdentityName: defaultClientCert.IdentityName})
+	}
+
 	var listeners []types.Resource
 	var clusters []types.Resource
 
@@ -1116,7 +1136,9 @@ func (t *Translator) getVHostDomains(effectiveVHost string) []string {
 	return appendDomainPatterns(out, effectiveVHost)
 }
 
-// translateAPIConfig translates a single API configuration
+// translateAPIConfig translates a single API configuration. It does not
+// honour tls blocks, so its clusters present no client certificate: the
+// default one must never stand in for a tls.identity it cannot see.
 func (t *Translator) translateAPIConfig(cfg *models.StoredConfig, allConfigs []*models.StoredConfig) ([]*route.Route, []*cluster.Cluster, error) {
 	restCfg, ok := cfg.Configuration.(api.RestAPI)
 	if !ok {
@@ -2042,7 +2064,8 @@ func (t *Translator) createRoutePerTopic(apiId, apiName, apiVersion, context, me
 }
 
 // createCluster creates an Envoy cluster. tlsOpts/validationSecretName carry a definition's mTLS
-// wiring; pass nil/"" for a definition with no tls block, in which case the error is always nil.
+// wiring; pass nil/"" for a cluster that does not honour tls blocks, in which case the error is
+// always nil and no client certificate is presented.
 func (t *Translator) createCluster(
 	name string,
 	upstreamURL *url.URL,
@@ -2376,8 +2399,9 @@ func (t *Translator) createOTELCollectorCluster() *cluster.Cluster {
 }
 
 // createUpstreamTLSContext creates an upstream TLS context. tlsOpts carries a
-// cluster's mTLS wiring and is nil for a definition with no tls block.
-// validationSecretName is the SDS secret for a non-empty
+// cluster's mTLS wiring and is nil for a cluster that carries no API traffic
+// or does not honour tls blocks, which never presents the default client
+// certificate. validationSecretName is the SDS secret for a non-empty
 // tlsOpts.TrustedCANames. It errors when a tls block has no trust source, since
 // a context without one would silently skip chain and hostname validation.
 func (t *Translator) createUpstreamTLSContext(certificate []byte, address string, tlsOpts *models.UpstreamTLS, validationSecretName string) (*tlsv3.UpstreamTlsContext, error) {
@@ -2405,11 +2429,20 @@ func (t *Translator) createUpstreamTLSContext(certificate []byte, address string
 
 	hasTLSBlock := tlsOpts != nil && tlsOpts.HasTLSBlock
 
-	// Delivered via SDS so the private key is never inlined in the Cluster.
-	if hasTLSBlock && tlsOpts.IdentityName != "" {
+	// The client certificate, in order: the definition's tls.identity, then
+	// the default client certificate. Delivered via SDS so the private key is
+	// never inlined in the Cluster.
+	clientCertSecretName := ""
+	switch {
+	case hasTLSBlock && tlsOpts.IdentityName != "":
+		clientCertSecretName = GatewayIdentitySecretName(tlsOpts.IdentityName)
+	case tlsOpts != nil:
+		clientCertSecretName = t.defaultClientCert.SecretName
+	}
+	if clientCertSecretName != "" {
 		upstreamTLSContext.CommonTlsContext.TlsCertificateSdsSecretConfigs = []*tlsv3.SdsSecretConfig{
 			{
-				Name: GatewayIdentitySecretName(tlsOpts.IdentityName),
+				Name: clientCertSecretName,
 				SdsConfig: &core.ConfigSource{
 					ResourceApiVersion: core.ApiVersion_V3,
 					ConfigSourceSpecifier: &core.ConfigSource_Ads{
@@ -2774,7 +2807,7 @@ func (t *Translator) parseCipherSuites(ciphers string) []string {
 
 // processEndpoint creates locality load endpoints for the given upstream URL and returns both
 // endpoints and transport socket match if TLS is enabled. tlsOpts/validationSecretName carry a
-// cluster's mTLS wiring; pass nil/"" for a definition with no tls block.
+// cluster's mTLS wiring; pass nil/"" for a cluster that does not honour tls blocks.
 func (t *Translator) processEndpoint(
 	upstreamURL *url.URL,
 	upstreamCerts map[string][]byte,

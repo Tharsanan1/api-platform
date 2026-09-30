@@ -48,6 +48,11 @@ const (
 	// response while client_certificate_header.trust_any is true, because the
 	// relayed-certificate header is then believed from any connection.
 	WarningCodeHeaderCertBypassActive = "HEADER_CERT_BYPASS_ACTIVE"
+
+	// WarningCodeMTLSHostnameNotScoped is raised when an mtls-auth API is
+	// served on a hostname the HTTPS listener cannot tell apart on SNI, so
+	// every connection is asked for a client certificate.
+	WarningCodeMTLSHostnameNotScoped = "MTLS_HOSTNAME_NOT_SCOPED"
 )
 
 // mtlsAuthPrecedingAuthPolicies lists other authentication-policy names
@@ -80,6 +85,7 @@ type MtlsAuthValidator struct {
 	httpsEnabled   bool
 	headerTrustAny bool
 	keys           mtlsAuthParamKeys
+	vhosts         *VHostsConfig
 }
 
 // NewMtlsAuthValidator creates a validator bound to the certificate store.
@@ -95,6 +101,13 @@ func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled, headerTr
 		headerTrustAny: headerTrustAny,
 		keys:           mtlsAuthParamKeysFromSchema(paramSchema),
 	}
+}
+
+// WithVHosts sets router.vhosts, which the MTLS_HOSTNAME_NOT_SCOPED warning
+// resolves an API's hostnames against. Without it that warning is not raised.
+func (v *MtlsAuthValidator) WithVHosts(vhosts VHostsConfig) *MtlsAuthValidator {
+	v.vhosts = &vhosts
+	return v
 }
 
 // MtlsAuthParameterSchema returns the parameter schema of the latest loaded
@@ -665,6 +678,8 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 	}
 	apiConfig.Spec.Operations = newOps
 
+	warnings = append(warnings, v.hostnameScopeWarnings(apiConfig.Spec)...)
+
 	if v.headerTrustAny {
 		warnings = append(warnings, clientca.Warning{
 			Code:    WarningCodeHeaderCertBypassActive,
@@ -674,6 +689,38 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 	}
 
 	return apiConfig, warnings
+}
+
+// hostnameScopeWarnings reports MTLS_HOSTNAME_NOT_SCOPED for each of
+// vhosts.main and vhosts.sandbox that resolves to a hostname the HTTPS
+// listener cannot scope its client certificate request to.
+func (v *MtlsAuthValidator) hostnameScopeWarnings(spec api.APIConfigData) []clientca.Warning {
+	if !v.httpsEnabled || v.vhosts == nil {
+		return nil
+	}
+	mainVhosts, sandbox, hasSandbox := RestAPIVhosts(spec, *v.vhosts)
+	var warnings []clientca.Warning
+	for _, vh := range mainVhosts {
+		if _, ok := v.vhosts.ServerName(vh); !ok {
+			warnings = append(warnings, hostnameNotScopedWarning("spec.vhosts.main", "vhosts.main"))
+			break
+		}
+	}
+	if hasSandbox {
+		if _, ok := v.vhosts.ServerName(sandbox); !ok {
+			warnings = append(warnings, hostnameNotScopedWarning("spec.vhosts.sandbox", "vhosts.sandbox"))
+		}
+	}
+	return warnings
+}
+
+func hostnameNotScopedWarning(field, setting string) clientca.Warning {
+	return clientca.Warning{
+		Code:  WarningCodeMTLSHostnameNotScoped,
+		Field: field,
+		Message: "this API has no dedicated hostname, so the HTTPS listener asks every connection for a client certificate; " +
+			"give it its own " + setting + " (an exact hostname or a *. wildcard) to limit that to its hostname",
+	}
 }
 
 // resolvePolicyList resolves every mtls-auth entry in one policy chain and

@@ -419,6 +419,11 @@ ciphers = "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA
 # hybrid group. An unsupported curve name is rejected by Envoy when it
 # applies the resulting config, not by this file.
 ecdh_curves = "X25519MLKEM768,X25519,P-256"
+# Refuse to deploy an API attaching mtls-auth unless it has its own hostname
+# (vhosts.main, and vhosts.sandbox when it has a sandbox upstream) set to an
+# exact name or a leading *. wildcard. Such a deploy fails with HTTP 400.
+# Stored APIs that break this keep being served, with a warning at startup.
+# mtls_requires_dedicated_hostname = false
 
 [router.downstream_tls.client_certificate_header]
 # HTTP header carrying a client certificate relayed by a front proxy that

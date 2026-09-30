@@ -692,6 +692,12 @@ type DownstreamTLS struct {
 	// deployed Envoy/BoringSSL build supports the group before enabling it.
 	EcdhCurves string `koanf:"ecdh_curves"`
 
+	// MtlsRequiresDedicatedHostname refuses to deploy an API attaching
+	// mtls-auth whose own hostname the HTTPS listener cannot scope its client
+	// certificate request to, so no such API makes the listener ask every
+	// connection for a certificate.
+	MtlsRequiresDedicatedHostname bool `koanf:"mtls_requires_dedicated_hostname"`
+
 	// ClientCertificateHeader configures the header carrying a client
 	// certificate relayed by a front proxy that terminates TLS.
 	ClientCertificateHeader ClientCertificateHeader `koanf:"client_certificate_header"`
@@ -1340,12 +1346,13 @@ func defaultConfig() *Config {
 			},
 			LuaScriptPath: DefaultLuaScriptPath,
 			DownstreamTLS: DownstreamTLS{
-				CertPath:               "./listener-certs/default-listener.crt",
-				KeyPath:                "./listener-certs/default-listener.key",
-				MinimumProtocolVersion: "TLS1_2",
-				MaximumProtocolVersion: "TLS1_3",
-				Ciphers:                "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
-				EcdhCurves:             "X25519,P-256",
+				CertPath:                      "./listener-certs/default-listener.crt",
+				KeyPath:                       "./listener-certs/default-listener.key",
+				MinimumProtocolVersion:        "TLS1_2",
+				MaximumProtocolVersion:        "TLS1_3",
+				Ciphers:                       "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-AES128-SHA,AES128-GCM-SHA256,AES128-SHA,ECDHE-ECDSA-AES256-GCM-SHA384,ECDHE-RSA-AES256-GCM-SHA384,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,AES256-GCM-SHA384,AES256-SHA",
+				EcdhCurves:                    "X25519,P-256",
+				MtlsRequiresDedicatedHostname: false,
 				ClientCertificateHeader: ClientCertificateHeader{
 					Name:     DefaultClientCertificateHeaderName,
 					TrustAny: false,

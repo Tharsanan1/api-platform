@@ -2443,3 +2443,22 @@ func TestConfig_Validate_MaxCertificateUploadBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfig_MtlsRequiresDedicatedHostname(t *testing.T) {
+	load := func(t *testing.T, toml string) *Config {
+		t.Helper()
+		configPath := filepath.Join(t.TempDir(), "config.toml")
+		require.NoError(t, os.WriteFile(configPath, []byte(toml), 0o644))
+		cfg, err := LoadConfig(configPath)
+		require.NoError(t, err)
+		return cfg
+	}
+
+	t.Run("defaults to false", func(t *testing.T) {
+		assert.False(t, load(t, "").Router.DownstreamTLS.MtlsRequiresDedicatedHostname)
+	})
+	t.Run("parses true from toml", func(t *testing.T) {
+		cfg := load(t, "[router.downstream_tls]\nmtls_requires_dedicated_hostname = true\n")
+		assert.True(t, cfg.Router.DownstreamTLS.MtlsRequiresDedicatedHostname)
+	})
+}

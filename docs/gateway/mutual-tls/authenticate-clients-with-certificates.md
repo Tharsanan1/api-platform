@@ -96,6 +96,21 @@ The gateway asks every connection instead, whatever its hostname, in these cases
 
 When an API's own hostname is the cause, its deploy response carries an `MTLS_HOSTNAME_NOT_SCOPED` warning on `spec.vhosts.main` or `spec.vhosts.sandbox`.
 
+To refuse such APIs instead, turn on `mtls_requires_dedicated_hostname` in `config.toml`. It's off by default:
+
+```toml
+[router.downstream_tls]
+mtls_requires_dedicated_hostname = true
+```
+
+With it on, deploying or updating an `mtls-auth` API whose own hostname is the cause fails with `400`, on `spec.vhosts.main` or `spec.vhosts.sandbox`:
+
+```text
+this gateway requires every mtls-auth API to have its own hostname (an exact name or a leading *.); set vhosts.main
+```
+
+A relay entry in the pool is never a reason to refuse a deploy. APIs already stored when you turn the setting on keep being served, and the listener still asks every connection. The gateway logs a warning for each of them at startup; update each one to give it its own hostname. The setting is read at startup, so restart the gateway after changing it.
+
 Callers must send the API's hostname as SNI. While the gateway asks only on the hostnames of `mtls-auth` APIs, a connection that isn't asked presents no certificate, so its requests get the policy's `401`. That happens when a connection:
 
 - sends no SNI,

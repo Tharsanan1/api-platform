@@ -225,7 +225,8 @@ func (s *RestAPIService) ResolveMtlsAuthForResponse(cfg api.RestAPI) (api.RestAP
 // builds the HTTPS listener from.
 func (s *RestAPIService) ResolveHostnameScopeWarnings(rendered api.RestAPI) []clientca.Warning {
 	v := config.NewMtlsAuthValidator(s.db, s.routerConfig.HTTPSEnabled,
-		s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny, nil).WithVHosts(s.routerConfig.VHosts)
+		s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny, nil).WithVHosts(s.routerConfig.VHosts).
+		WithDedicatedHostnameRequired(s.routerConfig.DownstreamTLS.MtlsRequiresDedicatedHostname)
 	return v.HostnameScopeWarnings(rendered)
 }
 

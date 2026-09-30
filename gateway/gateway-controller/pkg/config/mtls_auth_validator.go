@@ -86,6 +86,10 @@ type MtlsAuthValidator struct {
 	headerTrustAny bool
 	keys           mtlsAuthParamKeys
 	vhosts         *VHostsConfig
+
+	// requireDedicatedHostname is
+	// router.downstream_tls.mtls_requires_dedicated_hostname.
+	requireDedicatedHostname bool
 }
 
 // NewMtlsAuthValidator creates a validator bound to the certificate store.
@@ -103,10 +107,19 @@ func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled, headerTr
 	}
 }
 
-// WithVHosts sets router.vhosts, which HostnameScopeWarnings resolves an
-// API's hostnames against. Without it that warning is not raised.
+// WithVHosts sets router.vhosts, which an API's hostnames are resolved
+// against. Without it no hostname warning or refusal is raised.
 func (v *MtlsAuthValidator) WithVHosts(vhosts VHostsConfig) *MtlsAuthValidator {
 	v.vhosts = &vhosts
+	return v
+}
+
+// WithDedicatedHostnameRequired sets
+// router.downstream_tls.mtls_requires_dedicated_hostname. When true,
+// ValidateRestAPI refuses an API that HostnameScopeWarnings would warn about,
+// and HostnameScopeWarnings reports nothing.
+func (v *MtlsAuthValidator) WithDedicatedHostnameRequired(required bool) *MtlsAuthValidator {
+	v.requireDedicatedHostname = required
 	return v
 }
 
@@ -345,6 +358,16 @@ func (v *MtlsAuthValidator) ValidateRestAPI(apiConfig *api.RestAPI) []Validation
 		}
 
 		errs = append(errs, v.validateParams(occ.fieldPath, occ.params)...)
+	}
+
+	if v.requireDedicatedHostname && v.httpsEnabled && v.vhosts != nil {
+		for _, h := range UndedicatedHostnames(*apiConfig, *v.vhosts) {
+			errs = append(errs, ValidationError{
+				Field: h.Field,
+				Message: "this gateway requires every mtls-auth API to have its own hostname " +
+					"(an exact name or a leading *.); set " + h.Setting,
+			})
+		}
 	}
 
 	return errs
@@ -689,28 +712,51 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 	return apiConfig, warnings
 }
 
-// HostnameScopeWarnings reports MTLS_HOSTNAME_NOT_SCOPED for each of
-// vhosts.main and vhosts.sandbox of an API attaching mtls-auth that resolves
-// to a hostname the HTTPS listener cannot scope its client certificate
-// request to. Pass the rendered configuration the translator uses.
+// HostnameScopeWarnings reports MTLS_HOSTNAME_NOT_SCOPED for each hostname
+// UndedicatedHostnames finds on apiConfig. Pass the rendered configuration
+// the translator uses. It reports nothing when a dedicated hostname is
+// required, since ValidateRestAPI refuses such an API.
 func (v *MtlsAuthValidator) HostnameScopeWarnings(apiConfig api.RestAPI) []clientca.Warning {
-	if !v.httpsEnabled || v.vhosts == nil || collectMTLSAuthOccurrences(&apiConfig) == nil {
+	if !v.httpsEnabled || v.vhosts == nil || v.requireDedicatedHostname {
 		return nil
 	}
-	mainVhosts, sandbox, hasSandbox := RestAPIVhosts(apiConfig.Spec, *v.vhosts)
 	var warnings []clientca.Warning
+	for _, h := range UndedicatedHostnames(apiConfig, *v.vhosts) {
+		warnings = append(warnings, hostnameNotScopedWarning(h.Field, h.Setting))
+	}
+	return warnings
+}
+
+// UndedicatedHostname names a vhosts setting of an mtls-auth API that
+// resolves to a hostname the HTTPS listener cannot scope its client
+// certificate request to.
+type UndedicatedHostname struct {
+	Field   string // "spec.vhosts.main" or "spec.vhosts.sandbox"
+	Setting string // "vhosts.main" or "vhosts.sandbox"
+}
+
+// UndedicatedHostnames reports vhosts.main when any of its entries, and
+// vhosts.sandbox when the API has a sandbox upstream, resolves to a hostname
+// the HTTPS listener cannot scope its client certificate request to. An API
+// not attaching mtls-auth reports nothing. Relay entries play no part.
+func UndedicatedHostnames(apiConfig api.RestAPI, vhosts VHostsConfig) []UndedicatedHostname {
+	if collectMTLSAuthOccurrences(&apiConfig) == nil {
+		return nil
+	}
+	mainVhosts, sandbox, hasSandbox := RestAPIVhosts(apiConfig.Spec, vhosts)
+	var found []UndedicatedHostname
 	for _, vh := range mainVhosts {
-		if _, ok := v.vhosts.ServerName(vh); !ok {
-			warnings = append(warnings, hostnameNotScopedWarning("spec.vhosts.main", "vhosts.main"))
+		if _, ok := vhosts.ServerName(vh); !ok {
+			found = append(found, UndedicatedHostname{Field: "spec.vhosts.main", Setting: "vhosts.main"})
 			break
 		}
 	}
 	if hasSandbox {
-		if _, ok := v.vhosts.ServerName(sandbox); !ok {
-			warnings = append(warnings, hostnameNotScopedWarning("spec.vhosts.sandbox", "vhosts.sandbox"))
+		if _, ok := vhosts.ServerName(sandbox); !ok {
+			found = append(found, UndedicatedHostname{Field: "spec.vhosts.sandbox", Setting: "vhosts.sandbox"})
 		}
 	}
-	return warnings
+	return found
 }
 
 func hostnameNotScopedWarning(field, setting string) clientca.Warning {

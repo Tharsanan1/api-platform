@@ -155,6 +155,8 @@ Both settings are read at startup. Restart the gateway after changing them.
 
 Prefer a relay entry to `trust_any`. A relay entry makes the gateway authenticate the load balancer before it believes a header.
 
+One more setting under `[router.downstream_tls]`, `mtls_requires_dedicated_hostname`, refuses to deploy an `mtls-auth` API without its own hostname. See [Hostnames and the certificate request](authenticate-clients-with-certificates.md#hostnames-and-the-certificate-request).
+
 ## Upgrade note
 
 If your gateway stores its configuration in PostgreSQL or SQL Server, apply the schema file for your release to the database before you upgrade. See the release notes for your version.

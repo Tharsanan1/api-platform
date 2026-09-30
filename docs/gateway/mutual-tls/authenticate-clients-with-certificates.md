@@ -73,6 +73,48 @@ Content-Type: application/json
 
 The reason is recorded in the gateway's logs and traces instead. The policy's `onFailureStatusCode`, `errorMessageFormat`, and `errorMessage` parameters change the response.
 
+## Hostnames and the certificate request
+
+The HTTPS listener decides whether to ask a connection for a client certificate during the TLS handshake, before any request arrives. It decides from the hostname the caller sends in the handshake, its server name indication (SNI).
+
+Give each API that attaches `mtls-auth` its own hostname in `vhosts.main`. Use an exact name such as `orders.example.com`, or a single leading `*.` label such as `*.orders.example.com`. When the API has a sandbox upstream, give `vhosts.sandbox` its own hostname as well:
+
+```yaml
+spec:
+  vhosts:
+    main: orders.example.com
+    sandbox: orders-sandbox.example.com
+```
+
+When every `mtls-auth` API has its own hostname, the gateway asks for a certificate only on connections to those hostnames. Connections to any other hostname are never asked and keep TLS session resumption.
+
+The gateway asks every connection instead, whatever its hostname, in these cases:
+
+- An `mtls-auth` API has no `vhosts.main`, or is served on the gateway's default hostname.
+- A hostname is an IP address, ends with a dot, or is a pattern other than an exact name or a leading `*.`, such as `*` or `orders-*`.
+- The pool holds a relay entry, because a load balancer can connect on any hostname.
+
+When an API's own hostname is the cause, its deploy response carries an `MTLS_HOSTNAME_NOT_SCOPED` warning on `spec.vhosts.main` or `spec.vhosts.sandbox`.
+
+Callers must send the API's hostname as SNI. While the gateway asks only on the hostnames of `mtls-auth` APIs, a connection that isn't asked presents no certificate, so its requests get the policy's `401`. That happens when a connection:
+
+- sends no SNI,
+- connects by IP address,
+- sends a hostname other than the API's, or
+- is reused for a request to another hostname, as HTTP/2 clients do when they coalesce connections to hostnames that share an address and a certificate.
+
+To send the hostname as SNI when testing locally, resolve it to the gateway:
+
+```bash
+curl https://orders.example.com:8443/orders/v1.0/orders \
+  --resolve orders.example.com:8443:127.0.0.1 \
+  --cert partner-a-client.pem \
+  --key partner-a-client.key \
+  --cacert gateway-ca.pem
+```
+
+Hostnames are compared without regard to case. A port in `vhosts` plays no part in the match: `orders.example.com:8443` asks every connection to `orders.example.com`, so an API without `mtls-auth` on that bare hostname is asked too.
+
 ## Choose which authorities to accept
 
 `accept` decides which pooled authorities an API trusts:

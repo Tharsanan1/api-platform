@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, WSO2 LLC. (https://www.wso2.com).
+ * Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
  *
  * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
@@ -20,6 +20,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
@@ -56,6 +57,20 @@ func TestVHostsConfig_ServerName(t *testing.T) {
 		{vhost: "::1"},
 		{vhost: "[::1]:8443"},
 		{vhost: ""},
+		{vhost: "   "},
+		{vhost: constants.VHostGatewayDefault},
+		{vhost: " " + constants.VHostGatewayDefault + " "},
+		{vhost: "pay.example.com."},
+		{vhost: "pay.example.com.:8443"},
+		{vhost: "pay..example.com"},
+		{vhost: ".pay.example.com"},
+		{vhost: "pay example.com"},
+		{vhost: "pay_api.example.com"},
+		{vhost: "pay.example.com/v1"},
+		{vhost: "{{ env \"HOST\" }}"},
+		{vhost: "pay.exa{mple.com"},
+		{vhost: "pay.éxample.com"},
+		{vhost: "a.example.com;b.example.com"},
 	}
 	vhosts := scopeTestVHosts()
 	for _, tt := range tests {
@@ -126,7 +141,11 @@ func TestRestAPIVhosts(t *testing.T) {
 		{name: "no vhosts", spec: createValidRestAPIConfig().Spec, wantMain: []string{"*"}, wantSandbox: "sandbox-*"},
 		{name: "several main entries", spec: withVhosts("a.example.com; b.example.com;a.example.com", nil),
 			wantMain: []string{"a.example.com", "b.example.com"}, wantSandbox: "sandbox-*"},
-		{name: "gateway-default sentinels", spec: withVhosts(constants.VHostGatewayDefault, stringPtr(constants.VHostGatewayDefault)),
+		{name: "gateway-default sentinels are routed as written", spec: withVhosts(constants.VHostGatewayDefault, stringPtr(constants.VHostGatewayDefault)),
+			wantMain: []string{constants.VHostGatewayDefault}, wantSandbox: constants.VHostGatewayDefault},
+		{name: "sandbox kept as written", spec: withVhosts("a.example.com", stringPtr(" sb.example.com ")),
+			wantMain: []string{"a.example.com"}, wantSandbox: " sb.example.com "},
+		{name: "blank vhosts fall back to the defaults", spec: withVhosts(" ; ", stringPtr("  ")),
 			wantMain: []string{"*"}, wantSandbox: "sandbox-*"},
 		{name: "sandbox upstream by ref", spec: withSandboxUpstream(withVhosts("a.example.com", stringPtr("sb.example.com"))),
 			wantMain: []string{"a.example.com"}, wantSandbox: "sb.example.com", wantHas: true},
@@ -141,7 +160,7 @@ func TestRestAPIVhosts(t *testing.T) {
 	}
 }
 
-func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HostnameNotScoped(t *testing.T) {
+func TestMtlsAuthValidator_HostnameScopeWarnings(t *testing.T) {
 	vhostsOf := func(cfg *api.RestAPI, main string, sandbox *string) *api.RestAPI {
 		cfg.Spec.Vhosts = &struct {
 			Main    string  `json:"main" yaml:"main"`
@@ -174,12 +193,20 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HostnameNotScoped(t *testi
 			httpsEnabled: true, wantFields: []string{"spec.vhosts.main"}},
 		{name: "no mtls-auth", apiConfig: createValidRestAPIConfig(), httpsEnabled: true},
 		{name: "HTTPS disabled", apiConfig: mtlsAPI(), httpsEnabled: false},
+		{name: "gateway-default sentinel", apiConfig: vhostsOf(mtlsAPI(), constants.VHostGatewayDefault, nil),
+			httpsEnabled: true, wantFields: []string{"spec.vhosts.main"}},
+		{name: "trailing dot", apiConfig: vhostsOf(mtlsAPI(), "pay.example.com.", nil),
+			httpsEnabled: true, wantFields: []string{"spec.vhosts.main"}},
+		{name: "non-DNS characters", apiConfig: vhostsOf(mtlsAPI(), "pay_api.example.com", nil),
+			httpsEnabled: true, wantFields: []string{"spec.vhosts.main"}},
+		{name: "sandbox with surrounding whitespace", apiConfig: sandboxUpstream(vhostsOf(mtlsAPI(), "pay.example.com", stringPtr(" sb.example.com "))),
+			httpsEnabled: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("partner-a")), tt.httpsEnabled, false, mtlsAuthTestSchema()).
 				WithVHosts(scopeTestVHosts())
-			_, warnings := v.ResolveMtlsAuthForResponse(*tt.apiConfig)
+			warnings := v.HostnameScopeWarnings(*tt.apiConfig)
 
 			var gotFields []string
 			for _, w := range warnings {
@@ -187,8 +214,8 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HostnameNotScoped(t *testi
 					continue
 				}
 				gotFields = append(gotFields, w.Field)
-				if w.Message == "" {
-					t.Errorf("warning for %s has no message", w.Field)
+				if want := "give it its own " + strings.TrimPrefix(w.Field, "spec."); !strings.Contains(w.Message, want) {
+					t.Errorf("warning for %s = %q, want it to contain %q", w.Field, w.Message, want)
 				}
 			}
 			if !reflect.DeepEqual(gotFields, tt.wantFields) {
@@ -199,9 +226,9 @@ func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_HostnameNotScoped(t *testi
 }
 
 // Without router vhosts the validator raises no hostname warning.
-func TestMtlsAuthValidator_ResolveMtlsAuthForResponse_NoVHosts_NoHostnameWarning(t *testing.T) {
+func TestMtlsAuthValidator_HostnameScopeWarnings_NoVHosts(t *testing.T) {
 	v := NewMtlsAuthValidator(newFakeMtlsCertStore(clientCA("partner-a")), true, false, mtlsAuthTestSchema())
-	_, warnings := v.ResolveMtlsAuthForResponse(*restAPIWithAPILevelPolicies(mtlsPolicy(nil)))
+	warnings := v.HostnameScopeWarnings(*restAPIWithAPILevelPolicies(mtlsPolicy(nil)))
 	for _, w := range warnings {
 		if w.Code == WarningCodeMTLSHostnameNotScoped {
 			t.Fatalf("unexpected %s warning: %+v", w.Code, w)

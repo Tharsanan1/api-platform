@@ -20,11 +20,14 @@ package xds
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 
+	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	tlsinspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -32,8 +35,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
+	anypb "google.golang.org/protobuf/types/known/anypb"
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/constants"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/testutil/pki"
 )
@@ -266,6 +271,38 @@ func TestTranslator_ClientCertificateRequest_Mode(t *testing.T) {
 			relay:    true,
 			wantMode: clientCertEverywhere,
 		},
+		{
+			name:     "gateway-default sentinel as vhosts.main",
+			apis:     []scopeAPI{{uuid: "pay", main: constants.VHostGatewayDefault, mtls: "api"}},
+			wantMode: clientCertEverywhere,
+		},
+		{
+			name:     "gateway-default sentinel as vhosts.sandbox",
+			apis:     []scopeAPI{{uuid: "pay", main: "pay.example.com", sandboxURL: true, sandboxHost: constants.VHostGatewayDefault, mtls: "api"}},
+			wantMode: clientCertEverywhere,
+		},
+		{
+			name:      "sandbox hostname with surrounding whitespace",
+			apis:      []scopeAPI{{uuid: "pay", main: "pay.example.com", sandboxURL: true, sandboxHost: " pay-sandbox.example.com ", mtls: "api"}},
+			wantMode:  clientCertScoped,
+			wantNames: []string{"pay-sandbox.example.com", "pay.example.com"},
+		},
+		{
+			name:     "trailing dot",
+			apis:     []scopeAPI{{uuid: "pay", main: "pay.example.com.", mtls: "api"}},
+			wantMode: clientCertEverywhere,
+		},
+		{
+			name:     "non-DNS characters",
+			apis:     []scopeAPI{{uuid: "pay", main: "pay_api.example.com", mtls: "api"}},
+			wantMode: clientCertEverywhere,
+		},
+		{
+			name:      "uppercase hostname is lower-cased",
+			apis:      []scopeAPI{{uuid: "pay", main: "PAY.Example.COM", mtls: "api"}},
+			wantMode:  clientCertScoped,
+			wantNames: []string{"pay.example.com"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -284,6 +321,34 @@ func TestTranslator_ClientCertificateRequest_Mode(t *testing.T) {
 	}
 }
 
+// A pool entry stored without a role is a client authority, not a relay.
+func TestTranslator_ClientCertificateRequest_EntryWithoutRoleIsClient(t *testing.T) {
+	db := clientPool(t, false)
+	db.certs[0].Role = ""
+	translator := newScopeTestTranslator(t, db)
+
+	got, err := translator.clientCertificateRequest(storedConfigs(scopeAPI{uuid: "pay", main: "pay.example.com", mtls: "api"}))
+	require.NoError(t, err)
+	assert.Equal(t, clientCertScoped, got.mode)
+}
+
+// Scoping follows the rendered configuration, not the stored source.
+func TestTranslator_ClientCertificateRequest_UsesRenderedConfiguration(t *testing.T) {
+	translator := newScopeTestTranslator(t, clientPool(t, false))
+	configs := storedConfigs(scopeAPI{uuid: "pay", main: "pay.example.com", mtls: "api"})
+	source := configs[0].Configuration.(api.RestAPI)
+	source.Spec.Vhosts = &struct {
+		Main    string  `json:"main" yaml:"main"`
+		Sandbox *string `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+	}{Main: `{{ env "PAY_HOST" }}`}
+	configs[0].SourceConfiguration = source
+
+	got, err := translator.clientCertificateRequest(configs)
+	require.NoError(t, err)
+	assert.Equal(t, clientCertScoped, got.mode)
+	assert.Equal(t, []string{"pay.example.com"}, got.serverNames)
+}
+
 // An undeployed mtls-auth API contributes neither asking nor hostnames.
 func TestTranslator_ClientCertificateRequest_UndeployedAPIIgnored(t *testing.T) {
 	translator := newScopeTestTranslator(t, clientPool(t, false))
@@ -299,7 +364,43 @@ func TestTranslator_ClientCertificateRequest_UndeployedAPIIgnored(t *testing.T) 
 	assert.Equal(t, []string{"pay.example.com"}, got.serverNames)
 }
 
-// OFF and EVERYWHERE build the single-chain listener createListener builds.
+// tlsTransportSocket wraps a downstream TLS context in the TLS transport
+// socket, built here rather than by the code under test.
+func tlsTransportSocket(t *testing.T, translator *Translator, requestClientCertificate bool) *core.TransportSocket {
+	t.Helper()
+	tlsCtx, err := translator.createDownstreamTLSContext(requestClientCertificate)
+	require.NoError(t, err)
+	tlsAny, err := anypb.New(tlsCtx)
+	require.NoError(t, err)
+	return &core.TransportSocket{
+		Name:       "envoy.transport_sockets.tls",
+		ConfigType: &core.TransportSocket_TypedConfig{TypedConfig: tlsAny},
+	}
+}
+
+// singleChainHTTPSListener builds the HTTPS listener with one unnamed,
+// unmatched filter chain from the HTTP listener of the same translation: the
+// same address, buffer limit and network filters, on the HTTPS port, with
+// the TLS Inspector and a TLS transport socket that asks for a client
+// certificate when requestClientCertificate is true.
+func singleChainHTTPSListener(t *testing.T, translator *Translator, httpListener *listener.Listener, requestClientCertificate bool) *listener.Listener {
+	t.Helper()
+	want := proto.Clone(httpListener).(*listener.Listener)
+	want.Name = fmt.Sprintf("listener_https_%d", scopeTestHTTPSPort)
+	want.GetAddress().GetSocketAddress().PortSpecifier = &core.SocketAddress_PortValue{PortValue: scopeTestHTTPSPort}
+	inspectorAny, err := anypb.New(&tlsinspectorv3.TlsInspector{})
+	require.NoError(t, err)
+	want.ListenerFilters = []*listener.ListenerFilter{{
+		Name:       "envoy.filters.listener.tls_inspector",
+		ConfigType: &listener.ListenerFilter_TypedConfig{TypedConfig: inspectorAny},
+	}}
+	require.Len(t, want.GetFilterChains(), 1)
+	want.FilterChains[0].TransportSocket = tlsTransportSocket(t, translator, requestClientCertificate)
+	return want
+}
+
+// OFF and EVERYWHERE build one filter chain with no name and no match, whose
+// TLS context asks every connection for a client certificate or none.
 func TestTranslator_HTTPSListener_SingleChainModes(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -310,14 +411,18 @@ func TestTranslator_HTTPSListener_SingleChainModes(t *testing.T) {
 		{name: "off", apis: []scopeAPI{{uuid: "plain", main: "public.example.com"}}},
 		{name: "everywhere by default hostname", apis: []scopeAPI{{uuid: "pay", mtls: "api"}}, asks: true},
 		{name: "everywhere by relay", apis: []scopeAPI{{uuid: "pay", main: "pay.example.com", mtls: "api"}}, relay: true, asks: true},
+		{name: "everywhere by gateway-default sentinel", apis: []scopeAPI{{uuid: "pay", main: constants.VHostGatewayDefault, mtls: "api"}}, asks: true},
+		{name: "everywhere by trailing dot", apis: []scopeAPI{{uuid: "pay", main: "pay.example.com.", mtls: "api"}}, asks: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			translator := newScopeTestTranslator(t, clientPool(t, tt.relay))
-			got := translateHTTPSListener(t, translator, storedConfigs(tt.apis...))
-
-			want, _, err := translator.createListener(nil, true, tt.asks)
+			resources, err := translator.TranslateConfigs(storedConfigs(tt.apis...), "")
 			require.NoError(t, err)
+			got := findListenerByPort(t, resources[resource.ListenerType], scopeTestHTTPSPort)
+			httpListener := findListenerByPort(t, resources[resource.ListenerType], translator.routerConfig.ListenerPort)
+
+			want := singleChainHTTPSListener(t, translator, httpListener, tt.asks)
 			assert.True(t, proto.Equal(want, got), "HTTPS listener differs from the single-chain listener")
 			require.Len(t, got.GetFilterChains(), 1)
 			assert.Nil(t, got.GetFilterChains()[0].GetFilterChainMatch())
@@ -344,9 +449,7 @@ func TestTranslator_HTTPSListener_Scoped(t *testing.T) {
 	assert.Nil(t, got.GetDefaultFilterChain())
 
 	t.Run("asking chain carries the asking TLS context", func(t *testing.T) {
-		want, err := translator.downstreamTransportSocket(true)
-		require.NoError(t, err)
-		assert.True(t, proto.Equal(want, asking.GetTransportSocket()))
+		assert.True(t, proto.Equal(tlsTransportSocket(t, translator, true), asking.GetTransportSocket()))
 
 		tlsCtx := chainTLSContext(t, asking)
 		assert.Equal(t, SecretNameDownstreamClientCA, tlsCtx.GetCommonTlsContext().GetValidationContextSdsSecretConfig().GetName())
@@ -357,9 +460,7 @@ func TestTranslator_HTTPSListener_Scoped(t *testing.T) {
 	})
 
 	t.Run("default chain never asks and resumes sessions", func(t *testing.T) {
-		want, err := translator.downstreamTransportSocket(false)
-		require.NoError(t, err)
-		assert.True(t, proto.Equal(want, fallback.GetTransportSocket()))
+		assert.True(t, proto.Equal(tlsTransportSocket(t, translator, false), fallback.GetTransportSocket()))
 
 		tlsCtx := chainTLSContext(t, fallback)
 		assert.Nil(t, tlsCtx.GetCommonTlsContext().GetValidationContextType())
@@ -488,4 +589,25 @@ func TestTranslator_ClientCertificateRequest_LogsModeChange(t *testing.T) {
 	translateHTTPSListener(t, translator, nil)
 	require.Len(t, changes(), 3)
 	assert.Contains(t, changes()[2], "mode=OFF")
+}
+
+// A listener build that fails neither logs nor records the new mode, so the
+// next successful build logs it.
+func TestTranslator_ClientCertificateRequest_FailedBuildNotRecorded(t *testing.T) {
+	var buf bytes.Buffer
+	translator := newScopeTestTranslator(t, clientPool(t, false))
+	translator.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	scoped := storedConfigs(scopeAPI{uuid: "pay", main: "pay.example.com", mtls: "api"})
+
+	scriptPath := translator.routerConfig.LuaScriptPath
+	translator.routerConfig.LuaScriptPath = t.TempDir() + "/missing.lua"
+	_, err := translator.TranslateConfigs(scoped, "")
+	require.Error(t, err)
+	assert.NotContains(t, buf.String(), "client certificate request changed")
+	assert.Equal(t, clientCertOff, translator.lastClientCertRequest.mode)
+
+	translator.routerConfig.LuaScriptPath = scriptPath
+	translateHTTPSListener(t, translator, scoped)
+	assert.Equal(t, 1, strings.Count(buf.String(), "client certificate request changed"))
+	assert.Contains(t, buf.String(), "mode=SCOPED")
 }

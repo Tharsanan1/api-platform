@@ -216,8 +216,17 @@ func (s *RestAPIService) Create(params CreateParams) (*CreateResult, error) {
 // echo of a successful deploy without changing what is persisted.
 func (s *RestAPIService) ResolveMtlsAuthForResponse(cfg api.RestAPI) (api.RestAPI, []clientca.Warning) {
 	v := config.NewMtlsAuthValidator(s.db, s.routerConfig.HTTPSEnabled,
-		s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny, nil).WithVHosts(s.routerConfig.VHosts)
+		s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny, nil)
 	return v.ResolveMtlsAuthForResponse(cfg)
+}
+
+// ResolveHostnameScopeWarnings computes the MTLS_HOSTNAME_NOT_SCOPED warnings
+// of a successful deploy from rendered, the configuration the translator
+// builds the HTTPS listener from.
+func (s *RestAPIService) ResolveHostnameScopeWarnings(rendered api.RestAPI) []clientca.Warning {
+	v := config.NewMtlsAuthValidator(s.db, s.routerConfig.HTTPSEnabled,
+		s.routerConfig.DownstreamTLS.ClientCertificateHeader.TrustAny, nil).WithVHosts(s.routerConfig.VHosts)
+	return v.HostnameScopeWarnings(rendered)
 }
 
 // ResolveUpstreamTLSWarnings computes the tls-block warnings of a successful

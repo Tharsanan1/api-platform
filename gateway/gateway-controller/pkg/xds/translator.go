@@ -971,7 +971,6 @@ func (t *Translator) TranslateConfigs(
 	if err != nil {
 		return nil, err
 	}
-	t.logClientCertRequestChange(log, certRequest)
 	requestClientCert := certRequest.mode != clientCertOff
 
 	// Variable to hold the shared route configuration (created once, used by both listeners)
@@ -997,6 +996,7 @@ func (t *Translator) TranslateConfigs(
 		}
 		log.Info("HTTPS listener created successfully",
 			slog.String("listener_name", httpsListener.GetName()))
+		t.logClientCertRequestChange(log, certRequest)
 		listeners = append(listeners, httpsListener)
 	} else {
 		log.Info("HTTPS is disabled, skipping HTTPS listener creation")
@@ -2828,16 +2828,13 @@ func (t *Translator) mtlsAuthServerNames(cfg *models.StoredConfig) (names []stri
 	return names, true
 }
 
-// logClientCertRequestChange logs the HTTPS listener's client certificate
-// request mode when it differs from the previous translation.
+// logClientCertRequestChange logs the client certificate request of a built
+// HTTPS listener when it differs from the previous one.
 func (t *Translator) logClientCertRequestChange(log *slog.Logger, req clientCertRequest) {
 	if req.equal(t.lastClientCertRequest) {
 		return
 	}
 	t.lastClientCertRequest = req
-	if !t.routerConfig.HTTPSEnabled {
-		return
-	}
 	log.Info("HTTPS listener client certificate request changed",
 		slog.String("mode", req.mode.String()),
 		slog.Int("hostname_count", len(req.serverNames)))

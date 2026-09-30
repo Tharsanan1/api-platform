@@ -360,7 +360,7 @@ func (cs *CertStore) GetClientCAPool() (bundle []byte, hasRelay bool, err error)
 
 	var buf bytes.Buffer
 	for _, cert := range certs {
-		if cert.Role == models.CertificateRoleRelay {
+		if cert.EffectiveRole() == models.CertificateRoleRelay {
 			hasRelay = true
 		}
 		buf.Write(cert.Certificate)

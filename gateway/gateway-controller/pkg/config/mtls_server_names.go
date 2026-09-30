@@ -60,17 +60,16 @@ func RestAPIHasSandbox(spec api.APIConfigData) bool {
 
 // RestAPIVhosts resolves the vhosts a REST API's routes are served on. main
 // holds every vhosts.main entry, or the main default when none is set; the
-// first is the primary vhost. sandbox is vhosts.sandbox or the sandbox
-// default, and applies only when hasSandbox is true. The gateway-default
-// sentinel resolves to the matching default.
+// first is the primary vhost. sandbox is vhosts.sandbox as written, or the
+// sandbox default when it is blank, and applies only when hasSandbox is true.
 func RestAPIVhosts(spec api.APIConfigData, vhosts VHostsConfig) (main []string, sandbox string, hasSandbox bool) {
 	main = []string{vhosts.Main.Default}
 	sandbox = vhosts.Sandbox.Default
 	if spec.Vhosts != nil {
-		if parsed := SplitVhosts(spec.Vhosts.Main); len(parsed) > 0 && !(len(parsed) == 1 && parsed[0] == constants.VHostGatewayDefault) {
+		if parsed := SplitVhosts(spec.Vhosts.Main); len(parsed) > 0 {
 			main = parsed
 		}
-		if s := spec.Vhosts.Sandbox; s != nil && strings.TrimSpace(*s) != "" && *s != constants.VHostGatewayDefault {
+		if s := spec.Vhosts.Sandbox; s != nil && strings.TrimSpace(*s) != "" {
 			sandbox = *s
 		}
 	}
@@ -101,19 +100,25 @@ func (v VHostsConfig) Domains(vhost string) []string {
 // ServerName returns the TLS server name (SNI) a client reaching a
 // dedicated vhost sends, lower-cased and without a port. ok is false when the
 // vhost cannot be told apart on SNI: a main or sandbox default, which every
-// API without its own hostname shares; an IP address, which clients never
-// send as SNI; and anything but an exact DNS name or a single leading "*."
-// wildcard.
+// API without its own hostname shares; the gateway-default sentinel, which
+// stands for a default; an IP address, which clients never send as SNI; and
+// anything but an exact DNS name or one with a single leading "*." label.
+//
+// Envoy lower-cases both filter_chain_match.server_names and the client's
+// SNI before matching, so a lower-cased name matches a client that sends it
+// in any case.
 func (v VHostsConfig) ServerName(vhost string) (name string, ok bool) {
 	vhost = strings.TrimSpace(vhost)
-	if vhost == strings.TrimSpace(v.Main.Default) || vhost == strings.TrimSpace(v.Sandbox.Default) {
+	switch vhost {
+	case constants.VHostGatewayDefault, strings.TrimSpace(v.Main.Default), strings.TrimSpace(v.Sandbox.Default):
 		return "", false
 	}
 	return sniName(vhost)
 }
 
 // sniName converts a hostname, optionally with a port, to the server name a
-// client sends.
+// client sends. A trailing dot is not scopable: clients send SNI without it,
+// so the vhost is left to the listener that asks every connection.
 func sniName(domain string) (string, bool) {
 	host := strings.ToLower(strings.TrimSpace(domain))
 	if strings.Contains(host, ":") {
@@ -126,9 +131,29 @@ func sniName(domain string) (string, bool) {
 	if host == "" || net.ParseIP(host) != nil {
 		return "", false
 	}
-	rest := strings.TrimPrefix(host, "*.")
-	if rest == "" || strings.Contains(rest, "*") {
+	for i, label := range strings.Split(host, ".") {
+		if i == 0 && label == "*" {
+			continue
+		}
+		if !isDNSLabel(label) {
+			return "", false
+		}
+	}
+	if host == "*" {
 		return "", false
 	}
 	return host, true
+}
+
+// isDNSLabel reports whether label is a non-empty run of a-z, 0-9 and "-".
+func isDNSLabel(label string) bool {
+	if label == "" {
+		return false
+	}
+	for _, c := range label {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
 }

@@ -103,8 +103,8 @@ func NewMtlsAuthValidator(store MtlsAuthCertificateStore, httpsEnabled, headerTr
 	}
 }
 
-// WithVHosts sets router.vhosts, which the MTLS_HOSTNAME_NOT_SCOPED warning
-// resolves an API's hostnames against. Without it that warning is not raised.
+// WithVHosts sets router.vhosts, which HostnameScopeWarnings resolves an
+// API's hostnames against. Without it that warning is not raised.
 func (v *MtlsAuthValidator) WithVHosts(vhosts VHostsConfig) *MtlsAuthValidator {
 	v.vhosts = &vhosts
 	return v
@@ -678,8 +678,6 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 	}
 	apiConfig.Spec.Operations = newOps
 
-	warnings = append(warnings, v.hostnameScopeWarnings(apiConfig.Spec)...)
-
 	if v.headerTrustAny {
 		warnings = append(warnings, clientca.Warning{
 			Code:    WarningCodeHeaderCertBypassActive,
@@ -691,14 +689,15 @@ func (v *MtlsAuthValidator) ResolveMtlsAuthForResponse(apiConfig api.RestAPI) (a
 	return apiConfig, warnings
 }
 
-// hostnameScopeWarnings reports MTLS_HOSTNAME_NOT_SCOPED for each of
-// vhosts.main and vhosts.sandbox that resolves to a hostname the HTTPS
-// listener cannot scope its client certificate request to.
-func (v *MtlsAuthValidator) hostnameScopeWarnings(spec api.APIConfigData) []clientca.Warning {
-	if !v.httpsEnabled || v.vhosts == nil {
+// HostnameScopeWarnings reports MTLS_HOSTNAME_NOT_SCOPED for each of
+// vhosts.main and vhosts.sandbox of an API attaching mtls-auth that resolves
+// to a hostname the HTTPS listener cannot scope its client certificate
+// request to. Pass the rendered configuration the translator uses.
+func (v *MtlsAuthValidator) HostnameScopeWarnings(apiConfig api.RestAPI) []clientca.Warning {
+	if !v.httpsEnabled || v.vhosts == nil || collectMTLSAuthOccurrences(&apiConfig) == nil {
 		return nil
 	}
-	mainVhosts, sandbox, hasSandbox := RestAPIVhosts(spec, *v.vhosts)
+	mainVhosts, sandbox, hasSandbox := RestAPIVhosts(apiConfig.Spec, *v.vhosts)
 	var warnings []clientca.Warning
 	for _, vh := range mainVhosts {
 		if _, ok := v.vhosts.ServerName(vh); !ok {
@@ -718,8 +717,9 @@ func hostnameNotScopedWarning(field, setting string) clientca.Warning {
 	return clientca.Warning{
 		Code:  WarningCodeMTLSHostnameNotScoped,
 		Field: field,
-		Message: "this API has no dedicated hostname, so the HTTPS listener asks every connection for a client certificate; " +
-			"give it its own " + setting + " (an exact hostname or a *. wildcard) to limit that to its hostname",
+		Message: "this API is served on a hostname the HTTPS listener cannot match (a gateway default, an IP address, " +
+			"or a pattern other than an exact name or a leading *.), so the listener asks every connection for a " +
+			"client certificate; give it its own " + setting + " to limit that to its hostname",
 	}
 }
 

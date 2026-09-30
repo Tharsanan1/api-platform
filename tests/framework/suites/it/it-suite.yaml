@@ -187,6 +187,22 @@ blocks:
         features:
           - features/apiportal_foreign_org_login.feature
 
+  # Mutual TLS scenarios change the client authority pool and whether the HTTPS listener
+  # asks for a certificate, which is state of the whole gateway, so runners take turns.
+  - name: gateway-mtls
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls.toml
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: mtls-auth
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_auth.feature
+
   - name: gateway-core
     parallel: 7
     components:

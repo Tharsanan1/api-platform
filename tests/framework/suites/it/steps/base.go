@@ -194,6 +194,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.echoedHeaderEquals)
 	sc.Step(`^the response should contain echoed header "([^"]*)" with exact value:$`,
 		b.echoedHeaderEqualsDoc)
+	sc.Step(`^the response should contain echoed header "([^"]*)" containing "([^"]*)"$`,
+		b.echoedHeaderContains)
 	sc.Step(`^the response should not contain echoed header "([^"]*)"$`, b.echoedHeaderAbsent)
 	sc.Step(`^the JSON response should have field "([^"]*)"$`, b.jsonFieldExists)
 	sc.Step(`^the JSON response field "([^"]*)" should not exist$`, b.jsonFieldAbsent)
@@ -1185,40 +1187,60 @@ func (b *Base) echoedHeaderAbsent(ctx context.Context, name string) error {
 }
 
 func (b *Base) assertEchoedHeader(ctx context.Context, name, want string) error {
-	resp, err := httpx.Published(ctx)
+	got, resolved, err := b.echoedHeaderValue(ctx, name, want)
 	if err != nil {
 		return err
+	}
+	if got != resolved {
+		return fmt.Errorf("expected echoed header %q to be %q, got %q", name, resolved, got)
+	}
+	return nil
+}
+
+// echoedHeaderContains asserts the gateway forwarded a header upstream whose value contains
+// the given text.
+func (b *Base) echoedHeaderContains(ctx context.Context, name, want string) error {
+	got, resolved, err := b.echoedHeaderValue(ctx, name, want)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(got, resolved) {
+		return fmt.Errorf("expected echoed header %q to contain %q, got %q", name, resolved, got)
+	}
+	return nil
+}
+
+// echoedHeaderValue returns the first value of an echoed header and the expanded expectation.
+func (b *Base) echoedHeaderValue(ctx context.Context, name, want string) (string, string, error) {
+	resp, err := httpx.Published(ctx)
+	if err != nil {
+		return "", "", err
 	}
 	resolved, err := stepscommon.Expand(ctx, want)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	headers, err := echoedHeaders(resp)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	value, found := lookupEchoed(headers, name)
 	if !found {
-		return fmt.Errorf("expected echoed header %q to exist in response", name)
+		return "", "", fmt.Errorf("expected echoed header %q to exist in response", name)
 	}
 
-	// A JSON echo may render a header as a string or an array; compare the first value.
+	// A JSON echo may render a header as a string or an array; use the first value.
 	switch v := value.(type) {
 	case string:
-		if v != resolved {
-			return fmt.Errorf("expected echoed header %q to be %q, got %q", name, resolved, v)
-		}
+		return v, resolved, nil
 	case []any:
 		if len(v) == 0 {
-			return fmt.Errorf("expected echoed header %q to be %q, got empty array", name, resolved)
+			return "", "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
 		}
-		if got := fmt.Sprintf("%v", v[0]); got != resolved {
-			return fmt.Errorf("expected echoed header %q to be %q, got %q", name, resolved, got)
-		}
+		return fmt.Sprintf("%v", v[0]), resolved, nil
 	default:
-		return fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
+		return "", "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
 	}
-	return nil
 }
 
 // echoedHeaders pulls the request headers the backend reflected back in its JSON body.

@@ -290,6 +290,34 @@ func TestListCertificates_Success(t *testing.T) {
 	assert.Len(t, resp.Certificates, 2)
 }
 
+func TestListCertificates_UnknownUsageFilter_Rejected(t *testing.T) {
+	for _, usage := range []string{"client", "backend"} {
+		t.Run(usage, func(t *testing.T) {
+			mockDB := NewMockStorage()
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			server := &APIServer{db: mockDB, logger: logger, systemConfig: certificateTestConfig(), clientAuthorities: testClientAuthorityPublisher(mockDB)}
+
+			handler := newCertListHandler(server)
+			req := httptest.NewRequest(http.MethodGet, "/certificates?usage="+usage, nil)
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			var resp management.ErrorResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			assert.Equal(t, "invalid usage filter", resp.Message)
+			require.NotNil(t, resp.Errors)
+			require.Len(t, *resp.Errors, 1)
+			fieldErr := (*resp.Errors)[0]
+			require.NotNil(t, fieldErr.Field)
+			require.NotNil(t, fieldErr.Message)
+			assert.Equal(t, "usage", *fieldErr.Field)
+			assert.Equal(t, "usage must be upstream, downstream or identity", *fieldErr.Message)
+		})
+	}
+}
+
 func TestListCertificates_EmptyList(t *testing.T) {
 	mockDB := NewMockStorage()
 	mockDB.certs = []*models.StoredCertificate{}

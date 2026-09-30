@@ -19,9 +19,11 @@ curl -X GET http://localhost:9090/api/management/v1/certificates \
 ```
 
 Retrieve custom TLS certificates currently loaded in the certificate store.
-With usage: upstream (or no usage filter), these are used for verifying
-HTTPS upstream connections. With usage: downstream, these are the pooled
-client certificate authorities used to authenticate mutual-TLS callers.
+Without a filter, every certificate is listed. With usage: upstream, the
+certificates used to verify HTTPS backends; with usage: downstream, the
+pooled client certificate authorities that authenticate mutual-TLS
+callers; with usage: identity, the gateway identities presented to
+backends.
 
 ### Authentication
 
@@ -103,8 +105,10 @@ curl -X POST http://localhost:9090/api/management/v1/certificates \
 Upload a new TLS certificate (PEM format) to the Gateway. The certificate is
 loaded dynamically without restarting the Gateway. With usage: upstream (the
 default), it is used for verifying HTTPS upstream connections. With usage:
-downstream, it becomes a pooled client certificate authority used to authenticate
-mutual-TLS callers; the two purposes never share a trust bundle.
+downstream, it becomes a pooled client certificate authority used to
+authenticate mutual-TLS callers. With usage: identity, it is a gateway
+identity presented to backends. Each usage has its own trust bundle or
+secret; they are never mixed.
 
 > Payload
 

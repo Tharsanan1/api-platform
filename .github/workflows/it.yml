@@ -97,7 +97,7 @@ jobs:
           flags: platform-api-unit
 
   integration:
-    name: Integration suite (${{ matrix.leg }})
+    name: Integration suite (${{ matrix.leg }}, ${{ matrix.shard }})
     needs: unit
     runs-on: ubuntu-24.04
     env:
@@ -109,10 +109,27 @@ jobs:
         include:
           # The source-built coverage instrumented Gateway.
           - leg: gateway-latest
-            suite_flags: '-coverage'
+            shard: mtls-a
+            suite_flags: '-coverage -blocks=gateway-mtls,gateway-mtls-ha'
+          - leg: gateway-latest
+            shard: mtls-b
+            suite_flags: '-coverage -blocks=gateway-mtls-outbound,gateway-mtls-trust-any,gateway-mtls-hostnames,gateway-mtls-hostnames-required,gateway-mtls-hostnames-all-connections,gateway-mtls-hostnames-all-connections-required'
+          - leg: gateway-latest
+            shard: mtls-c
+            suite_flags: '-coverage -blocks=gateway-mtls-observability,gateway-mtls-default-identity-off,gateway-mtls-default-identity-on'
+          - leg: gateway-latest
+            shard: core
+            suite_flags: '-coverage -blocks=gateway-core'
+          - leg: gateway-latest
+            shard: rest
+            suite_flags: '-coverage -skip-blocks=gateway-mtls,gateway-mtls-ha,gateway-mtls-outbound,gateway-mtls-trust-any,gateway-mtls-hostnames,gateway-mtls-hostnames-required,gateway-mtls-hostnames-all-connections,gateway-mtls-hostnames-all-connections-required,gateway-mtls-observability,gateway-mtls-default-identity-off,gateway-mtls-default-identity-on,gateway-core'
           # The released 1.2.0 Gateway.
           - leg: gateway-1.2.0
-            suite_flags: '-gateway-version=1.2.0'
+            shard: core
+            suite_flags: '-gateway-version=1.2.0 -blocks=gateway-core'
+          - leg: gateway-1.2.0
+            shard: rest
+            suite_flags: '-gateway-version=1.2.0 -skip-blocks=gateway-core'
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -162,7 +179,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: container-logs-${{ matrix.leg }}
+          name: container-logs-${{ matrix.leg }}-${{ matrix.shard }}
           path: tests/framework/suites/it/logs-out/**/*.log
           if-no-files-found: warn
           include-hidden-files: true
@@ -176,7 +193,7 @@ jobs:
         if: matrix.leg == 'gateway-latest'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: coverage-reports-${{ matrix.leg }}
+          name: coverage-reports-${{ matrix.leg }}-${{ matrix.shard }}
           # The whole report tree: splitting by extension dropped the LCOV files Codecov
           # actually consumes and the CSS/JS/images the HTML reports need to render. The
           # raw per-run inputs live under a dot-prefixed .run-* directory, which

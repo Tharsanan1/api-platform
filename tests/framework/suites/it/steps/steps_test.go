@@ -19,20 +19,18 @@
 package steps
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sync"
+	"sort"
 	"testing"
 
 	"github.com/cucumber/godog"
-	"github.com/cucumber/godog/formatters"
-	messages "github.com/cucumber/messages/go/v34"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
@@ -323,39 +321,37 @@ func mtlsFeatureFiles(t *testing.T, featureRoot string) []string {
 	return append(paths, certificates)
 }
 
-// unresolvedSteps records every step godog could not resolve to exactly one registered
-// definition. godog reports the definition it matched before it runs a scenario hook, and
-// reports none for a step that is undefined or, in strict mode, matches two patterns.
-type unresolvedSteps struct {
-	*godog.BaseFmt
-	mu    sync.Mutex
-	steps []string
-}
-
-func (u *unresolvedSteps) Defined(pickle *messages.Pickle, step *messages.PickleStep, def *formatters.StepDefinition) {
-	if def != nil {
-		return
+// unresolvedSteps reads godog's event stream of a run and returns the location of every step
+// that started without a matching definition. godog announces the definition it resolved
+// before it runs a step, and announces none for a step that is undefined or, in strict mode,
+// matches two patterns. Counting per location keeps the rows of a scenario outline apart from
+// the step they share.
+func unresolvedSteps(t *testing.T, events []byte) []string {
+	t.Helper()
+	started := map[string]int{}
+	found := map[string]int{}
+	decoder := json.NewDecoder(bytes.NewReader(events))
+	for decoder.More() {
+		var event struct {
+			Event    string `json:"event"`
+			Location string `json:"location"`
+		}
+		require.NoError(t, decoder.Decode(&event))
+		switch event.Event {
+		case "TestStepStarted":
+			started[event.Location]++
+		case "StepDefinitionFound":
+			found[event.Location]++
+		}
 	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.steps = append(u.steps, fmt.Sprintf("%s: %s", pickle.Name, step.Text))
-}
-
-// stepResolution is the formatter the check installs; it hands back the recorder of the
-// run in progress.
-var (
-	stepResolutionMu sync.Mutex
-	stepResolution   *unresolvedSteps
-)
-
-func init() {
-	godog.Format("step-resolution", "records steps that match no pattern or more than one",
-		func(suite string, out io.Writer) formatters.Formatter {
-			stepResolutionMu.Lock()
-			defer stepResolutionMu.Unlock()
-			stepResolution = &unresolvedSteps{BaseFmt: godog.NewBaseFmt(suite, out)}
-			return stepResolution
-		})
+	var unresolved []string
+	for location, count := range started {
+		if found[location] < count {
+			unresolved = append(unresolved, location)
+		}
+	}
+	sort.Strings(unresolved)
+	return unresolved
 }
 
 // TestMTLSFeatureStepsAreDefined matches every step of every mutual TLS feature against the
@@ -370,6 +366,7 @@ func TestMTLSFeatureStepsAreDefined(t *testing.T) {
 			suite, err := New(&frameworkruntime.Topology{}, featureRoot)
 			require.NoError(t, err)
 
+			var events bytes.Buffer
 			godog.TestSuite{
 				ScenarioInitializer: func(sc *godog.ScenarioContext) {
 					suite.Register(sc)
@@ -377,14 +374,11 @@ func TestMTLSFeatureStepsAreDefined(t *testing.T) {
 						return ctx, errors.New("steps are matched, not run")
 					})
 				},
-				Options: &godog.Options{Format: "step-resolution", Output: io.Discard, NoColors: true, Strict: true, Paths: []string{path}},
+				Options: &godog.Options{Format: "events", Output: &events, NoColors: true, Strict: true, Paths: []string{path}},
 			}.Run()
 
-			stepResolutionMu.Lock()
-			recorded := stepResolution
-			stepResolutionMu.Unlock()
-			require.NotNil(t, recorded)
-			require.Empty(t, recorded.steps, "steps that match no pattern or more than one")
+			require.NotZero(t, events.Len(), "godog wrote no events")
+			require.Empty(t, unresolvedSteps(t, events.Bytes()), "steps that match no pattern or more than one")
 		})
 	}
 }

@@ -40,8 +40,8 @@ import (
 )
 
 // listenerHoldWindow is how long, after the gateway has applied the client authority pool, the
-// HTTPS listener must keep not asking for a client certificate.
-const listenerHoldWindow = 5 * time.Second
+// HTTPS listener must keep not asking for a client certificate. It covers one listener drain.
+const listenerHoldWindow = 3 * time.Second
 
 func (g *Gateway) registerMTLSListenerSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the certificate fixtures? "([^"]*)" (?:is|are) pooled as "([^"]*)"$`, g.poolCertificateFixturesWithoutUsage)

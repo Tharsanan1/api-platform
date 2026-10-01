@@ -2021,13 +2021,17 @@ func (g *Gateway) analyticsEventCountAtLeast(ctx context.Context, want int) erro
 	return nil
 }
 
+// analyticsQuietWindow is how long the collector's count must stay unchanged for the events
+// to count as settled. It covers one analytics publish interval.
+const analyticsQuietWindow = 2 * time.Second
+
 // settleAnalyticsEventCount waits for the collector's count to stop changing for a quiet
 // period. A bare threshold poll would return the instant the count first reaches a target and
 // could miss a late-arriving duplicate event landing just after - this is what actually
 // verifies "no more are coming", used both to check an exact count and to drain a prior
 // request's own publish delay before a scenario resets the collector for its real assertion.
 func (g *Gateway) settleAnalyticsEventCount(ctx context.Context) (retry.Settled, error) {
-	settled, err := retry.SettledCount(ctx, retry.Options{Timeout: 12 * time.Second}, 3*time.Second,
+	settled, err := retry.SettledCount(ctx, retry.Options{Timeout: 12 * time.Second}, analyticsQuietWindow,
 		func(ctx context.Context) (int, error) { return g.analyticsEventCount(ctx) })
 	if err != nil {
 		return settled, err

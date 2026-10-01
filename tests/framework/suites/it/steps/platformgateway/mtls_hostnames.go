@@ -45,8 +45,9 @@ const (
 )
 
 const (
-	// notAskedHold is how long a hostname must stay unasked once it first is not.
-	notAskedHold = 5 * time.Second
+	// notAskedHold is how long a hostname must stay unasked once it first is not. It covers one
+	// listener drain.
+	notAskedHold = 3 * time.Second
 	// notAskedInterval is the gap between handshakes while a hostname must stay unasked.
 	notAskedInterval = 500 * time.Millisecond
 	// keptAliveTimeout bounds one request on a kept-alive connection.

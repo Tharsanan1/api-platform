@@ -49,6 +49,7 @@ func (g *Gateway) registerDefaultIdentitySteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I remove the gateway identity "([^"]*)"$`, g.deleteGatewayIdentity)
 	sc.Step(`^the gateway identity listing should show role default only on "([^"]*)"$`, g.listingShowsDefaultOnly)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until the backend sees (.+)$`, g.sendUntilBackendSees)
+	sc.Step(`^I send (\d+) "([^"]*)" requests to "([^"]*)" and the backend sees (.+) in every response$`, g.sendHoldingBackendView)
 }
 
 // ── Gateway identities ─────────────────────────────────────────────────────────
@@ -401,4 +402,37 @@ func (g *Gateway) sendUntilBackendSees(ctx context.Context, method, path, phrase
 			}
 			return judgeBackendResponse(resp, want, inBetween)
 		})
+}
+
+// sendHoldingBackendView sends the request n times and requires every response to come from
+// the backend and show the view the phrase names. Nothing is tolerated: the first response
+// that differs fails, so a change that appears late is caught.
+func (g *Gateway) sendHoldingBackendView(ctx context.Context, n int, method, path, phrase string) error {
+	if n <= 0 {
+		return fmt.Errorf("the request count must be positive, got %d", n)
+	}
+	want, err := parseBackendView(phrase, func() (string, error) { return g.listenerSubject(ctx) })
+	if err != nil {
+		return err
+	}
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	endpoint, err := g.gatewayURL(resolved)
+	if err != nil {
+		return err
+	}
+	method = strings.ToUpper(method)
+	headers := g.scenarioHeaders(ctx)
+	for i := 1; i <= n; i++ {
+		resp, sendErr := g.funnel.Send(ctx, httpx.Request{Method: method, URL: endpoint, Headers: headers, Host: g.requestHost(ctx)})
+		if sendErr != nil {
+			return fmt.Errorf("request %d of %d to %s: %w", i, n, endpoint, sendErr)
+		}
+		if err := judgeBackendResponse(resp, want, nil); err != nil {
+			return fmt.Errorf("request %d of %d: %s", i, n, err.Error())
+		}
+	}
+	return nil
 }

@@ -160,3 +160,49 @@ Feature: Asking every connection for a client certificate
     When I send a "GET" request over HTTPS to "${CTX:mtlsContext}/${CTX:mtlsApiVersion}/anything" with client certificate "client-valid"
     Then the response status code should be 200
     And the HTTPS connection should have been asked for a client certificate
+
+  Scenario: A second connection never resumes a TLS session on any hostname while every connection is asked
+    Given the certificate fixture "ca-a" is pooled as "${CTX:caA}" with usage "downstream"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:mtlsApiName} |
+      | spec.displayName       | ${CTX:mtlsApiName} |
+      | spec.version           | ${CTX:mtlsApiVersion} |
+      | spec.context           | ${CTX:mtlsContext}/$version |
+      | spec.vhosts.main       | ${CTX:mtlsLabel}.example |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.policies          | [{"name":"mtls-auth","version":"v1","params":{"accept":[{"ca":"${CTX:caA}"}]}}] |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:publicApiName} |
+      | spec.displayName       | ${CTX:publicApiName} |
+      | spec.version           | ${CTX:publicApiVersion} |
+      | spec.context           | ${CTX:publicContext}/$version |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    And I set request host to "${CTX:mtlsLabel}.example"
+    And I send a "GET" request to "${CTX:mtlsContext}/${CTX:mtlsApiVersion}/anything" until the route answers 401
+    And I set request host to "${CTX:publicLabel}.example"
+    And I send a "GET" request to "${CTX:publicContext}/${CTX:publicApiVersion}/anything" until the route answers 200
+    And a TLS connection with server name "${CTX:publicLabel}.example" should be asked for a client certificate
+    Given HTTPS requests send server name "${CTX:publicLabel}.example"
+    And I set request host to "${CTX:publicLabel}.example"
+    When I send a "GET" request over HTTPS to "${CTX:publicContext}/${CTX:publicApiVersion}/anything" with client certificate "client-valid" on a resumable TLS session
+    Then the response status code should be 200
+    And the HTTPS connection should have been asked for a client certificate
+    When I send a "GET" request over HTTPS to "${CTX:publicContext}/${CTX:publicApiVersion}/anything" on a new connection from the same TLS session cache
+    Then the response status code should be 200
+    And the gateway should have run a full TLS handshake
+    And the HTTPS connection should have been asked for a client certificate
+    Given HTTPS requests send server name "${CTX:mtlsLabel}.example"
+    And I set request host to "${CTX:mtlsLabel}.example"
+    When I send a "GET" request over HTTPS to "${CTX:mtlsContext}/${CTX:mtlsApiVersion}/anything" with client certificate "client-valid" on a resumable TLS session
+    Then the response status code should be 200
+    And the HTTPS connection should have been asked for a client certificate
+    When I send a "GET" request over HTTPS to "${CTX:mtlsContext}/${CTX:mtlsApiVersion}/anything" on a new connection from the same TLS session cache
+    Then the response status code should be 200
+    And the gateway should have run a full TLS handshake
+    And the HTTPS connection should have been asked for a client certificate

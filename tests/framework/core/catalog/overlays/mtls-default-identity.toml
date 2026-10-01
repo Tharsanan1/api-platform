@@ -3,6 +3,11 @@
 [router.upstream.tls]
 present_default_identity = true
 
+# JSON access logs carry the TLS fields of each request.
+[router.access_logs]
+enabled = true
+format = "json"
+
 # The controller propagates a change to the runtime when it next polls the event hub.
 [controller.event_hub]
 poll_interval = "200ms"

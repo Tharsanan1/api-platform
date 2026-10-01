@@ -54,6 +54,10 @@ const HeaderClientSubject = "X-Client-Subject"
 // client certificate verified against the backend's client authorities.
 const HeaderClientVerified = "X-Client-Verified"
 
+// HeaderCloseConnection, set to "true" on a request, makes the backend close the connection
+// after answering, so the next request reaches it on a connection dialled afresh.
+const HeaderCloseConnection = "X-Close-Connection"
+
 // Container ports of the backends.
 const (
 	PortA         = 8443
@@ -194,6 +198,9 @@ type optionalAnswer struct {
 
 func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if r.Header.Get(HeaderCloseConnection) == "true" {
+		w.Header().Set("Connection", "close")
+	}
 	if s.optional {
 		var presented string
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {

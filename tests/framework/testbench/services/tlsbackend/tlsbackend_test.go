@@ -286,6 +286,26 @@ func TestOptionalBackendSendsTheHeaderAndBodyFieldWhenEmpty(t *testing.T) {
 	require.JSONEq(t, `{"backend":"optional","client":"","verified":false}`, rec.Body.String())
 }
 
+func TestBackendClosesTheConnectionOnlyWhenAsked(t *testing.T) {
+	set := fixtures(t)
+	for _, optional := range []bool{false, true} {
+		b := backend(t, set, "closing", "backend-server-a", "ca-a")
+		b.Optional = optional
+		svc, err := New(b)
+		require.NoError(t, err)
+
+		plain := httptest.NewRecorder()
+		svc.Handler().ServeHTTP(plain, httptest.NewRequest(http.MethodGet, "/", nil))
+		require.Empty(t, plain.Header().Get("Connection"), "optional=%t", optional)
+
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request.Header.Set(HeaderCloseConnection, "true")
+		closing := httptest.NewRecorder()
+		svc.Handler().ServeHTTP(closing, request)
+		require.Equal(t, "close", closing.Header().Get("Connection"), "optional=%t", optional)
+	}
+}
+
 func TestOptionalFlagRoundTripsThroughTheEnvironment(t *testing.T) {
 	set := fixtures(t)
 	b := backend(t, set, "optional", "backend-server-a", "ca-a")

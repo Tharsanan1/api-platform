@@ -393,7 +393,10 @@ func (g *Gateway) sendUntilBackendSees(ctx context.Context, method, path, phrase
 		return err
 	}
 	method = strings.ToUpper(method)
+	// The backend closes each connection after answering, so every poll reaches it on a
+	// connection the gateway dials with the certificate it holds at that moment.
 	headers := g.scenarioHeaders(ctx)
+	headers[tlsbackend.HeaderCloseConnection] = "true"
 	return awaitState(ctx, fmt.Sprintf("waiting for %s %s to reach a backend that sees %s", method, endpoint, want),
 		func(ctx context.Context) error {
 			resp, sendErr := g.funnel.Send(ctx, httpx.Request{Method: method, URL: endpoint, Headers: headers, Host: g.requestHost(ctx)})

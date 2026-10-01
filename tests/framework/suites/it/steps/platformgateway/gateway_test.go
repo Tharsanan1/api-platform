@@ -3053,7 +3053,7 @@ func TestCertificateListAssertions(t *testing.T) {
 	publish(t, ctx, `{"certificates":[
 		{"name":"pool-a","usage":"downstream","referencedByApis":0,"isLeaf":true,
 		 "warnings":[{"code":"CERT_EXPIRES_SOON","field":"notAfter"}]},
-		{"name":"pool-b","usage":"upstream","warnings":[]}]}`)
+		{"name":"pool-b","usage":"upstream","warnings":[]}],"totalCount":2}`)
 
 	require.NoError(t, certificateListContains(ctx, "contain", "${CTX:a}"))
 	require.NoError(t, certificateListContains(ctx, "not contain", "pool-c"))
@@ -3196,14 +3196,15 @@ func TestStepsThatChangeTheGatewayMarkIt(t *testing.T) {
 	require.True(t, gatewayChangePending(ctx), "rotating an identity")
 }
 
-func TestPublishedCertificatesAcceptsAnEmptyListingAndRefusesOtherBodies(t *testing.T) {
+func TestPublishedCertificatesRequiresAnArrayAndATotalCount(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
 		want int
 		ok   bool
 	}{
-		{name: "empty listing renders null", body: `{"certificates":null,"totalCount":0,"totalBytes":0,"status":"success"}`, ok: true},
+		{name: "null certificates", body: `{"certificates":null,"totalCount":0,"totalBytes":0,"status":"success"}`},
+		{name: "no totalCount", body: `{"certificates":[]}`},
 		{name: "empty array", body: `{"certificates":[],"totalCount":0}`, ok: true},
 		{name: "one certificate", body: `{"certificates":[{"name":"a"}],"totalCount":1}`, want: 1, ok: true},
 		{name: "error body", body: `{"status":"error","message":"nope"}`},

@@ -3224,3 +3224,21 @@ func TestPublishedCertificatesRequiresAnArrayAndATotalCount(t *testing.T) {
 		})
 	}
 }
+
+func TestMetricNamedWithPrefixIgnoresLabelValues(t *testing.T) {
+	exposition := "# HELP policy_executions_total Executions.\n" +
+		"# TYPE policy_executions_total counter\n" +
+		"policy_executions_total{api_name=\"mtls_auth_abc\",policy_name=\"mtls-auth\"} 3\n"
+	_, found := metricNamedWithPrefix(exposition, "mtls_auth_")
+	require.False(t, found)
+
+	for _, withName := range []string{
+		exposition + "mtls_auth_denied_total 1\n",
+		exposition + "# TYPE mtls_auth_denied_total counter\n",
+		exposition + "mtls_auth_denied_total{reason=\"x\"} 1\n",
+	} {
+		name, found := metricNamedWithPrefix(withName, "mtls_auth_")
+		require.True(t, found)
+		require.Equal(t, "mtls_auth_denied_total", name)
+	}
+}

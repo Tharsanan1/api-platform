@@ -439,10 +439,33 @@ func (g *Gateway) responseOmitsMetric(ctx context.Context, text string) error {
 	if err != nil {
 		return err
 	}
-	if strings.Contains(resp.Text(), want) {
-		return fmt.Errorf("the response contains %q: %s", want, resp.Describe())
+	if name, found := metricNamedWithPrefix(resp.Text(), want); found {
+		return fmt.Errorf("the response has the metric %q, which starts with %q: %s", name, want, resp.Describe())
 	}
 	return nil
+}
+
+// metricNamedWithPrefix returns the first metric of a Prometheus exposition whose name starts
+// with prefix. Only names count: a label value such as an API name may contain the same text.
+func metricNamedWithPrefix(exposition, prefix string) (string, bool) {
+	for _, line := range strings.Split(exposition, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		name := fields[0]
+		if name == "#" {
+			if len(fields) < 3 || (fields[1] != "HELP" && fields[1] != "TYPE") {
+				continue
+			}
+			name = fields[2]
+		}
+		name, _, _ = strings.Cut(name, "{")
+		if strings.HasPrefix(name, prefix) {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // metricSeriesPresence asserts whether the published exposition has a series of the metric

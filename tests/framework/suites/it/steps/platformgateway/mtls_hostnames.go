@@ -216,7 +216,7 @@ func (g *Gateway) observeAsked(ctx context.Context, choice serverNameChoice) (bo
 
 // awaitAsked waits until the listener asks connections of the chosen server name.
 func (g *Gateway) awaitAsked(ctx context.Context, choice serverNameChoice) error {
-	return awaitState(ctx, "waiting for the listener to ask "+choice.label()+" for a client certificate",
+	return awaitReadState(ctx, "waiting for the listener to ask "+choice.label()+" for a client certificate",
 		func(ctx context.Context) error {
 			asked, err := g.observeAsked(ctx, choice)
 			if err != nil {
@@ -233,7 +233,7 @@ func (g *Gateway) awaitAsked(ctx context.Context, choice serverNameChoice) error
 // then requires it to stay that way for the hold window, so a listener that flaps between
 // states does not pass on one lucky sample.
 func (g *Gateway) awaitNotAsked(ctx context.Context, choice serverNameChoice, hold time.Duration) error {
-	err := awaitState(ctx, "waiting for the listener to stop asking "+choice.label()+" for a client certificate",
+	err := awaitReadState(ctx, "waiting for the listener to stop asking "+choice.label()+" for a client certificate",
 		func(ctx context.Context) error {
 			asked, err := g.observeAsked(ctx, choice)
 			if err != nil {
@@ -247,7 +247,7 @@ func (g *Gateway) awaitNotAsked(ctx context.Context, choice serverNameChoice, ho
 	if err != nil {
 		return err
 	}
-	_, err = retry.Never(ctx, retry.Options{Interval: notAskedInterval}, hold,
+	_, err = retry.Never(ctx, retry.Options{Fast: true, Interval: notAskedInterval}, hold,
 		func(ctx context.Context) (bool, error) { return g.observeAsked(ctx, choice) },
 		func(asked bool) bool { return asked })
 	if err != nil {

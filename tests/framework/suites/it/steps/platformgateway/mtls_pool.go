@@ -262,7 +262,7 @@ func (g *Gateway) deleteCertificateOnceUnreferenced(ctx context.Context, nameExp
 		return err
 	}
 	var stored storedCertificate
-	err = awaitState(ctx, fmt.Sprintf("waiting for no API to reference certificate %q", name),
+	err = awaitReadState(ctx, fmt.Sprintf("waiting for no API to reference certificate %q", name),
 		func(ctx context.Context) error {
 			c, lookupErr := g.certificateNamed(ctx, name)
 			if lookupErr != nil {

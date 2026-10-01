@@ -45,7 +45,17 @@ func tolerated(format string, args ...any) error {
 // propagation ceiling and is logged, so in-between states stay countable; any other error
 // fails the wait immediately.
 func awaitState(ctx context.Context, what string, observe func(context.Context) error) error {
-	return retry.Await(ctx, retry.Options{},
+	return awaitStateWith(ctx, retry.Options{}, what, observe)
+}
+
+// awaitReadState is awaitState for a wait whose polls only read logs, listings, metrics or the
+// listener's handshake, so it polls at retry.FastInterval.
+func awaitReadState(ctx context.Context, what string, observe func(context.Context) error) error {
+	return awaitStateWith(ctx, retry.Options{Fast: true}, what, observe)
+}
+
+func awaitStateWith(ctx context.Context, opts retry.Options, what string, observe func(context.Context) error) error {
+	return retry.Await(ctx, opts,
 		func(ctx context.Context) (bool, error) {
 			if err := observe(ctx); err != nil {
 				if retry.IsTransient(err) {

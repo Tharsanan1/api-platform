@@ -402,7 +402,7 @@ type clientAuthority struct {
 // Policy chain versions are left to awaitPolicySnapshotSync: the controller publishes an empty
 // policy snapshot when its last API is removed, and the policy engine is never sent it.
 func (g *Gateway) awaitGatewayApplied(ctx context.Context) error {
-	if err := awaitState(ctx, "waiting for the gateway to apply the client authority pool", g.observeGatewayApplied); err != nil {
+	if err := awaitReadState(ctx, "waiting for the gateway to apply the client authority pool", g.observeGatewayApplied); err != nil {
 		return err
 	}
 	clearGatewayChange(ctx)
@@ -521,7 +521,7 @@ func (g *Gateway) awaitPolicySnapshotSync(ctx context.Context) error {
 	if v, ok := tcontext.Get(ctx, keyPolicyBaseline); ok {
 		baseline, _ = v.(string)
 	}
-	err := awaitState(ctx, fmt.Sprintf("waiting for the policy engine to apply the controller's policy chain past version %q", baseline),
+	err := awaitReadState(ctx, fmt.Sprintf("waiting for the policy engine to apply the controller's policy chain past version %q", baseline),
 		func(ctx context.Context) error {
 			s, err := g.policySnapshotVersions(ctx)
 			if err != nil {

@@ -97,7 +97,7 @@ func (g *Gateway) probeListener(ctx context.Context) (*httpx.TLSState, error) {
 // awaitListenerRequests waits until the listener asks for a client certificate exactly when
 // want says; the other answer is the in-between state.
 func (g *Gateway) awaitListenerRequests(ctx context.Context, want bool) error {
-	return awaitState(ctx, fmt.Sprintf("waiting for the HTTPS listener to request a client certificate: %t", want),
+	return awaitReadState(ctx, fmt.Sprintf("waiting for the HTTPS listener to request a client certificate: %t", want),
 		func(ctx context.Context) error {
 			state, err := g.probeListener(ctx)
 			if err != nil {
@@ -126,7 +126,7 @@ func (g *Gateway) listenerDoesNotRequestClientCertificate(ctx context.Context) e
 			return err
 		}
 	}
-	_, err := retry.Never(ctx, retry.Options{}, listenerHoldWindow, g.probeListener,
+	_, err := retry.Never(ctx, retry.Options{Fast: true}, listenerHoldWindow, g.probeListener,
 		func(state *httpx.TLSState) bool { return state.ClientCertificateRequested })
 	if err != nil {
 		return fmt.Errorf("the HTTPS listener was expected to not request a client certificate for %s: %w", listenerHoldWindow, err)

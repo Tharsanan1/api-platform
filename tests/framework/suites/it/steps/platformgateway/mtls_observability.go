@@ -174,7 +174,7 @@ func (g *Gateway) logSinceLatestRequestContains(ctx context.Context, service, te
 	if err != nil {
 		return err
 	}
-	return awaitState(ctx, fmt.Sprintf("waiting for the %q log to contain %q after the latest request", service, want),
+	return awaitReadState(ctx, fmt.Sprintf("waiting for the %q log to contain %q after the latest request", service, want),
 		func(ctx context.Context) error {
 			logs, err := g.logSinceLatestRequest(ctx, service)
 			if err != nil {
@@ -265,7 +265,7 @@ func (g *Gateway) accessLogShowsLine(ctx context.Context, service, path string, 
 	if err != nil {
 		return err
 	}
-	return awaitState(ctx, fmt.Sprintf("waiting for the %q access log line for %s", service, resolvedPath),
+	return awaitReadState(ctx, fmt.Sprintf("waiting for the %q access log line for %s", service, resolvedPath),
 		func(ctx context.Context) error {
 			logs, err := g.logSinceLatestRequest(ctx, service)
 			if err != nil {
@@ -582,7 +582,7 @@ func (g *Gateway) policyEngineCounterGrew(ctx context.Context, name, set string,
 	if !ok {
 		return fmt.Errorf("the policy engine counter %s%s was not noted earlier in this scenario", name, set)
 	}
-	return awaitState(ctx, fmt.Sprintf("waiting for the policy engine counter %s%s to grow by %d", name, set, growth),
+	return awaitReadState(ctx, fmt.Sprintf("waiting for the policy engine counter %s%s to grow by %d", name, set, growth),
 		func(ctx context.Context) error {
 			now, err := g.policyEngineCounter(ctx, name, labels)
 			if err != nil {

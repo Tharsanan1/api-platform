@@ -197,7 +197,8 @@ type fieldMessage struct {
 
 // responseWarnings reads the warnings of the published response. A status.warnings list,
 // including an empty one, is that list. Top-level warnings are used only when status.warnings
-// is absent or null.
+// is absent or null, or when status is not an object (a certificate response carries the
+// string "success" there).
 func responseWarnings(ctx context.Context) ([]fieldMessage, error) {
 	resp, err := httpx.Published(ctx)
 	if err != nil {
@@ -205,16 +206,22 @@ func responseWarnings(ctx context.Context) ([]fieldMessage, error) {
 	}
 	var body struct {
 		Warnings json.RawMessage `json:"warnings"`
-		Status   struct {
-			Warnings json.RawMessage `json:"warnings"`
-		} `json:"status"`
+		Status   json.RawMessage `json:"status"`
 	}
 	if err := json.Unmarshal(resp.Body, &body); err != nil {
 		return nil, fmt.Errorf("the response is not JSON while reading its warnings: %w (%s)", err, resp.Describe())
 	}
-	if body.Status.Warnings != nil && string(body.Status.Warnings) != "null" {
+	var status struct {
+		Warnings json.RawMessage `json:"warnings"`
+	}
+	if len(body.Status) > 0 && body.Status[0] == '{' {
+		if err := json.Unmarshal(body.Status, &status); err != nil {
+			return nil, fmt.Errorf("the response status is malformed: %w (%s)", err, resp.Describe())
+		}
+	}
+	if status.Warnings != nil && string(status.Warnings) != "null" {
 		var warnings []fieldMessage
-		if err := json.Unmarshal(body.Status.Warnings, &warnings); err != nil {
+		if err := json.Unmarshal(status.Warnings, &warnings); err != nil {
 			return nil, fmt.Errorf("status.warnings is not a list: %w (%s)", err, resp.Describe())
 		}
 		return warnings, nil

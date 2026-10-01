@@ -1627,6 +1627,10 @@ func TestResponseWarningsPreferTheStatusList(t *testing.T) {
 	require.NoError(t, responseWarnsForField(ctx, "HEADER_CERT_BYPASS_ACTIVE", ""))
 	publish(`{"status":{"warnings":null},"warnings":[` + topWarning + `]}`)
 	require.NoError(t, responseWarnsForField(ctx, "HEADER_CERT_BYPASS_ACTIVE", ""))
+	publish(`{"status":"success","warnings":[` + topWarning + `]}`)
+	require.NoError(t, responseWarnsForField(ctx, "HEADER_CERT_BYPASS_ACTIVE", ""))
+	publish(`{"status":"success"}`)
+	require.NoError(t, responseHasNoWarnings(ctx))
 
 	publish(`{"status":{"warnings":{"code":"MTLS_ACCEPT_UNNARROWED"}}}`)
 	_, err := responseWarnings(ctx)

@@ -213,7 +213,7 @@ func TestFromEnvRoundTripsAndRejectsMalformedValues(t *testing.T) {
 	}
 }
 
-func TestOptionalBackendAlwaysAnswers200WithTheVerifiedSubjectOrNone(t *testing.T) {
+func TestOptionalBackendReportsAnyPresentedCertificateAndWhetherItVerified(t *testing.T) {
 	set := fixtures(t)
 	b := backend(t, set, "optional", "backend-server-a", "ca-a")
 	b.Port, b.Optional = PortOptional, true
@@ -221,19 +221,53 @@ func TestOptionalBackendAlwaysAnswers200WithTheVerifiedSubjectOrNone(t *testing.
 	require.NoError(t, err)
 	url := start(t, svc)
 
-	got := call(t, set, url, "gw-identity-a", false)
-	require.Equal(t, http.StatusOK, got.status)
-	require.Equal(t, "CN=gateway-a", got.subject)
-	require.Equal(t, answer{Backend: "optional", Client: "CN=gateway-a"}, got.body)
-
-	for _, fixture := range []string{"", "gw-identity-b", "client-expired"} {
-		got = call(t, set, url, fixture, false)
-		require.Equal(t, http.StatusOK, got.status, fixture)
-		require.Empty(t, got.subject, fixture)
-		require.Empty(t, got.body.Client, fixture)
-		require.Equal(t, "optional", got.body.Backend, fixture)
-		require.Empty(t, got.body.Error, fixture)
+	for _, tc := range []struct {
+		fixture, subject, verified string
+	}{
+		{"gw-identity-a", "CN=gateway-a", "true"},
+		{"gw-identity-b", "CN=gateway-b", "false"},
+		{"client-expired", "CN=client-expired", "false"},
+		{"", "", "false"},
+	} {
+		got := callOptional(t, set, url, tc.fixture)
+		require.Equal(t, http.StatusOK, got.status, tc.fixture)
+		require.Equal(t, tc.subject, got.subject, tc.fixture)
+		require.Equal(t, tc.verified, got.verifiedHeader, tc.fixture)
+		require.Equal(t, optionalAnswer{Backend: "optional", Client: tc.subject, Verified: tc.verified == "true"}, got.body, tc.fixture)
 	}
+}
+
+type optionalReply struct {
+	status         int
+	subject        string
+	verifiedHeader string
+	body           optionalAnswer
+}
+
+func callOptional(t *testing.T, set *testpki.Set, url, fixture string) optionalReply {
+	t.Helper()
+	backendCA, err := set.Get("backend-ca")
+	require.NoError(t, err)
+	roots := x509.NewCertPool()
+	roots.AddCert(backendCA.Certificate)
+	config := &tls.Config{RootCAs: roots, ServerName: testpki.TLSBackendHost, MinVersion: tls.VersionTLS12}
+	if fixture != "" {
+		f, err := set.Get(fixture)
+		require.NoError(t, err)
+		cert, err := f.TLSCertificate(false)
+		require.NoError(t, err)
+		config.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &cert, nil }
+	}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: config, DisableKeepAlives: true}}
+	resp, err := client.Get(url + "/anything")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var body optionalAnswer
+	require.NoError(t, json.Unmarshal(raw, &body), string(raw))
+	return optionalReply{status: resp.StatusCode, subject: resp.Header.Get(HeaderClientSubject),
+		verifiedHeader: resp.Header.Get(HeaderClientVerified), body: body}
 }
 
 func TestOptionalBackendSendsTheHeaderAndBodyFieldWhenEmpty(t *testing.T) {
@@ -248,7 +282,8 @@ func TestOptionalBackendSendsTheHeaderAndBodyFieldWhenEmpty(t *testing.T) {
 	values, present := rec.Header()[HeaderClientSubject]
 	require.True(t, present)
 	require.Equal(t, []string{""}, values)
-	require.JSONEq(t, `{"backend":"optional","client":""}`, rec.Body.String())
+	require.Equal(t, []string{"false"}, rec.Header()[HeaderClientVerified])
+	require.JSONEq(t, `{"backend":"optional","client":"","verified":false}`, rec.Body.String())
 }
 
 func TestOptionalFlagRoundTripsThroughTheEnvironment(t *testing.T) {

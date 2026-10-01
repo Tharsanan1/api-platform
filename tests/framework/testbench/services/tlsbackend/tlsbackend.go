@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/wso2/api-platform/tests/framework/testbench"
@@ -48,6 +49,10 @@ const EnvBackends = "TESTBENCH_TLS_BACKENDS"
 
 // HeaderClientSubject carries the subject of the accepted client certificate.
 const HeaderClientSubject = "X-Client-Subject"
+
+// HeaderClientVerified carries "true" or "false" in optional mode: whether the presented
+// client certificate verified against the backend's client authorities.
+const HeaderClientVerified = "X-Client-Verified"
 
 // Container ports of the backends.
 const (
@@ -74,8 +79,10 @@ type Backend struct {
 	// ClientCAs are the authorities a client certificate must chain to.
 	ClientCAs string `json:"clientCAs"`
 	// Optional makes the backend request a client certificate without requiring one: it
-	// always answers 200, with the subject of a verified certificate in X-Client-Subject and
-	// the body, or an empty subject when none was presented or it did not verify.
+	// always answers 200 and reports the subject of whatever leaf certificate was presented,
+	// verified or not, in X-Client-Subject and the body, and whether it verified against the
+	// backend's client authorities in X-Client-Verified and the body. An empty subject and
+	// false mean none was presented.
 	Optional bool `json:"optional,omitempty"`
 }
 
@@ -178,26 +185,31 @@ type answer struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// optionalAnswer always carries the client field, empty when no certificate was accepted.
+// optionalAnswer always carries the client and verified fields.
 type optionalAnswer struct {
-	Backend string `json:"backend"`
-	Client  string `json:"client"`
+	Backend  string `json:"backend"`
+	Client   string `json:"client"`
+	Verified bool   `json:"verified"`
 }
 
 func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	subject, err := s.clientSubject(r.TLS)
 	if s.optional {
-		if err != nil {
-			subject = ""
+		var presented string
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			presented = r.TLS.PeerCertificates[0].Subject.String()
 		}
-		w.Header().Set(HeaderClientSubject, subject)
+		_, verifyErr := s.clientSubject(r.TLS)
+		verified := verifyErr == nil
+		w.Header().Set(HeaderClientSubject, presented)
+		w.Header().Set(HeaderClientVerified, strconv.FormatBool(verified))
 		w.WriteHeader(http.StatusOK)
-		if encodeErr := json.NewEncoder(w).Encode(optionalAnswer{Backend: s.name, Client: subject}); encodeErr != nil {
+		if encodeErr := json.NewEncoder(w).Encode(optionalAnswer{Backend: s.name, Client: presented, Verified: verified}); encodeErr != nil {
 			testbench.ServiceLogger(r.Context()).Warn("tls backend response failed", "error", encodeErr)
 		}
 		return
 	}
+	subject, err := s.clientSubject(r.TLS)
 	out, status := answer{Backend: s.name, Client: subject}, http.StatusOK
 	if err != nil {
 		testbench.ServiceLogger(r.Context()).Info("tls backend refused the client certificate",

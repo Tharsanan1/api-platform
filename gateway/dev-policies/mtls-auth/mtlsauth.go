@@ -807,6 +807,9 @@ func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 
 		ca, _ := obj["ca"].(string)
 		entry := acceptEntry{ca: strings.TrimSpace(ca)}
+		if entry.ca == "" {
+			return nil, fmt.Errorf("%s[%d].ca is required", acceptParam, i)
+		}
 
 		if matchRaw, ok := obj["match"]; ok && matchRaw != nil {
 			matchObj, ok := matchRaw.(map[string]interface{})
@@ -835,8 +838,12 @@ func parseAcceptParam(raw interface{}) ([]acceptEntry, error) {
 		if thumbsRaw, ok := obj["thumbprints"]; ok && thumbsRaw != nil && len(thumbs) == 0 {
 			return nil, fmt.Errorf("%s[%d].thumbprints must list at least one thumbprint", acceptParam, i)
 		}
-		for _, t := range thumbs {
-			entry.thumbprints = append(entry.thumbprints, normalizeThumbprint(t))
+		for k, t := range thumbs {
+			normalized := normalizeThumbprint(t)
+			if !isSHA256Hex(normalized) {
+				return nil, fmt.Errorf("%s[%d].thumbprints[%d] must be a SHA-256 thumbprint of 64 hex characters", acceptParam, i, k)
+			}
+			entry.thumbprints = append(entry.thumbprints, normalized)
 		}
 
 		entries = append(entries, entry)
@@ -898,6 +905,15 @@ func stringListParam(obj map[string]interface{}, key, path string) ([]string, er
 
 // normalizeThumbprint strips a "sha256:" prefix and colon separators and
 // lowercases the rest.
+// isSHA256Hex reports whether a normalised thumbprint is 64 lowercase hex characters.
+func isSHA256Hex(t string) bool {
+	if len(t) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(t)
+	return err == nil
+}
+
 func normalizeThumbprint(t string) string {
 	t = strings.ToLower(strings.TrimSpace(t))
 	t = strings.TrimPrefix(t, "sha256:")

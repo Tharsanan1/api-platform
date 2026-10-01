@@ -1094,6 +1094,22 @@ func TestGetPolicy_EmptyNarrowingFailsClosed(t *testing.T) {
 			mutate:  func(e map[string]interface{}) { e["thumbprints"] = []interface{}{} },
 			message: "accept[0].thumbprints must list at least one thumbprint",
 		},
+		"missing ca": {
+			mutate:  func(e map[string]interface{}) { delete(e, "ca") },
+			message: "accept[0].ca is required",
+		},
+		"blank ca": {
+			mutate:  func(e map[string]interface{}) { e["ca"] = "  " },
+			message: "accept[0].ca is required",
+		},
+		"thumbprint that is not 64 hex characters": {
+			mutate:  func(e map[string]interface{}) { e["thumbprints"] = []interface{}{"sha256:9f86d081"} },
+			message: "accept[0].thumbprints[0] must be a SHA-256 thumbprint of 64 hex characters",
+		},
+		"thumbprint with a non-hex character": {
+			mutate:  func(e map[string]interface{}) { e["thumbprints"] = []interface{}{strings.Repeat("g", 64)} },
+			message: "accept[0].thumbprints[0] must be a SHA-256 thumbprint of 64 hex characters",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			params := buildParams(entries)

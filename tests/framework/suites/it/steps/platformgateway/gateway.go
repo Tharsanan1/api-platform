@@ -947,6 +947,8 @@ type resourceMetadata struct {
 // register wires gateway, health, and timeout steps.
 func (g *Gateway) register(sc *godog.ScenarioContext) {
 	g.registerRawHTTPSteps(sc)
+	g.registerMTLSSteps(sc)
+	g.registerWaitSteps(sc)
 	// Request state is runner-scoped, so clear it before each scenario.
 	sc.Before(func(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
 		if err := tcontext.Set(ctx, keyGatewaySpecVersion, gatewaySpecVersionForVersion(gatewayVersion(g.topo))); err != nil {
@@ -1324,6 +1326,9 @@ func (g *Gateway) createAPI(ctx context.Context, body *godog.DocString, contentT
 	if err != nil {
 		return err
 	}
+	if err := g.beforeAPIMutation(ctx); err != nil {
+		return err
+	}
 
 	resp, err := g.funnel.Post(ctx, url, g.headerWith(ctx, "Content-Type", contentType), []byte(definition))
 	if err != nil {
@@ -1408,6 +1413,9 @@ func (g *Gateway) deleteAPI(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if err := g.beforeAPIMutation(ctx); err != nil {
+		return err
+	}
 	resp, err := g.funnel.Delete(ctx, url, g.scenarioHeaders(ctx))
 	if err != nil {
 		return err
@@ -1455,6 +1463,7 @@ var serviceEndpoints = map[string]struct {
 	// component contract resolves via Endpoint.Service. No base path: a scrape is not an API.
 	"controller-metrics":    {component: "platform-gateway", endpoint: "metrics"},
 	"policy-engine-metrics": {component: "platform-gateway", endpoint: "pe-metrics"},
+	"envoy-admin":           {component: "platform-gateway", endpoint: "envoy-admin"},
 }
 
 // serviceURL resolves a feature's service name and path to a URL on the running topology.
@@ -2127,6 +2136,9 @@ func (g *Gateway) updateAPI(ctx context.Context, name string, body *godog.DocStr
 	}
 	url, err := g.serviceURL(ctx, "gateway-controller", "/rest-apis/"+resolvedName)
 	if err != nil {
+		return err
+	}
+	if err := g.beforeAPIMutation(ctx); err != nil {
 		return err
 	}
 	headers := g.headerWith(ctx, "Content-Type", "application/yaml")

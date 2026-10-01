@@ -32,7 +32,7 @@ const PropagationCeiling = 60 * time.Second
 
 // BaseInterval is the poll cadence floor. A shorter Interval is raised to it, so a wait
 // cannot hammer a component that is already behind.
-const BaseInterval = 750 * time.Millisecond
+const BaseInterval = 100 * time.Millisecond
 
 // pacing widens the interval as the wait goes on: base for the first 20 seconds, then 1.5s,
 // then 3s.

@@ -108,6 +108,7 @@ func (g *Gateway) registerMTLSHostnameSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the certificate fixture "([^"]*)" is pooled as "([^"]*)" as a relay$`, g.poolRelayFixture)
 	sc.Step(`^I open a kept-alive HTTPS connection for "([^"]*)" and send a GET request to "([^"]*)"$`, g.openKeptAliveConnection)
 	sc.Step(`^I send a GET request to "([^"]*)" on the kept-alive HTTPS connection$`, g.sendOnKeptAliveConnection)
+	sc.Step(`^the kept-alive HTTPS connection should have carried (\d+) responses and not be closing$`, g.keptAliveConnectionStillOpen)
 }
 
 func resetHostnameState(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
@@ -278,6 +279,10 @@ type keptAliveConnection struct {
 	reader *bufio.Reader
 	host   string
 	base   string
+	// requests counts the responses read on the connection; closing is whether the latest
+	// one announced that the gateway closes the connection after it.
+	requests int
+	closing  bool
 }
 
 // openKeptAliveConnection connects to the HTTPS listener with the host as server name,
@@ -353,10 +358,30 @@ func (g *Gateway) sendKeptAlive(ctx context.Context, kept *keptAliveConnection, 
 	if len(body) > maxKeptAliveBody {
 		return fmt.Errorf("the response on the kept-alive HTTPS connection exceeds %d bytes", maxKeptAliveBody)
 	}
+	kept.requests++
+	kept.closing = resp.Close
 	return g.funnel.Publish(ctx, &httpx.Response{
 		StatusCode: resp.StatusCode, Body: body, Headers: resp.Header.Clone(),
 		Method: http.MethodGet, URL: kept.base + resolved, Elapsed: time.Since(started),
 	})
+}
+
+// keptAliveConnectionStillOpen requires the connection to have carried exactly the given
+// number of responses on one connection, the latest not announcing a close. A drained
+// connection still answers its last request, but with Connection: close.
+func (g *Gateway) keptAliveConnectionStillOpen(ctx context.Context, requests int) error {
+	v, ok := tcontext.Get(ctx, keyKeptAliveConnection)
+	kept, _ := v.(*keptAliveConnection)
+	if !ok || kept == nil {
+		return fmt.Errorf("no kept-alive HTTPS connection: open one first")
+	}
+	if kept.requests != requests {
+		return fmt.Errorf("expected the kept-alive HTTPS connection to have carried %d responses, it carried %d", requests, kept.requests)
+	}
+	if kept.closing {
+		return fmt.Errorf("the latest response on the kept-alive HTTPS connection announced that the gateway closes it (Connection: close)")
+	}
+	return nil
 }
 
 func closeKept(ctx context.Context) {

@@ -253,6 +253,7 @@ Feature: Scoping the client certificate request to hostnames
     Then the response should be successful
     And the JSON response field "status.warnings[0].code" should be "MTLS_HOSTNAME_NOT_SCOPED"
     And the JSON response field "status.warnings[0].field" should be "spec.vhosts.main"
+    And the JSON response field "status.warnings[0].message" should be "this API is served on a hostname the HTTPS listener cannot match (a gateway default, an IP address, or a pattern other than an exact name or a leading *.), so the listener asks every connection for a client certificate; give it its own vhosts.main to limit that to its hostname"
     And I set request host to "${CTX:otherLabel}.example"
     And I send a "GET" request to "${CTX:otherContext}/${CTX:otherApiVersion}/anything" until the route answers 401
     And a TLS connection with server name "${CTX:publicLabel}.example" should be asked for a client certificate
@@ -278,6 +279,7 @@ Feature: Scoping the client certificate request to hostnames
     Then the response should be successful
     And the JSON response field "status.warnings[0].code" should be "MTLS_HOSTNAME_NOT_SCOPED"
     And the JSON response field "status.warnings[0].field" should be "spec.vhosts.sandbox"
+    And the JSON response field "status.warnings[0].message" should be "this API is served on a hostname the HTTPS listener cannot match (a gateway default, an IP address, or a pattern other than an exact name or a leading *.), so the listener asks every connection for a client certificate; give it its own vhosts.sandbox to limit that to its hostname"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:publicApiName} |
@@ -623,7 +625,7 @@ Feature: Scoping the client certificate request to hostnames
     And the response should not contain echoed header "x-wso2-client-certificate"
 
   # The mechanism is a kept-alive connection: it is opened on the public hostname, the new hostname is
-  # added to the asking filter chain, and the same connection then carries a second request.
+  # added to the asking filter chain, and the same connection then carries two more requests while no response announces a close.
   Scenario: An open connection to a public API survives deploying a mutual TLS API on a new hostname
     Given the certificate fixture "ca-a" is pooled as "${CTX:caA}" with usage "downstream"
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -654,6 +656,7 @@ Feature: Scoping the client certificate request to hostnames
     And a TLS connection with server name "${CTX:publicLabel}.example" should not be asked for a client certificate
     When I open a kept-alive HTTPS connection for "${CTX:publicLabel}.example" and send a GET request to "${CTX:publicContext}/${CTX:publicApiVersion}/anything"
     Then the response status code should be 200
+    And the kept-alive HTTPS connection should have carried 1 responses and not be closing
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:otherApiName} |
@@ -671,6 +674,10 @@ Feature: Scoping the client certificate request to hostnames
     And a TLS connection with server name "${CTX:publicLabel}.example" should not be asked for a client certificate
     When I send a GET request to "${CTX:publicContext}/${CTX:publicApiVersion}/anything" on the kept-alive HTTPS connection
     Then the response status code should be 200
+    And the kept-alive HTTPS connection should have carried 2 responses and not be closing
+    When I send a GET request to "${CTX:publicContext}/${CTX:publicApiVersion}/anything" on the kept-alive HTTPS connection
+    Then the response status code should be 200
+    And the kept-alive HTTPS connection should have carried 3 responses and not be closing
 
   Scenario: A server name in upper case is matched like the lower case hostname
     Given the certificate fixture "ca-a" is pooled as "${CTX:caA}" with usage "downstream"
@@ -727,3 +734,130 @@ Feature: Scoping the client certificate request to hostnames
     When I delete the API "${CTX:mtlsApiName}"
     Then the response should be successful
     And a TLS connection with server name "${CTX:mtlsLabel}.example" should not be asked for a client certificate
+
+  Scenario: Every exact name in a list of hostnames is asked and the public hostname is not
+    Given the certificate fixture "ca-a" is pooled as "${CTX:caA}" with usage "downstream"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:mtlsApiName} |
+      | spec.displayName       | ${CTX:mtlsApiName} |
+      | spec.version           | ${CTX:mtlsApiVersion} |
+      | spec.context           | ${CTX:mtlsContext}/$version |
+      | spec.vhosts.main       | ${CTX:mtlsLabel}.example;${CTX:otherLabel}.example |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.policies          | [{"name":"mtls-auth","version":"v1","params":{"accept":[{"ca":"${CTX:caA}"}]}}] |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    And the JSON response field "status.warnings" should not exist
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:publicApiName} |
+      | spec.displayName       | ${CTX:publicApiName} |
+      | spec.version           | ${CTX:publicApiVersion} |
+      | spec.context           | ${CTX:publicContext}/$version |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    And I set request host to "${CTX:mtlsLabel}.example"
+    And I send a "GET" request to "${CTX:mtlsContext}/${CTX:mtlsApiVersion}/anything" until the route answers 401
+    And I set request host to "${CTX:otherLabel}.example"
+    And I send a "GET" request to "${CTX:mtlsContext}/${CTX:mtlsApiVersion}/anything" until the route answers 401
+    And I set request host to "${CTX:publicLabel}.example"
+    And I send a "GET" request to "${CTX:publicContext}/${CTX:publicApiVersion}/anything" until the route answers 200
+    And a TLS connection with server name "${CTX:mtlsLabel}.example" should be asked for a client certificate
+    And a TLS connection with server name "${CTX:otherLabel}.example" should be asked for a client certificate
+    And a TLS connection with server name "${CTX:publicLabel}.example" should not be asked for a client certificate
+
+  Scenario: One hostname the listener cannot match among exact names makes the listener ask every connection and warns on vhosts.main
+    Given the certificate fixture "ca-a" is pooled as "${CTX:caA}" with usage "downstream"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:mtlsApiName} |
+      | spec.displayName       | ${CTX:mtlsApiName} |
+      | spec.version           | ${CTX:mtlsApiVersion} |
+      | spec.context           | ${CTX:mtlsContext}/$version |
+      | spec.vhosts.main       | ${CTX:mtlsLabel}.example;192.0.2.10;${CTX:otherLabel}.example |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.policies          | [{"name":"mtls-auth","version":"v1","params":{"accept":[{"ca":"${CTX:caA}"}]}}] |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    And the JSON response field "status.warnings[0].code" should be "MTLS_HOSTNAME_NOT_SCOPED"
+    And the JSON response field "status.warnings[0].field" should be "spec.vhosts.main"
+    And the JSON response field "status.warnings[0].message" should be "this API is served on a hostname the HTTPS listener cannot match (a gateway default, an IP address, or a pattern other than an exact name or a leading *.), so the listener asks every connection for a client certificate; give it its own vhosts.main to limit that to its hostname"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:publicApiName} |
+      | spec.displayName       | ${CTX:publicApiName} |
+      | spec.version           | ${CTX:publicApiVersion} |
+      | spec.context           | ${CTX:publicContext}/$version |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    And I set request host to "${CTX:mtlsLabel}.example"
+    And I send a "GET" request to "${CTX:mtlsContext}/${CTX:mtlsApiVersion}/anything" until the route answers 401
+    And I set request host to "${CTX:publicLabel}.example"
+    And I send a "GET" request to "${CTX:publicContext}/${CTX:publicApiVersion}/anything" until the route answers 200
+    And a TLS connection with server name "${CTX:mtlsLabel}.example" should be asked for a client certificate
+    And a TLS connection with server name "${CTX:otherLabel}.example" should be asked for a client certificate
+    And a TLS connection with server name "${CTX:publicLabel}.example" should be asked for a client certificate
+    And a TLS connection with no server name should be asked for a client certificate
+
+  Scenario: Updating the hostname of a mutual TLS API moves what is asked to the new hostname
+    Given the certificate fixture "ca-a" is pooled as "${CTX:caA}" with usage "downstream"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:mtlsApiName} |
+      | spec.displayName       | ${CTX:mtlsApiName} |
+      | spec.version           | ${CTX:mtlsApiVersion} |
+      | spec.context           | ${CTX:mtlsContext}/$version |
+      | spec.vhosts.main       | ${CTX:mtlsLabel}.example |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.policies          | [{"name":"mtls-auth","version":"v1","params":{"accept":[{"ca":"${CTX:caA}"}]}}] |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:publicApiName} |
+      | spec.displayName       | ${CTX:publicApiName} |
+      | spec.version           | ${CTX:publicApiVersion} |
+      | spec.context           | ${CTX:publicContext}/$version |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    And I set request host to "${CTX:mtlsLabel}.example"
+    And I send a "GET" request to "${CTX:mtlsContext}/${CTX:mtlsApiVersion}/anything" until the route answers 401
+    And a TLS connection with server name "${CTX:mtlsLabel}.example" should be asked for a client certificate
+    And a TLS connection with server name "${CTX:otherLabel}.example" should not be asked for a client certificate
+    When I update API "${CTX:mtlsApiName}" from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:mtlsApiName} |
+      | spec.displayName       | ${CTX:mtlsApiName} |
+      | spec.version           | ${CTX:mtlsApiVersion} |
+      | spec.context           | ${CTX:mtlsContext}/$version |
+      | spec.vhosts.main       | ${CTX:otherLabel}.example |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.policies          | [{"name":"mtls-auth","version":"v1","params":{"accept":[{"ca":"${CTX:caA}"}]}}] |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    And the JSON response field "status.warnings" should not exist
+    And I set request host to "${CTX:otherLabel}.example"
+    And I send a "GET" request to "${CTX:mtlsContext}/${CTX:mtlsApiVersion}/anything" until the route answers 401
+    And a TLS connection with server name "${CTX:otherLabel}.example" should be asked for a client certificate
+    And a TLS connection with server name "${CTX:mtlsLabel}.example" should not be asked for a client certificate
+    And a TLS connection with server name "${CTX:publicLabel}.example" should not be asked for a client certificate
+
+  Scenario: A relay entry raises no hostname warning on an API with its own hostname
+    Given the certificate fixture "ca-a" is pooled as "${CTX:caA}" with usage "downstream"
+    And the certificate fixture "edge-lb-ca" is pooled as "${CTX:relayName}" as a relay
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:mtlsApiName} |
+      | spec.displayName       | ${CTX:mtlsApiName} |
+      | spec.version           | ${CTX:mtlsApiVersion} |
+      | spec.context           | ${CTX:mtlsContext}/$version |
+      | spec.vhosts.main       | ${CTX:mtlsLabel}.example |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.policies          | [{"name":"mtls-auth","version":"v1","params":{"accept":[{"ca":"${CTX:caA}"}]}}] |
+      | spec.operations        | [{"method":"GET","path":"/anything"}] |
+    Then the response should be successful
+    And the JSON response field "status.warnings" should not exist

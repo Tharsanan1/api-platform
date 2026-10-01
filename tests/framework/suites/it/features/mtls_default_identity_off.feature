@@ -19,12 +19,13 @@
 @mtls @mtls-default-identity
 Feature: Not presenting a default client certificate while the switch is off
   As a platform administrator
-  I want the gateway to present one certificate to every HTTPS backend whose definition names no identity
-  So that a fleet of backends requiring mutual TLS needs no identity named in each API
+  I want the gateway to present no client certificate unless an API names an identity
+  So that uploading a default identity changes nothing until I switch presenting it on
 
   With router.upstream.tls.present_default_identity off, no client certificate is presented to
   an HTTPS backend whose upstream definition names no tls.identity, even when a gateway identity
-  with role default exists. The scenarios with the switch on are in mtls_default_identity.feature.
+  with role default exists, and it stays that way across requests. The scenarios with the switch
+  on are in mtls_default_identity.feature.
 
   The optional backend answers every request and reports the subject of whatever client
   certificate it was presented, or an empty subject. The required backend trusts the issuer of
@@ -45,6 +46,7 @@ Feature: Not presenting a default client certificate while the switch is off
 
   Scenario: A default identity is not presented while the switch is off
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
+    And the gateway has applied its configuration
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion              | ${CTX:gatewaySpecVersion}  |
       | name                    | ${CTX:apiName}             |
@@ -55,13 +57,16 @@ Feature: Not presenting a default client certificate while the switch is off
       | spec.operations         | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees no client certificate
-    And the response header "X-Client-Verified" should be "false"
+    And the gateway has applied its configuration
+    When I send 5 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/anything" and the backend sees no client certificate in every response
+    Then the response header "X-Client-Verified" should be "false"
     And the JSON response field "client" should be ""
     And the JSON response field "verified" should be "false"
     And the response status code should be 200
 
   Scenario: A backend requiring a client certificate refuses an API that names no identity while the switch is off
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
+    And the gateway has applied its configuration
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion              | ${CTX:gatewaySpecVersion}  |
       | name                    | ${CTX:apiName}             |
@@ -72,5 +77,9 @@ Feature: Not presenting a default client certificate while the switch is off
       | spec.operations         | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees a refusal
-    And the response status code should be 400
+    And the gateway has applied its configuration
+    When I send 5 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/anything" and the backend sees a refusal in every response
+    Then the response status code should be 400
+    And the JSON response field "backend" should be "a"
+    And the JSON response field "error" should be "no required SSL certificate was sent"
     And the response header "X-Client-Subject" should not exist

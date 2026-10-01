@@ -2488,6 +2488,8 @@ func TestKeptAliveConnectionCarriesSeveralRequestsAndNamesAClosure(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, "host=public.example path=/second", published.Text())
 	require.EqualValues(t, 1, connections.Load())
+	require.ErrorContains(t, g.keptAliveConnectionStillOpen(ctx, 3), "carried 2")
+	require.NoError(t, g.keptAliveConnectionStillOpen(ctx, 2))
 
 	server.CloseClientConnections()
 	err = g.sendOnKeptAliveConnection(ctx, "/third")

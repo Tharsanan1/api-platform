@@ -75,9 +75,11 @@ type presentation struct {
 	resumable    bool
 	reuseSession bool
 	bearer       string
+	// relay is a certificate carried in a request header, as a front proxy relays one.
+	relay *relayedCertificate
 }
 
-var presentationPattern = regexp.MustCompile(`^(?:(with no client certificate)|with client certificate "([^"]+)"( and its chain)?( on a resumable TLS session)?|(on a new connection from the same TLS session cache))(?: and bearer token "([^"]+)")?$`)
+var presentationPattern = regexp.MustCompile(`^(?:(with no client certificate)|with client certificate "([^"]+)"( and its chain)?( on a resumable TLS session)?|(on a new connection from the same TLS session cache))(?: and header "([^"]+)" carrying certificate "([^"]+)"(?: encoded as "([^"]+)")?)?(?: and bearer token "([^"]+)")?$`)
 
 // parsePresentation reads the phrase that ends an HTTPS request step.
 func parsePresentation(phrase string) (presentation, error) {
@@ -86,15 +88,20 @@ func parsePresentation(phrase string) (presentation, error) {
 		return presentation{}, fmt.Errorf("unknown HTTPS request phrasing %q: expected "+
 			`with no client certificate, with client certificate "<fixture>" [and its chain] `+
 			`[on a resumable TLS session], or on a new connection from the same TLS session cache; `+
-			`each optionally followed by and bearer token "<token>"`, phrase)
+			`each optionally followed by and header "<name>" carrying certificate "<fixture>" [encoded as "<encoding>"], `+
+			`then by and bearer token "<token>"`, phrase)
 	}
-	return presentation{
+	p := presentation{
 		fixture:      m[2],
 		withChain:    m[3] != "",
 		resumable:    m[4] != "",
 		reuseSession: m[5] != "",
-		bearer:       m[6],
-	}, nil
+		bearer:       m[9],
+	}
+	if m[6] != "" {
+		p.relay = &relayedCertificate{header: m[6], fixture: m[7], encoding: m[8]}
+	}
+	return p, nil
 }
 
 func (g *Gateway) registerMTLSSteps(sc *godog.ScenarioContext) {
@@ -175,8 +182,17 @@ func (g *Gateway) requireCleanGateway(ctx context.Context) error {
 
 // ── Certificate fixtures in the pool ────────────────────────────────────────────
 
+// certificateUpload carries the optional fields of a certificate upload. Empty fields are
+// omitted, so an upload keeps the product defaults: usage upstream, role client, no match, no key.
+type certificateUpload struct {
+	usage      string
+	role       string
+	dnsSANs    []string
+	privateKey string
+}
+
 func (g *Gateway) poolCertificateFixtures(ctx context.Context, fixtureList, name, usage string) error {
-	resp, err := g.uploadFixtures(ctx, fixtureList, name, usage)
+	resp, err := g.uploadFixtures(ctx, fixtureList, name, certificateUpload{usage: usage})
 	if err != nil {
 		return err
 	}
@@ -187,13 +203,13 @@ func (g *Gateway) poolCertificateFixtures(ctx context.Context, fixtureList, name
 }
 
 func (g *Gateway) uploadCertificateFixtures(ctx context.Context, fixtureList, name, usage string) error {
-	_, err := g.uploadFixtures(ctx, fixtureList, name, usage)
+	_, err := g.uploadFixtures(ctx, fixtureList, name, certificateUpload{usage: usage})
 	return err
 }
 
 // uploadFixtures uploads the named fixtures as one PEM under a generated name, publishes the
 // response, and registers an accepted certificate for cleanup at once.
-func (g *Gateway) uploadFixtures(ctx context.Context, fixtureList, nameExpr, usage string) (*httpx.Response, error) {
+func (g *Gateway) uploadFixtures(ctx context.Context, fixtureList, nameExpr string, opts certificateUpload) (*httpx.Response, error) {
 	name, err := g.generatedCertificateName(ctx, nameExpr)
 	if err != nil {
 		return nil, err
@@ -202,9 +218,18 @@ func (g *Gateway) uploadFixtures(ctx context.Context, fixtureList, nameExpr, usa
 	if err != nil {
 		return nil, err
 	}
-	body := map[string]string{"name": name, "certificate": pemBundle}
-	if usage = strings.TrimSpace(usage); usage != "" {
+	body := map[string]any{"name": name, "certificate": pemBundle}
+	if usage := strings.TrimSpace(opts.usage); usage != "" {
 		body["usage"] = usage
+	}
+	if role := strings.TrimSpace(opts.role); role != "" {
+		body["role"] = role
+	}
+	if len(opts.dnsSANs) > 0 {
+		body["match"] = map[string]any{"dnsSANs": opts.dnsSANs}
+	}
+	if opts.privateKey != "" {
+		body["privateKey"] = opts.privateKey
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -311,6 +336,13 @@ func (g *Gateway) sendHTTPS(ctx context.Context, method, path, phrase string) er
 			return expandErr
 		}
 		headers["Authorization"] = "Bearer " + token
+	}
+	if p.relay != nil {
+		value, relayErr := p.relay.value()
+		if relayErr != nil {
+			return relayErr
+		}
+		headers[p.relay.header] = value
 	}
 	if isMTLSScenario(ctx) {
 		if err := g.awaitGatewayApplied(ctx); err != nil {

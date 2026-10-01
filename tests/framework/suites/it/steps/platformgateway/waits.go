@@ -98,11 +98,12 @@ func routeInBetween(resp *httpx.Response, allowWarmingUpstream bool) (string, bo
 
 // sendUntilRouteAnswers polls a data-plane path until its route is live and answers want.
 // Waiting for 200 tolerates Envoy's no-route 404 and its 503 while the upstream warms. Waiting
-// for 401, the rejection an authenticating policy gives, tolerates only the no-route 404, so a
-// 200 fails at once as the security failure it is. Any other answer fails at once too.
+// for 401, the rejection an authenticating policy gives, or for 503, the answer of a route whose
+// upstream cannot be reached, tolerates only the no-route 404, so a 200 fails at once. Any other
+// answer fails at once too.
 func (g *Gateway) sendUntilRouteAnswers(ctx context.Context, method, path string, want int) error {
-	if want != http.StatusOK && want != http.StatusUnauthorized {
-		return fmt.Errorf("waiting for a route supports status 200 or 401, not %d", want)
+	if want != http.StatusOK && want != http.StatusUnauthorized && want != http.StatusServiceUnavailable {
+		return fmt.Errorf("waiting for a route supports status 200, 401 or 503, not %d", want)
 	}
 	resolved, err := stepscommon.Expand(ctx, path)
 	if err != nil {

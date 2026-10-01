@@ -21,8 +21,10 @@ package platformgateway
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -715,7 +717,10 @@ type fakeMTLSGateway struct {
 	secret            []byte
 	clusterWarming    bool
 	uploadStatus      int
-	uploads           []map[string]string
+	uploads           []map[string]any
+	extraCerts        []map[string]any
+	deletedIDs        []string
+	deleteStatus      int
 	engineCountDelta  int
 	controllerStatus  int
 }
@@ -730,11 +735,17 @@ func (f *fakeMTLSGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 	switch {
 	case r.URL.Path == "/api/management/v1/certificates" && r.Method == http.MethodPost:
-		var body map[string]string
+		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.uploads = append(f.uploads, body)
 		w.WriteHeader(f.uploadStatus)
 		write(map[string]string{"id": "cert-1"})
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/management/v1/certificates/"):
+		f.deletedIDs = append(f.deletedIDs, strings.TrimPrefix(r.URL.Path, "/api/management/v1/certificates/"))
+		if f.deleteStatus != 0 {
+			w.WriteHeader(f.deleteStatus)
+		}
+		write(map[string]string{"status": "success"})
 	case r.URL.Path == "/api/management/v1/certificates" && f.controllerStatus != 0:
 		w.WriteHeader(f.controllerStatus)
 	case r.URL.Path == "/api/management/v1/certificates":
@@ -742,6 +753,7 @@ func (f *fakeMTLSGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, name := range sortedKeys(f.pool) {
 			certs = append(certs, map[string]any{"name": name, "role": "client", "count": len(f.pool[name])})
 		}
+		certs = append(certs, f.extraCerts...)
 		write(map[string]any{"certificates": certs})
 	case r.URL.Path == "/api/admin/v1/xds_sync_status":
 		write(map[string]string{"policy_chain_version": f.controllerVersion})
@@ -882,6 +894,18 @@ func TestParsePresentation(t *testing.T) {
 		`on a new connection from the same TLS session cache`:                {reuseSession: true},
 		`with client certificate "client-valid" and bearer token "${CTX:t}"`: {fixture: "client-valid", bearer: "${CTX:t}"},
 		`with no client certificate and bearer token "abc"`:                  {bearer: "abc"},
+		`with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"`: {
+			fixture: "edge-lb",
+			relay:   &relayedCertificate{header: "X-WSO2-CLIENT-CERTIFICATE", fixture: "client-valid"},
+		},
+		`with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid" encoded as "base64"`: {
+			fixture: "edge-lb",
+			relay:   &relayedCertificate{header: "X-WSO2-CLIENT-CERTIFICATE", fixture: "client-valid", encoding: "base64"},
+		},
+		`with no client certificate and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid" encoded as "pem" and bearer token "abc"`: {
+			bearer: "abc",
+			relay:  &relayedCertificate{header: "X-WSO2-CLIENT-CERTIFICATE", fixture: "client-valid", encoding: "pem"},
+		},
 	} {
 		got, err := parsePresentation(phrase)
 		require.NoError(t, err, phrase)
@@ -1182,6 +1206,9 @@ func TestSendUntilRouteAnswers(t *testing.T) {
 		{name: "a 404 with another body fails at once", want: 401,
 			replies: []scriptedReply{{status: 404, body: "gone"}}, err: "gone", served: 1},
 		{name: "a 403 fails at once", want: 200, replies: []scriptedReply{{status: 403}}, err: "-> 403", served: 1},
+		{name: "503 after no route", want: 503, replies: []scriptedReply{noRoute, warming}, served: 2},
+		{name: "a 200 while waiting for an unreachable upstream fails at once", want: 503,
+			replies: []scriptedReply{noRoute, {status: 200, upstream: true}}, err: "expected 503 once the route is live", served: 2},
 		{name: "a 500 fails at once", want: 200, replies: []scriptedReply{{status: 500, upstream: true}}, err: "-> 500", served: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1205,5 +1232,199 @@ func TestSendUntilRouteAnswers(t *testing.T) {
 		})
 	}
 	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
-	require.ErrorContains(t, g.sendUntilRouteAnswers(ctx, "GET", "/x", 404), "supports status 200 or 401")
+	require.ErrorContains(t, g.sendUntilRouteAnswers(ctx, "GET", "/x", 404), "supports status 200, 401 or 503")
+}
+
+func TestRelayedCertificateValue(t *testing.T) {
+	fixture := mtlsFixture(t, "client-valid")
+	urlValue, err := (&relayedCertificate{fixture: "client-valid"}).value()
+	require.NoError(t, err)
+	require.Equal(t, url.PathEscape(string(fixture.CertPEM)), urlValue)
+
+	pemValue, err := (&relayedCertificate{fixture: "client-valid", encoding: relayEncodingPEM}).value()
+	require.NoError(t, err)
+	require.Equal(t, strings.ReplaceAll(string(fixture.CertPEM), "\n", " "), pemValue)
+	require.NotContains(t, pemValue, "\n")
+
+	encoded, err := (&relayedCertificate{fixture: "client-valid", encoding: relayEncodingBase64}).value()
+	require.NoError(t, err)
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	require.NoError(t, err)
+	require.Equal(t, fixture.Certificate.Raw, raw)
+
+	_, err = (&relayedCertificate{fixture: "client-valid", encoding: "der"}).value()
+	require.ErrorContains(t, err, `unknown certificate header encoding "der"`)
+	_, err = (&relayedCertificate{fixture: "missing"}).value()
+	require.ErrorContains(t, err, "unknown fixture")
+}
+
+func TestSendHTTPSRelaysACertificateHeader(t *testing.T) {
+	var got atomic.Value
+	https := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Get("X-WSO2-CLIENT-CERTIFICATE"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	https.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
+	https.StartTLS()
+	t.Cleanup(https.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), https)
+
+	phrase := `with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid" encoded as "pem"`
+	require.NoError(t, g.sendHTTPS(ctx, "GET", "/anything", phrase))
+	header, _ := got.Load().(string)
+	require.Contains(t, header, "BEGIN CERTIFICATE")
+	require.NotContains(t, header, "\n")
+
+	require.ErrorContains(t, g.sendHTTPS(ctx, "GET", "/anything",
+		`with client certificate "edge-lb" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid" encoded as "der"`),
+		`unknown certificate header encoding "der"`)
+}
+
+func TestForwardedCertificateNames(t *testing.T) {
+	valid := mtlsFixture(t, "client-valid")
+	other := mtlsFixture(t, "client-wrong-ca")
+	xfcc := fmt.Sprintf(`Hash=%s;Subject="CN=client-valid",Hash=%s;Subject="CN=client-wrong-ca"`, valid.Thumbprint, other.Thumbprint)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	publish := func(value any) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"headers": map[string]any{"X-Forwarded-Client-Cert": value}})
+		require.NoError(t, err)
+		require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: 200, Body: body}))
+	}
+
+	publish(xfcc)
+	require.NoError(t, g.forwardedCertificateNames(ctx, "name", "client-valid"))
+	require.ErrorContains(t, g.forwardedCertificateNames(ctx, "not name", "client-wrong-ca"), "not to name")
+	require.NoError(t, g.forwardedCertificateNames(ctx, "not name", "edge-lb"))
+
+	secondOnly := fmt.Sprintf(`Hash=%s;Subject="CN=client-wrong-ca",Hash=%s;Subject="CN=client-valid"`, other.Thumbprint, valid.Thumbprint)
+	publish([]any{secondOnly})
+	require.ErrorContains(t, g.forwardedCertificateNames(ctx, "name", "client-valid"), "Hash")
+	require.ErrorContains(t, g.forwardedCertificateNames(ctx, "not name", "client-valid"), "not to name")
+
+	publish("")
+	require.ErrorContains(t, g.forwardedCertificateNames(ctx, "name", "client-valid"), "got none")
+	require.NoError(t, g.forwardedCertificateNames(ctx, "not name", "client-valid"))
+}
+
+func TestCertificateUploadOptions(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "relay-edge-lb", "edgeLB"))
+
+	require.NoError(t, g.uploadCertificateWithRole(ctx, "edge-lb-ca", "${CTX:edgeLB}", "downstream", "relay"))
+	require.Equal(t, "relay", fake.uploads[0]["role"])
+	require.Equal(t, "downstream", fake.uploads[0]["usage"])
+	_, hasMatch := fake.uploads[0]["match"]
+	require.False(t, hasMatch)
+	_, hasKey := fake.uploads[0]["privateKey"]
+	require.False(t, hasKey)
+
+	require.NoError(t, g.uploadCertificateWithRoleAndDNSSAN(ctx, "corp-ca", "${CTX:edgeLB}", "downstream", "relay", "lb.corp.test"))
+	match, ok := fake.uploads[1]["match"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, []any{"lb.corp.test"}, match["dnsSANs"])
+
+	require.NoError(t, g.storeGatewayIdentity(ctx, "gw-identity-a", "${CTX:edgeLB}"))
+	require.Equal(t, "identity", fake.uploads[2]["usage"])
+	require.Contains(t, fake.uploads[2]["privateKey"], "PRIVATE KEY")
+	require.Contains(t, fake.uploads[2]["certificate"], "BEGIN CERTIFICATE")
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.Len(t, registry.Pending(), 1)
+	require.Equal(t, "cert-1", registry.Pending()[0].ID)
+
+	fake.uploadStatus = http.StatusBadRequest
+	require.ErrorContains(t, g.storeGatewayIdentity(ctx, "gw-identity-a", "${CTX:edgeLB}"), "status 201")
+}
+
+func TestDeleteCertificateNamed(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "relay-edge-lb", "edgeLB"))
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "missing-cert", "missing"))
+	name, err := stepscommon.StoredValue(ctx, "edgeLB")
+	require.NoError(t, err)
+	fake.extraCerts = []map[string]any{{"id": "cert-9", "name": name}}
+
+	require.NoError(t, g.deleteCertificateNamed(ctx, "${CTX:edgeLB}"))
+	require.Equal(t, []string{"cert-9"}, fake.deletedIDs)
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, published.StatusCode)
+
+	require.NoError(t, g.poolCertificateFixtures(ctx, "edge-lb-ca", "${CTX:edgeLB}", "downstream"))
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "cert-1", registry.Pending()[0].ID)
+	fake.deleteStatus = http.StatusConflict
+	fake.extraCerts = []map[string]any{{"id": "cert-1", "name": name}}
+	require.NoError(t, g.deleteCertificateNamed(ctx, "${CTX:edgeLB}"))
+	require.Equal(t, http.StatusConflict, mustPublished(t, ctx).StatusCode)
+	require.Equal(t, "cert-1", registry.Pending()[0].ID)
+
+	started := time.Now()
+	err = g.deleteCertificateNamed(ctx, "${CTX:missing}")
+	require.ErrorContains(t, err, "no certificate named")
+	require.ErrorContains(t, err, "non-retryable")
+	require.Less(t, time.Since(started), 5*time.Second)
+}
+
+func mustPublished(t *testing.T, ctx context.Context) *httpx.Response {
+	t.Helper()
+	resp, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	return resp
+}
+
+func TestValidationErrorAndMetricText(t *testing.T) {
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "relay-edge-lb", "edgeLB"))
+	name, err := stepscommon.StoredValue(ctx, "edgeLB")
+	require.NoError(t, err)
+	body := `{"errors":[{"field":"spec.policies[0].params.accept[0].ca","message":"` + name + ` is a relay (front proxy) entry and cannot be accepted as a client"}]}`
+	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: 400, Body: []byte(body)}))
+	require.NoError(t, g.validationErrorWithMessage(ctx, "spec.policies[0].params.accept[0].ca",
+		"${CTX:edgeLB} is a relay (front proxy) entry and cannot be accepted as a client"))
+	require.ErrorContains(t, g.validationErrorWithMessage(ctx, "spec.policies[0].params.accept[0].ca", "other"), "no validation error")
+
+	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: 200, Body: []byte("policy_executions_total 1\n")}))
+	require.NoError(t, g.responseOmitsMetric(ctx, "mtls_auth_"))
+	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: 200, Body: []byte("# TYPE mtls_auth_total counter\n")}))
+	require.ErrorContains(t, g.responseOmitsMetric(ctx, `mtls_auth_`), "contains")
+}
+
+func TestObservabilityHelpers(t *testing.T) {
+	valid := mtlsFixture(t, "client-valid")
+	require.Equal(t, "urn:partner-a:payments", certificateSubjectIdentity(valid.Certificate))
+	require.Equal(t, "edge-lb.internal", certificateSubjectIdentity(mtlsFixture(t, "edge-lb").Certificate))
+	require.Contains(t, certificateSubjectIdentity(mtlsFixture(t, "client-no-san").Certificate), "CN=client-no-san")
+
+	labels, err := parseLabels(`{policy_name="mtls-auth",status="denied"}`)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"policy_name": "mtls-auth", "status": "denied"}, labels)
+	_, err = parseLabels(`{usage=downstream}`)
+	require.Error(t, err)
+	_, err = parseLabels(`{usage="downstream",usage="upstream"}`)
+	require.ErrorContains(t, err, "appears twice")
+
+	samples := parseSamples("# HELP gateway_controller_certificates_total\ngateway_controller_certificates_total{usage=\"downstream\"} 2\n")
+	require.Len(t, samples, 1)
+	require.Equal(t, "gateway_controller_certificates_total", samples[0].name)
+	require.Equal(t, "downstream", samples[0].labels["usage"])
+	require.Equal(t, "2", samples[0].value)
+
+	line := `{"path":"/obs/v1/anything","peerSubj":"CN=client-valid","peerFp":"` + valid.Thumbprint + `"}`
+	expectations := []logExpectation{{describe: "subject", shownIn: func(s string) bool { return strings.Contains(s, `"peerSubj":"CN=client-valid"`) }}}
+	require.NoError(t, observeAccessLogLine("noise\n"+line, "/obs/v1/anything", expectations))
+	require.Equal(t, "tolerated", outcome(observeAccessLogLine("no line yet", "/obs/v1/anything", expectations)))
+	wrong := observeAccessLogLine(line, "/obs/v1/anything", []logExpectation{{describe: "tls", shownIn: func(string) bool { return false }}})
+	require.Equal(t, "fail", outcome(wrong))
+	require.ErrorContains(t, wrong, "does not show tls")
+
+	require.NoError(t, observeCounterGrowth("policy_executions_total", `{status="denied"}`, 1, 2, 1))
+	require.Equal(t, "tolerated", outcome(observeCounterGrowth("policy_executions_total", `{status="denied"}`, 1, 1, 1)))
+	fell := observeCounterGrowth("policy_executions_total", `{status="denied"}`, 4, 3, 1)
+	require.Equal(t, "fail", outcome(fell))
+	require.ErrorContains(t, fell, "was reset")
 }

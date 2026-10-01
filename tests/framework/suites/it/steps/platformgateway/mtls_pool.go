@@ -22,7 +22,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"reflect"
 	"strings"
 
@@ -45,11 +44,13 @@ func fixturePEMKey(fixture string) string     { return "fixture." + fixture + ".
 func fixtureKeyPEMKey(fixture string) string  { return "fixture." + fixture + ".key" }
 func fixtureSubjectKey(fixture string) string { return "fixture." + fixture + ".subject" }
 
+// fixtureEncryptedKeyPEMKey names the passphrase-protected form of a fixture's key.
+func fixtureEncryptedKeyPEMKey(fixture string) string { return "fixture." + fixture + ".encryptedKey" }
+
 func (g *Gateway) registerMTLSPoolSteps(sc *godog.ScenarioContext) {
 	sc.Before(publishFixtureMaterial)
-	sc.Step(`^the certificate fixture "([^"]*)" is pooled as "([^"]*)"$`, g.poolUpstreamFixture)
 	sc.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)"$`, g.uploadUpstreamFixture)
-	sc.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)"(?: and dns SAN "([^"]*)")?$`,
+	sc.Step(`^I upload the certificate fixtures? "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)"(?: and dns SAN "([^"]*)")?$`,
 		g.uploadFixtureWithRole)
 	sc.Step(`^I upload to the certificates endpoint the body:$`, g.uploadCertificateBody)
 	sc.Step(`^I upload a certificate body a tenth over the upload limit as "([^"]*)" with usage "([^"]*)"$`,
@@ -85,6 +86,13 @@ func publishFixtureMaterial(ctx context.Context, sc *godog.Scenario) (context.Co
 			fixtureKeyPEMKey(name):  jsonEscaped(fixture.KeyPEM),
 			fixtureSubjectKey(name): fixture.Certificate.Subject.String(),
 		}
+		if len(fixture.KeyPEM) > 0 {
+			encrypted, err := fixture.EncryptedKeyPEM(encryptedKeyPassphrase)
+			if err != nil {
+				return ctx, err
+			}
+			values[fixtureEncryptedKeyPEMKey(name)] = jsonEscaped(encrypted)
+		}
 		for key, value := range values {
 			if err := tcontext.Set(ctx, key, value); err != nil {
 				return ctx, err
@@ -101,17 +109,6 @@ func jsonEscaped(b []byte) string {
 }
 
 // ── Uploads ────────────────────────────────────────────────────────────────────
-
-func (g *Gateway) poolUpstreamFixture(ctx context.Context, fixture, name string) error {
-	resp, err := g.uploadFixture(ctx, fixture, name, nil)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("expected certificate fixture %q to be pooled with status 201, got %s", fixture, resp.Describe())
-	}
-	return nil
-}
 
 func (g *Gateway) uploadUpstreamFixture(ctx context.Context, fixture, name string) error {
 	_, err := g.uploadFixture(ctx, fixture, name, nil)
@@ -442,6 +439,9 @@ func validationErrorListed(ctx context.Context, field, mode, text string) error 
 	}
 	expected, err := stepscommon.Expand(ctx, text)
 	if err != nil {
+		return err
+	}
+	if field, err = stepscommon.Expand(ctx, field); err != nil {
 		return err
 	}
 	var body struct {

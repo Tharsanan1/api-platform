@@ -45,21 +45,10 @@ const listenerHoldWindow = 5 * time.Second
 
 func (g *Gateway) registerMTLSListenerSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the certificate fixtures? "([^"]*)" (?:is|are) pooled as "([^"]*)"$`, g.poolCertificateFixturesWithoutUsage)
-	sc.Step(`^I upload the certificate fixtures? "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)"$`,
-		g.uploadCertificateFixturesWithRole)
-	sc.Step(`^the client authority pool is empty$`, g.requireCleanGateway)
 	sc.Step(`^the HTTPS listener should request a client certificate$`, g.listenerRequestsClientCertificate)
 	sc.Step(`^the HTTPS listener should stop requesting a client certificate$`, g.listenerStopsRequestingClientCertificate)
 	sc.Step(`^the HTTPS listener should not request a client certificate$`, g.listenerDoesNotRequestClientCertificate)
 	sc.Step(`^the HTTPS listener should present the certificate in "([^"]*)"$`, g.listenerPresentsCertificateFile)
-	sc.Step(`^the response should list a validation error for field "([^"]*)" with message "([^"]*)"$`,
-		func(ctx context.Context, field, message string) error {
-			return validationError(ctx, field, message, false)
-		})
-	sc.Step(`^the response should list a validation error for field "([^"]*)" containing "([^"]*)"$`,
-		func(ctx context.Context, field, message string) error {
-			return validationError(ctx, field, message, true)
-		})
 	sc.Step(`^the response should include a warning with code "([^"]*)" for field "([^"]*)"$`, responseWarnsForField)
 	sc.Step(`^the response should include a warning with code "([^"]*)"$`,
 		func(ctx context.Context, code string) error { return responseWarnsForField(ctx, code, "") })
@@ -72,11 +61,6 @@ func (g *Gateway) registerMTLSListenerSteps(sc *godog.ScenarioContext) {
 // as backend trust, and requires 201.
 func (g *Gateway) poolCertificateFixturesWithoutUsage(ctx context.Context, fixtureList, name string) error {
 	return g.poolCertificateFixtures(ctx, fixtureList, name, "")
-}
-
-func (g *Gateway) uploadCertificateFixturesWithRole(ctx context.Context, fixtureList, name, usage, role string) error {
-	_, err := g.uploadFixtures(ctx, fixtureList, name, certificateUpload{usage: usage, role: role})
-	return err
 }
 
 // ── Whether the HTTPS listener asks for a client certificate ─────────────────────
@@ -209,42 +193,6 @@ type fieldMessage struct {
 	Code    string `json:"code"`
 	Field   string `json:"field"`
 	Message string `json:"message"`
-}
-
-// validationError requires the published response to list an error for field whose message
-// is message, or contains it.
-func validationError(ctx context.Context, field, message string, containing bool) error {
-	resp, err := httpx.Published(ctx)
-	if err != nil {
-		return err
-	}
-	wantField, err := stepscommon.Expand(ctx, field)
-	if err != nil {
-		return err
-	}
-	wantMessage, err := stepscommon.Expand(ctx, message)
-	if err != nil {
-		return err
-	}
-	var body struct {
-		Errors []fieldMessage `json:"errors"`
-	}
-	if err := json.Unmarshal(resp.Body, &body); err != nil {
-		return fmt.Errorf("the response is not a validation error: %w (%s)", err, resp.Describe())
-	}
-	for _, e := range body.Errors {
-		if e.Field != wantField {
-			continue
-		}
-		if e.Message == wantMessage || (containing && strings.Contains(e.Message, wantMessage)) {
-			return nil
-		}
-	}
-	how := "with message"
-	if containing {
-		how = "containing"
-	}
-	return fmt.Errorf("no validation error for field %q %s %q in %+v", wantField, how, wantMessage, body.Errors)
 }
 
 // responseWarnings reads the warnings of the published response. A status.warnings list,

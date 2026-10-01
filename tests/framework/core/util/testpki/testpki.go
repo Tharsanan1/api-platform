@@ -138,7 +138,7 @@ func Generate(now time.Time) (*Set, error) {
 		return nil, fmt.Errorf("testpki: generation time is zero")
 	}
 	g := &generator{now: now, issued: map[string]*issuer{}}
-	for _, s := range catalogue(now) {
+	for _, s := range append(catalogue(now), backendCatalogue()...) {
 		if err := g.issue(s); err != nil {
 			return nil, err
 		}
@@ -173,7 +173,6 @@ func catalogue(now time.Time) []spec {
 		{name: "ca-not-yet-valid", subject: cn("Not Yet Valid Root CA"), isCA: true, notBefore: futureFrom, notAfter: futureTo},
 		{name: "ca-expires-soon", subject: cn("Expires Soon Root CA"), isCA: true, notBefore: soonFrom, notAfter: soonTo},
 		{name: "backend-ca", subject: cn("Backend Root CA"), isCA: true},
-		{name: "backend-ca-b", subject: cn("Backend CA B"), isCA: true},
 
 		// Client leaves.
 		{name: "client-valid", subject: cn("client-valid"), parent: "ca-a",

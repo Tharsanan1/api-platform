@@ -179,8 +179,8 @@ func TestPoolUpstreamFixtureRequiresCreated(t *testing.T) {
 	store := &fakeCertificateStore{postStatus: http.StatusConflict}
 	g, ctx := mtlsGatewayUnderTest(t, store, nil)
 	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "trust", "trust"))
-	require.ErrorContains(t, g.poolUpstreamFixture(ctx, "ca-a", "${CTX:trust}"), "status 201")
-	require.ErrorContains(t, g.poolUpstreamFixture(ctx, "no-such-fixture", "${CTX:trust}"), "unknown fixture")
+	require.ErrorContains(t, g.poolCertificateFixturesWithoutUsage(ctx, "ca-a", "${CTX:trust}"), "status 201")
+	require.ErrorContains(t, g.poolCertificateFixturesWithoutUsage(ctx, "no-such-fixture", "${CTX:trust}"), "unknown fixture")
 	require.Empty(t, pendingCertificates(t, ctx))
 }
 

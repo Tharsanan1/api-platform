@@ -1315,7 +1315,7 @@ func TestCertificateUploadOptions(t *testing.T) {
 	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
 	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "relay-edge-lb", "edgeLB"))
 
-	require.NoError(t, g.uploadCertificateFixturesWithRole(ctx, "edge-lb-ca", "${CTX:edgeLB}", "downstream", "relay"))
+	require.NoError(t, g.uploadFixtureWithRole(ctx, "edge-lb-ca", "${CTX:edgeLB}", "downstream", "relay", ""))
 	require.Equal(t, "relay", fake.uploads[0]["role"])
 	require.Equal(t, "downstream", fake.uploads[0]["usage"])
 	_, hasMatch := fake.uploads[0]["match"]
@@ -1323,7 +1323,7 @@ func TestCertificateUploadOptions(t *testing.T) {
 	_, hasKey := fake.uploads[0]["privateKey"]
 	require.False(t, hasKey)
 
-	require.NoError(t, g.uploadCertificateWithRoleAndDNSSAN(ctx, "corp-ca", "${CTX:edgeLB}", "downstream", "relay", "lb.corp.test"))
+	require.NoError(t, g.uploadFixtureWithRole(ctx, "corp-ca", "${CTX:edgeLB}", "downstream", "relay", "lb.corp.test"))
 	match, ok := fake.uploads[1]["match"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, []any{"lb.corp.test"}, match["dnsSANs"])
@@ -1386,9 +1386,9 @@ func TestValidationErrorAndMetricText(t *testing.T) {
 	require.NoError(t, err)
 	body := `{"errors":[{"field":"spec.policies[0].params.accept[0].ca","message":"` + name + ` is a relay (front proxy) entry and cannot be accepted as a client"}]}`
 	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: 400, Body: []byte(body)}))
-	require.NoError(t, validationError(ctx, "spec.policies[0].params.accept[0].ca",
-		"${CTX:edgeLB} is a relay (front proxy) entry and cannot be accepted as a client", false))
-	require.ErrorContains(t, validationError(ctx, "spec.policies[0].params.accept[0].ca", "other", false), "no validation error")
+	require.NoError(t, validationErrorListed(ctx, "spec.policies[0].params.accept[0].ca", "with message",
+		"${CTX:edgeLB} is a relay (front proxy) entry and cannot be accepted as a client"))
+	require.ErrorContains(t, validationErrorListed(ctx, "spec.policies[0].params.accept[0].ca", "with message", "other"), "no validation error")
 
 	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: 200, Body: []byte("policy_executions_total 1\n")}))
 	require.NoError(t, g.responseOmitsMetric(ctx, "mtls_auth_"))
@@ -1572,7 +1572,7 @@ func TestUploadWithRoleAndPoolWithoutUsage(t *testing.T) {
 	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "listener-edge-lb", "edgeLb"))
 	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "listener-backend-trust", "backendTrust"))
 
-	require.NoError(t, g.uploadCertificateFixturesWithRole(ctx, "edge-lb-ca", "${CTX:edgeLb}", "downstream", "relay"))
+	require.NoError(t, g.uploadFixtureWithRole(ctx, "edge-lb-ca", "${CTX:edgeLb}", "downstream", "relay", ""))
 	require.Equal(t, "relay", fake.uploads[0]["role"])
 	require.Equal(t, "downstream", fake.uploads[0]["usage"])
 	require.Contains(t, fake.uploads[0]["certificate"], string(mtlsFixture(t, "edge-lb-ca").CertPEM))
@@ -1596,12 +1596,12 @@ func TestValidationErrorMatchesFieldAndMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: http.StatusBadRequest, Body: body}))
 
-	require.NoError(t, validationError(ctx, "spec.policies[0]", "no client-CA authority named ${CTX:partnerB} exists on this gateway", false))
-	require.NoError(t, validationError(ctx, "spec.policies[0]", "no client-CA authority named", true))
-	require.ErrorContains(t, validationError(ctx, "spec.policies[0]", "no client-CA authority named", false), "with message")
-	require.ErrorContains(t, validationError(ctx, "spec.policies[1]", "no client-CA authority named", true), "containing")
+	require.NoError(t, validationErrorListed(ctx, "spec.policies[0]", "with message", "no client-CA authority named ${CTX:partnerB} exists on this gateway"))
+	require.NoError(t, validationErrorListed(ctx, "spec.policies[0]", "containing", "no client-CA authority named"))
+	require.ErrorContains(t, validationErrorListed(ctx, "spec.policies[0]", "with message", "no client-CA authority named"), "with message")
+	require.ErrorContains(t, validationErrorListed(ctx, "spec.policies[1]", "containing", "no client-CA authority named"), "containing")
 	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: http.StatusBadRequest, Body: []byte("not json")}))
-	require.ErrorContains(t, validationError(ctx, "spec.policies[0]", "x", false), "not a validation error")
+	require.ErrorContains(t, validationErrorListed(ctx, "spec.policies[0]", "with message", "x"), "not a JSON error response")
 }
 
 func TestResponseWarningsPreferTheStatusList(t *testing.T) {

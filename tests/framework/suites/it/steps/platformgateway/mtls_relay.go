@@ -29,7 +29,6 @@ import (
 
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
 	"github.com/wso2/api-platform/tests/framework/core/util/testpki"
-	stepscommon "github.com/wso2/api-platform/tests/framework/suites/it/steps/common"
 )
 
 func mtlsFixtureNamed(name string) (*testpki.Fixture, error) {
@@ -41,18 +40,7 @@ func mtlsFixtureNamed(name string) (*testpki.Fixture, error) {
 }
 
 func (g *Gateway) registerMTLSRelaySteps(sc *godog.ScenarioContext) {
-	sc.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)" and dns SAN "([^"]*)"$`, g.uploadCertificateWithRoleAndDNSSAN)
 	sc.Step(`^the backend's X-Forwarded-Client-Cert should (name|not name) certificate "([^"]*)"$`, g.forwardedCertificateNames)
-}
-
-// uploadCertificateWithRoleAndDNSSAN uploads one fixture whose relay match lists one DNS SAN.
-func (g *Gateway) uploadCertificateWithRoleAndDNSSAN(ctx context.Context, fixture, name, usage, role, dnsSAN string) error {
-	san, err := stepscommon.Expand(ctx, dnsSAN)
-	if err != nil {
-		return err
-	}
-	_, err = g.uploadFixtures(ctx, fixture, name, certificateUpload{usage: usage, role: role, dnsSANs: []string{san}})
-	return err
 }
 
 // xfccHash reads each Hash element of an X-Forwarded-Client-Cert value.

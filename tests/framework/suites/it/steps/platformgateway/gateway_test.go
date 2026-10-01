@@ -1194,6 +1194,7 @@ func (d *scriptedDataPlane) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 func TestSendUntilRouteAnswers(t *testing.T) {
 	noRoute := scriptedReply{status: http.StatusNotFound, body: noRouteBody}
 	warming := scriptedReply{status: http.StatusServiceUnavailable, body: "no healthy upstream"}
+	policyChainMissing := scriptedReply{status: http.StatusInternalServerError, body: policyChainMissingBody}
 	for _, tc := range []struct {
 		name    string
 		want    int
@@ -1215,6 +1216,13 @@ func TestSendUntilRouteAnswers(t *testing.T) {
 		{name: "503 after no route", want: 503, replies: []scriptedReply{noRoute, warming}, served: 2},
 		{name: "a 200 while waiting for an unreachable upstream fails at once", want: 503,
 			replies: []scriptedReply{noRoute, {status: 200, upstream: true}}, err: "expected 503 once the route is live", served: 2},
+		{name: "200 after the policy chain is missing", want: 200,
+			replies: []scriptedReply{noRoute, policyChainMissing, {status: 200, upstream: true}}, served: 3},
+		{name: "401 after the policy chain is missing", want: 401, replies: []scriptedReply{policyChainMissing, {status: 401}}, served: 2},
+		{name: "a 500 with another body fails at once", want: 200,
+			replies: []scriptedReply{{status: 500, body: `{"error":"boom"}`}}, err: "boom", served: 1},
+		{name: "a 500 from the upstream fails at once", want: 200,
+			replies: []scriptedReply{{status: 500, upstream: true, body: policyChainMissingBody}}, err: "-> 500", served: 1},
 		{name: "a 500 fails at once", want: 200, replies: []scriptedReply{{status: 500, upstream: true}}, err: "-> 500", served: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

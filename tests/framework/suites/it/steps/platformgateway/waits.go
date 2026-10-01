@@ -79,8 +79,13 @@ func fromUpstream(resp *httpx.Response) bool {
 // noRouteBody is the body of the gateway's own reply to a request that matched no route.
 const noRouteBody = `{"error":"Not Found"}`
 
+// policyChainMissingBody is the body of the policy engine's 500 for a route whose policy chain
+// it has not received yet.
+const policyChainMissingBody = `{"error":"Internal Server Error"}`
+
 // routeInBetween names the replies a data-plane route gives while it is not live yet: the
-// gateway's own no-route 404 before the route exists and, for a route that forwards, Envoy's
+// gateway's own no-route 404 before the route exists, the policy engine's 500 until it holds
+// the route's policy chain (wso2/api-platform#3621) and, for a route that forwards, Envoy's
 // own 503 while the upstream cluster warms.
 func routeInBetween(resp *httpx.Response, allowWarmingUpstream bool) (string, bool) {
 	if fromUpstream(resp) {
@@ -89,6 +94,8 @@ func routeInBetween(resp *httpx.Response, allowWarmingUpstream bool) (string, bo
 	switch {
 	case resp.StatusCode == http.StatusNotFound && strings.TrimSpace(resp.Text()) == noRouteBody:
 		return "Envoy has no route yet", true
+	case resp.StatusCode == http.StatusInternalServerError && strings.TrimSpace(resp.Text()) == policyChainMissingBody:
+		return "the policy engine has no policy chain for the route yet", true
 	case resp.StatusCode == http.StatusServiceUnavailable && allowWarmingUpstream:
 		return "the upstream cluster is still warming", true
 	default:
@@ -97,10 +104,10 @@ func routeInBetween(resp *httpx.Response, allowWarmingUpstream bool) (string, bo
 }
 
 // sendUntilRouteAnswers polls a data-plane path until its route is live and answers want.
-// Waiting for 200 tolerates Envoy's no-route 404 and its 503 while the upstream warms. Waiting
-// for 401, the rejection an authenticating policy gives, or for 503, the answer of a route whose
-// upstream cannot be reached, tolerates only the no-route 404, so a 200 fails at once. Any other
-// answer fails at once too.
+// Waiting for 200 tolerates Envoy's no-route 404, the policy engine's missing-chain 500 and Envoy's
+// 503 while the upstream warms. Waiting for 401, the rejection an authenticating policy gives, or
+// for 503, the answer of a route whose upstream cannot be reached, tolerates only the first two,
+// so a 200 fails at once. Any other answer fails at once too.
 func (g *Gateway) sendUntilRouteAnswers(ctx context.Context, method, path string, want int) error {
 	if want != http.StatusOK && want != http.StatusUnauthorized && want != http.StatusServiceUnavailable {
 		return fmt.Errorf("waiting for a route supports status 200, 401 or 503, not %d", want)

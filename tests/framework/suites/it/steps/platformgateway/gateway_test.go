@@ -21,6 +21,7 @@ package platformgateway
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,7 +37,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cucumber/godog"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/wso2/api-platform/tests/framework/core/cleanup"
 	"github.com/wso2/api-platform/tests/framework/core/components"
@@ -1206,4 +1210,381 @@ func TestSendUntilRouteAnswers(t *testing.T) {
 	}
 	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
 	require.ErrorContains(t, g.sendUntilRouteAnswers(ctx, "GET", "/x", 404), "supports status 200 or 401")
+}
+
+func TestParsePresentationCarriesARelayedCertificate(t *testing.T) {
+	for phrase, want := range map[string]presentation{
+		`with no client certificate and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid"`: {
+			relayed: relayedCertificate{header: "X-WSO2-CLIENT-CERTIFICATE", fixture: "client-valid"},
+		},
+		`with client certificate "client-wrong-ca" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid" encoded as "base64"`: {
+			fixture: "client-wrong-ca",
+			relayed: relayedCertificate{header: "X-WSO2-CLIENT-CERTIFICATE", fixture: "client-valid", encoding: "base64"},
+		},
+		`with no client certificate and header "X-Client-Cert" carrying certificate "client-valid" encoded as "pem" and bearer token "abc"`: {
+			relayed: relayedCertificate{header: "X-Client-Cert", fixture: "client-valid", encoding: "pem"},
+			bearer:  "abc",
+		},
+		`with client certificate "client-valid" and its chain and header "X-Client-Cert" carrying certificate "ca-a" encoded as "url"`: {
+			fixture:   "client-valid",
+			withChain: true,
+			relayed:   relayedCertificate{header: "X-Client-Cert", fixture: "ca-a", encoding: "url"},
+		},
+	} {
+		got, err := parsePresentation(phrase)
+		require.NoError(t, err, phrase)
+		require.Equal(t, want, got, phrase)
+	}
+	plain, err := parsePresentation(`with no client certificate`)
+	require.NoError(t, err)
+	require.Zero(t, plain.relayed)
+}
+
+func TestEncodeRelayedCertificate(t *testing.T) {
+	fixture := mtlsFixture(t, "client-valid")
+	urlEncoded, err := encodeRelayedCertificate("client-valid", "")
+	require.NoError(t, err)
+	require.Equal(t, url.PathEscape(string(fixture.CertPEM)), urlEncoded)
+	named, err := encodeRelayedCertificate("client-valid", "url")
+	require.NoError(t, err)
+	require.Equal(t, urlEncoded, named)
+
+	pemText, err := encodeRelayedCertificate("client-valid", "pem")
+	require.NoError(t, err)
+	require.Equal(t, strings.ReplaceAll(string(fixture.CertPEM), "\n", " "), pemText)
+	require.NotContains(t, pemText, "\n")
+
+	der, err := encodeRelayedCertificate("client-valid", "base64")
+	require.NoError(t, err)
+	require.Equal(t, base64.StdEncoding.EncodeToString(fixture.Certificate.Raw), der)
+
+	_, err = encodeRelayedCertificate("client-valid", "der")
+	require.ErrorContains(t, err, "unknown certificate header encoding")
+	_, err = encodeRelayedCertificate("no-such-fixture", "")
+	require.ErrorContains(t, err, "unknown fixture")
+}
+
+func TestSendRelayingCertificateSetsTheHeaderOnPlainHTTP(t *testing.T) {
+	var got atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Nil(t, r.TLS)
+		got.Store(r.Header.Get("X-WSO2-CLIENT-CERTIFICATE"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	g.base = stubBase{dataPlane: server.URL}
+
+	require.NoError(t, g.sendRelayingCertificate(ctx, "get", "/anything", "X-WSO2-CLIENT-CERTIFICATE", "client-valid", ""))
+	want, err := encodeRelayedCertificate("client-valid", "url")
+	require.NoError(t, err)
+	require.Equal(t, want, got.Load())
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, published.StatusCode)
+	require.Nil(t, published.TLS)
+
+	require.NoError(t, g.sendRelayingCertificate(ctx, "GET", "/anything", "X-WSO2-CLIENT-CERTIFICATE", "client-valid", "pem"))
+	wantPEM, err := encodeRelayedCertificate("client-valid", "pem")
+	require.NoError(t, err)
+	// An HTTP parser drops the trailing space that the PEM's final newline becomes.
+	require.Equal(t, strings.TrimRight(wantPEM, " "), got.Load())
+	require.NotContains(t, got.Load(), "\n")
+	require.ErrorContains(t, g.sendRelayingCertificate(ctx, "GET", "/anything", "X-WSO2-CLIENT-CERTIFICATE", "client-valid", "der"),
+		"unknown certificate header encoding")
+}
+
+func TestSendHTTPSAppliesTheRelayedHeaderBesideTheClientCertificate(t *testing.T) {
+	var gotHeader, gotSubject atomic.Value
+	https := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader.Store(r.Header.Get("X-WSO2-CLIENT-CERTIFICATE"))
+		subject := "none"
+		if len(r.TLS.PeerCertificates) > 0 {
+			subject = r.TLS.PeerCertificates[0].Subject.CommonName
+		}
+		gotSubject.Store(subject)
+		w.WriteHeader(http.StatusOK)
+	}))
+	https.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
+	https.StartTLS()
+	t.Cleanup(https.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), https)
+
+	phrase := `with client certificate "client-wrong-ca" and header "X-WSO2-CLIENT-CERTIFICATE" carrying certificate "client-valid" encoded as "base64"`
+	require.NoError(t, g.sendHTTPS(ctx, "GET", "/anything", phrase))
+	want, err := encodeRelayedCertificate("client-valid", "base64")
+	require.NoError(t, err)
+	require.Equal(t, want, gotHeader.Load())
+	require.Equal(t, "client-wrong-ca", gotSubject.Load())
+}
+
+func TestForwardedCertificateNames(t *testing.T) {
+	fixture := mtlsFixture(t, "client-valid")
+	cn := fixture.Certificate.Subject.CommonName
+	named := "Hash=" + fixture.Thumbprint + `;Subject="CN=` + cn + `"`
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	publishEcho := func(headers map[string]any) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"headers": headers})
+		require.NoError(t, err)
+		require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: http.StatusOK, Body: body}))
+	}
+
+	publishEcho(map[string]any{"X-Forwarded-Client-Cert": named})
+	require.NoError(t, g.forwardedCertificateNames(ctx, "client-valid"))
+	publishEcho(map[string]any{"x-forwarded-client-cert": []any{named}})
+	require.NoError(t, g.forwardedCertificateNames(ctx, "client-valid"))
+
+	publishEcho(map[string]any{"X-Forwarded-Client-Cert": "Hash=" + strings.Repeat("ab", 32) + `;Subject="CN=` + cn + `"`})
+	require.ErrorContains(t, g.forwardedCertificateNames(ctx, "client-valid"), fixture.Thumbprint)
+	publishEcho(map[string]any{"X-Forwarded-Client-Cert": "Hash=" + fixture.Thumbprint})
+	require.ErrorContains(t, g.forwardedCertificateNames(ctx, "client-valid"), "CN="+cn)
+	publishEcho(map[string]any{})
+	require.ErrorContains(t, g.forwardedCertificateNames(ctx, "client-valid"), "got none")
+	publishEcho(map[string]any{"X-Forwarded-Client-Cert": 7})
+	require.ErrorContains(t, g.forwardedCertificateNames(ctx, "client-valid"), "not a string or a list")
+	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: http.StatusOK, Body: []byte("not json")}))
+	require.ErrorContains(t, g.forwardedCertificateNames(ctx, "client-valid"), "not an echo")
+}
+
+func TestUploadWithRoleAndPoolWithoutUsage(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "listener-edge-lb", "edgeLb"))
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "listener-backend-trust", "backendTrust"))
+
+	require.NoError(t, g.uploadCertificateFixturesWithRole(ctx, "edge-lb-ca", "${CTX:edgeLb}", "downstream", "relay"))
+	require.Equal(t, "relay", fake.uploads[0]["role"])
+	require.Equal(t, "downstream", fake.uploads[0]["usage"])
+	require.Contains(t, fake.uploads[0]["certificate"], string(mtlsFixture(t, "edge-lb-ca").CertPEM))
+
+	require.NoError(t, g.poolCertificateFixturesWithoutUsage(ctx, "backend-ca", "${CTX:backendTrust}"))
+	_, hasUsage := fake.uploads[1]["usage"]
+	require.False(t, hasUsage)
+	require.Equal(t, string(mtlsFixture(t, "backend-ca").CertPEM), fake.uploads[1]["certificate"])
+	require.NotContains(t, fake.uploads[1], "role")
+}
+
+func TestValidationErrorMatchesFieldAndMessage(t *testing.T) {
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "listener-partner-b", "partnerB"))
+	name, err := stepscommon.StoredValue(ctx, "partnerB")
+	require.NoError(t, err)
+	body, err := json.Marshal(map[string]any{"errors": []map[string]string{{
+		"field":   "spec.policies[0]",
+		"message": "no client-CA authority named " + name + " exists on this gateway",
+	}}})
+	require.NoError(t, err)
+	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: http.StatusBadRequest, Body: body}))
+
+	require.NoError(t, validationError(ctx, "spec.policies[0]", "no client-CA authority named ${CTX:partnerB} exists on this gateway", false))
+	require.NoError(t, validationError(ctx, "spec.policies[0]", "no client-CA authority named", true))
+	require.ErrorContains(t, validationError(ctx, "spec.policies[0]", "no client-CA authority named", false), "with message")
+	require.ErrorContains(t, validationError(ctx, "spec.policies[1]", "no client-CA authority named", true), "containing")
+	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: http.StatusBadRequest, Body: []byte("not json")}))
+	require.ErrorContains(t, validationError(ctx, "spec.policies[0]", "x", false), "not a validation error")
+}
+
+func TestResponseWarningsPreferTheStatusList(t *testing.T) {
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	publish := func(body string) {
+		t.Helper()
+		require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: http.StatusOK, Body: []byte(body)}))
+	}
+	statusWarning := `{"code":"MTLS_ACCEPT_INHERITS_POOL","field":"spec.policies[0].params.accept","message":"inherited"}`
+	topWarning := `{"code":"HEADER_CERT_BYPASS_ACTIVE","message":"bypass"}`
+
+	publish(`{"status":{"warnings":[` + statusWarning + `]},"warnings":[` + topWarning + `]}`)
+	require.NoError(t, responseWarnsForField(ctx, "MTLS_ACCEPT_INHERITS_POOL", "spec.policies[0].params.accept"))
+	require.ErrorContains(t, responseWarnsForField(ctx, "HEADER_CERT_BYPASS_ACTIVE", ""), "no warning with code")
+
+	publish(`{"status":{"warnings":[]},"warnings":[` + topWarning + `]}`)
+	require.NoError(t, responseHasNoWarnings(ctx))
+
+	publish(`{"warnings":[` + topWarning + `]}`)
+	require.NoError(t, responseWarnsForField(ctx, "HEADER_CERT_BYPASS_ACTIVE", ""))
+	publish(`{"status":{"warnings":null},"warnings":[` + topWarning + `]}`)
+	require.NoError(t, responseWarnsForField(ctx, "HEADER_CERT_BYPASS_ACTIVE", ""))
+
+	publish(`{"status":{"warnings":{"code":"MTLS_ACCEPT_UNNARROWED"}}}`)
+	_, err := responseWarnings(ctx)
+	require.ErrorContains(t, err, "status.warnings is not a list")
+	publish(`{"warnings":{"code":"HEADER_CERT_BYPASS_ACTIVE"}}`)
+	_, err = responseWarnings(ctx)
+	require.ErrorContains(t, err, "the response warnings are not a list")
+	publish(`not json`)
+	_, err = responseWarnings(ctx)
+	require.ErrorContains(t, err, "not JSON")
+	publish(`{}`)
+	require.NoError(t, responseHasNoWarnings(ctx))
+}
+
+func TestRepositoryFileStaysInsideTheCheckout(t *testing.T) {
+	const relative = "gateway/gateway-controller/listener-certs/default-listener.crt"
+	path, err := repositoryFile(relative)
+	require.NoError(t, err)
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.False(t, info.IsDir())
+	for _, bad := range []string{"", "/etc/passwd", "../outside", "gateway/../../outside", "a\x00b"} {
+		_, err := repositoryFile(bad)
+		require.Error(t, err, bad)
+	}
+}
+
+func TestListenerProbeAndHold(t *testing.T) {
+	requesting := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	requesting.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
+	requesting.StartTLS()
+	t.Cleanup(requesting.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), requesting)
+	started := time.Now()
+	require.NoError(t, g.listenerRequestsClientCertificate(ctx))
+	require.Less(t, time.Since(started), 2*time.Second)
+	started = time.Now()
+	err := g.listenerDoesNotRequestClientCertificate(ctx)
+	require.ErrorContains(t, err, "was expected to not request a client certificate")
+	require.ErrorContains(t, err, "invariant was violated")
+	require.NotContains(t, err.Error(), "requested a client certificate, expected none")
+	require.Less(t, time.Since(started), 2*time.Second)
+
+	quiet := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	quiet.TLS = &tls.Config{ClientAuth: tls.NoClientCert}
+	quiet.StartTLS()
+	t.Cleanup(quiet.Close)
+	g, ctx = mtlsGatewayUnderTest(t, consistentMTLSGateway(t), quiet)
+	short, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	started = time.Now()
+	err = g.listenerRequestsClientCertificate(short)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "cancel")
+	require.Less(t, time.Since(started), 2*time.Second)
+
+	started = time.Now()
+	require.NoError(t, g.listenerDoesNotRequestClientCertificate(ctx))
+	require.GreaterOrEqual(t, time.Since(started), listenerHoldWindow)
+	require.Less(t, time.Since(started), listenerHoldWindow+3*time.Second)
+
+	unmapped, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	started = time.Now()
+	err = unmapped.listenerDoesNotRequestClientCertificate(ctx)
+	require.ErrorContains(t, err, "was expected to not request a client certificate")
+	require.NotContains(t, err.Error(), "requested a client certificate, expected none")
+	require.Less(t, time.Since(started), time.Second)
+}
+
+func TestListenerPresentsTheCertificateFile(t *testing.T) {
+	const relative = "gateway/gateway-controller/listener-certs/default-listener.crt"
+	path, err := repositoryFile(relative)
+	require.NoError(t, err)
+	pair, err := tls.LoadX509KeyPair(path, filepath.Join(filepath.Dir(path), "default-listener.key"))
+	require.NoError(t, err)
+	https := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	https.TLS = &tls.Config{Certificates: []tls.Certificate{pair}}
+	https.StartTLS()
+	t.Cleanup(https.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), https)
+	require.NoError(t, g.listenerPresentsCertificateFile(ctx, relative))
+
+	other := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(other.Close)
+	g, ctx = mtlsGatewayUnderTest(t, consistentMTLSGateway(t), other)
+	require.ErrorContains(t, g.listenerPresentsCertificateFile(ctx, relative), relative)
+}
+
+func TestListenerDeployDocumentsKeepTheirFields(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	template, err := os.ReadFile(filepath.Join(filepath.Dir(source), "..", "..", "resources", "templates", "rest-api.yaml"))
+	require.NoError(t, err)
+	render := func(pairs ...string) map[string]any {
+		t.Helper()
+		definition, renderErr := stepscommon.RenderResourceTemplate(context.Background(),
+			"resources/templates/rest-api.yaml", template, valueTable(t, pairs...))
+		require.NoError(t, renderErr)
+		var document map[string]any
+		require.NoError(t, yaml.Unmarshal([]byte(definition), &document))
+		return document
+	}
+	specOf := func(document map[string]any) map[string]any {
+		t.Helper()
+		require.Equal(t, "RestApi", document["kind"])
+		require.Equal(t, "gateway.api-platform.wso2.com/v1", document["apiVersion"])
+		metadata, ok := document["metadata"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "mtls-listener-api", metadata["name"])
+		spec, ok := document["spec"].(map[string]any)
+		require.True(t, ok)
+		return spec
+	}
+
+	protected := specOf(render(
+		"apiVersion", "gateway.api-platform.wso2.com/v1",
+		"name", "mtls-listener-api",
+		"spec.displayName", "mTLS Listener API",
+		"spec.version", "v1.0",
+		"spec.context", "/mtls-listener/v1.0/$version",
+		"spec.upstream.main.url", "http://testbench:3000/api/v1",
+		"spec.operations", `[{"method":"GET","path":"/health"},{"method":"GET","path":"/protected","policies":[{"name":"mtls-auth","version":"v1"}]}]`,
+	))
+	upstream := protected["upstream"].(map[string]any)["main"].(map[string]any)
+	require.Equal(t, "http://testbench:3000/api/v1", upstream["url"])
+	operations := protected["operations"].([]any)
+	require.Len(t, operations, 2)
+	require.Empty(t, operations[0].(map[string]any)["policies"])
+	policies := operations[1].(map[string]any)["policies"].([]any)
+	require.Equal(t, "mtls-auth", policies[0].(map[string]any)["name"])
+
+	conditional := specOf(render(
+		"apiVersion", "gateway.api-platform.wso2.com/v1",
+		"name", "mtls-listener-api",
+		"spec.policies", `[{"name":"mtls-auth","version":"v1","executionCondition":"request.Method == \"POST\""}]`,
+		"spec.operations", `[{"method":"POST","path":"/echo"}]`,
+		"spec.upstream.main.url", "http://testbench:3002",
+	))
+	require.Equal(t, `request.Method == "POST"`, conditional["policies"].([]any)[0].(map[string]any)["executionCondition"])
+
+	optOut := specOf(render(
+		"apiVersion", "gateway.api-platform.wso2.com/v1",
+		"name", "mtls-listener-api",
+		"spec.policies", `[{"name":"mtls-auth","version":"v1","params":{"accept":[{"ca":"partner-a"}],"forwardCertificate":false}}]`,
+		"spec.operations", `[{"method":"GET","path":"/anything"}]`,
+		"spec.upstream.main.url", "http://testbench:3002",
+	))
+	params := optOut["policies"].([]any)[0].(map[string]any)["params"].(map[string]any)
+	require.Equal(t, false, params["forwardCertificate"])
+	require.Equal(t, "partner-a", params["accept"].([]any)[0].(map[string]any)["ca"])
+
+	inherited := specOf(render(
+		"apiVersion", "gateway.api-platform.wso2.com/v1",
+		"name", "mtls-listener-api",
+		"spec.policies", `[{"name":"mtls-auth","version":"v1","params":{"accept":[]}}]`,
+		"spec.operations", `[{"method":"GET","path":"/health"}]`,
+		"spec.upstream.main.url", "http://testbench:3000/api/v1",
+	))
+	accept := inherited["policies"].([]any)[0].(map[string]any)["params"].(map[string]any)["accept"]
+	require.Empty(t, accept)
+}
+
+func valueTable(t *testing.T, pairs ...string) *godog.Table {
+	t.Helper()
+	require.Zero(t, len(pairs)%2)
+	type cell struct {
+		Value string `json:"value"`
+	}
+	type row struct {
+		Cells []cell `json:"cells"`
+	}
+	payload := struct {
+		Rows []row `json:"rows"`
+	}{}
+	for i := 0; i < len(pairs); i += 2 {
+		payload.Rows = append(payload.Rows, row{Cells: []cell{{Value: pairs[i]}, {Value: pairs[i+1]}}})
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	var table godog.Table
+	require.NoError(t, json.Unmarshal(raw, &table))
+	return &table
 }

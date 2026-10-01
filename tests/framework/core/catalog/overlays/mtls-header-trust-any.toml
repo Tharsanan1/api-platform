@@ -1,0 +1,12 @@
+# Mutual TLS on a trusted network: the certificate relayed in a header is believed from any
+# connection, so the front proxy need not authenticate itself. The key manager matches the
+# mtls overlay.
+[[policy_configurations.jwtauth_v1.keymanagers]]
+name = "mock-jwks"
+issuer = "http://testbench:3001/token"
+
+[policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
+uri = "http://testbench:3001/jwks"
+
+[router.downstream_tls.client_certificate_header]
+trust_any = true

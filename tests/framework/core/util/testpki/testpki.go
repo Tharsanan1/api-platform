@@ -172,6 +172,7 @@ func catalogue(now time.Time) []spec {
 		{name: "ca-expired", subject: cn("Expired Root CA"), isCA: true, notBefore: expiredFrom, notAfter: expiredTo},
 		{name: "ca-not-yet-valid", subject: cn("Not Yet Valid Root CA"), isCA: true, notBefore: futureFrom, notAfter: futureTo},
 		{name: "ca-expires-soon", subject: cn("Expires Soon Root CA"), isCA: true, notBefore: soonFrom, notAfter: soonTo},
+		{name: "backend-ca", subject: cn("Backend Root CA"), isCA: true},
 
 		// Client leaves.
 		{name: "client-valid", subject: cn("client-valid"), parent: "ca-a",

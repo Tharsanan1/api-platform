@@ -195,6 +195,7 @@ blocks:
     parallel: 1
     components:
       - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls-event-hub.toml
         db:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
@@ -375,6 +376,7 @@ blocks:
     parallel: 1
     components:
       - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls-event-hub.toml
         db:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench

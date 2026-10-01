@@ -342,6 +342,7 @@ Feature: Presenting a gateway identity to backends that require a client certifi
     When I send a "GET" request to "${CTX:apiContext}/v1.0/anything"
     Then the response status code should be 503
     And the response body should contain "upstream connect error"
+    And the "gateway-runtime" log since the latest request should contain "\"upTlsFail\":\"TLS_error:|268435581:SSL_routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED"
 
   Scenario: Hostname verification is on by default and rejects a certificate for another host
     Given the gateway identity fixture "gw-identity-a" is stored as "${CTX:identityA}"

@@ -203,6 +203,25 @@ blocks:
         features:
           - features/mtls_auth.feature
 
+  # The mutual TLS scenarios on a gateway with two controllers sharing one PostgreSQL
+  # database. One serves the management API; the other alone feeds the runtime, so every
+  # certificate and API change reaches the runtime through the event path between them.
+  - name: gateway-mtls-ha
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls.toml
+        db: postgres
+      - name: testbench
+    wiring:
+      platform-gateway:
+        controllers: 2
+    runners:
+      - name: mtls-auth
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_auth.feature
+
   - name: gateway-core
     parallel: 7
     components:

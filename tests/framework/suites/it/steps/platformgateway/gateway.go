@@ -1016,8 +1016,8 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 		g.analyticsRequestMethod)
 	sc.Step(`^the latest analytics event for path "([^"]*)" should have response status (\d+)$`,
 		g.analyticsResponseStatus)
-	sc.Step(`^the latest analytics event for API "([^"]*)" should have response status (\d+)$`,
-		g.analyticsResponseStatusForAPI)
+	sc.Step(`^the latest analytics event for API context "([^"]*)" should have response status (\d+)$`,
+		g.analyticsResponseStatusForAPIContext)
 	sc.Step(`^the latest analytics event for path "([^"]*)" should have metadata field "([^"]*)" with value "([^"]*)"$`,
 		g.analyticsMetadataField)
 	sc.Step(`^the response should be an oob-template list$`, g.oobTemplateList)
@@ -1920,11 +1920,11 @@ func (g *Gateway) latestAnalyticsEvent(ctx context.Context, path string) (*analy
 	})
 }
 
-// latestAnalyticsEventForAPI selects the event by the API name the gateway records in the
-// metadata of every event, which a request answered before routing still carries.
-func (g *Gateway) latestAnalyticsEventForAPI(ctx context.Context, name string) (*analyticsEvent, error) {
-	return g.latestMatchingAnalyticsEvent(ctx, fmt.Sprintf("API %q", name), func(event *analyticsEvent) bool {
-		return event.Metadata["apiName"] == name
+// latestAnalyticsEventForAPIContext selects the event by the API context the gateway records
+// in the metadata of every event, which a request answered before routing still carries.
+func (g *Gateway) latestAnalyticsEventForAPIContext(ctx context.Context, apiContext string) (*analyticsEvent, error) {
+	return g.latestMatchingAnalyticsEvent(ctx, fmt.Sprintf("API context %q", apiContext), func(event *analyticsEvent) bool {
+		return event.Metadata["apiContext"] == apiContext
 	})
 }
 
@@ -2114,17 +2114,17 @@ func (g *Gateway) analyticsResponseStatus(ctx context.Context, path string, want
 	return nil
 }
 
-func (g *Gateway) analyticsResponseStatusForAPI(ctx context.Context, nameExpr string, want int) error {
-	name, err := stepscommon.Expand(ctx, nameExpr)
+func (g *Gateway) analyticsResponseStatusForAPIContext(ctx context.Context, contextExpr string, want int) error {
+	apiContext, err := stepscommon.Expand(ctx, contextExpr)
 	if err != nil {
 		return err
 	}
-	event, err := g.latestAnalyticsEventForAPI(ctx, name)
+	event, err := g.latestAnalyticsEventForAPIContext(ctx, apiContext)
 	if err != nil {
 		return err
 	}
 	if event.Response.Status != want {
-		return fmt.Errorf("analytics event for API %q has response status %d, want %d", name, event.Response.Status, want)
+		return fmt.Errorf("analytics event for API context %q has response status %d, want %d", apiContext, event.Response.Status, want)
 	}
 	return nil
 }

@@ -75,7 +75,7 @@ Feature: Seeing what client and backend certificates did
       | thumbprint of "client-expired" |
     And the analytics collector should have received at least 2 events
     And I wait for the analytics collector to settle
-    And the latest analytics event for API "${CTX:apiName}" should have response status 401
+    And the latest analytics event for API context "${CTX:apiContext}/${CTX:apiVersion}" should have response status 401
 
   Scenario: A request without a certificate logs the certificate fields empty
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything"

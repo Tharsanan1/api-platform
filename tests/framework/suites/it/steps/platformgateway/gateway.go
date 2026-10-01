@@ -948,6 +948,7 @@ type resourceMetadata struct {
 func (g *Gateway) register(sc *godog.ScenarioContext) {
 	g.registerRawHTTPSteps(sc)
 	g.registerMTLSSteps(sc)
+	g.registerOutboundMTLSSteps(sc)
 	g.registerWaitSteps(sc)
 	// Request state is runner-scoped, so clear it before each scenario.
 	sc.Before(func(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
@@ -1297,6 +1298,7 @@ var resourceKinds = map[string]struct{ declared, collection string }{
 	"LLM provider template": {"LlmProviderTemplate", collLLMTemplates},
 	"MCP proxy":             {"Mcp", collMCPProxies},
 	"LLM proxy":             {"LlmProxy", collLLMProxies},
+	"Agent":                 {"Agent", collAgents},
 }
 
 // kindFromDefinition returns the top-level kind a definition declares.
@@ -2157,6 +2159,7 @@ const (
 	collLLMTemplates = "/llm-provider-templates"
 	collMCPProxies   = "/mcp-proxies"
 	collLLMProxies   = "/llm-proxies"
+	collAgents       = "/agents"
 )
 
 // mutateResource creates, replaces or removes a controller resource and waits for the change
@@ -2319,6 +2322,8 @@ func cleanupKindForCollection(collection string) (cleanup.Kind, bool) {
 		return cleanup.KindLLMProviderTemplate, true
 	case collMCPProxies:
 		return cleanup.KindMCPProxy, true
+	case collAgents:
+		return cleanup.KindAgent, true
 	default:
 		return cleanup.Kind{}, false
 	}

@@ -203,6 +203,23 @@ blocks:
         features:
           - features/mtls_auth.feature
 
+  # Outbound mutual TLS adds gateway identities and trust certificates and never a client
+  # authority, so it has its own gateway and runs beside the inbound block.
+  - name: gateway-mtls-outbound
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls.toml
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+      - name: tls-backend
+    runners:
+      - name: mtls-outbound
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_outbound.feature
+
   - name: gateway-core
     parallel: 7
     components:

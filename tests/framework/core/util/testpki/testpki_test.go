@@ -20,8 +20,13 @@ package testpki
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/pbkdf2"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/hex"
 	"encoding/pem"
 	"sync"
@@ -70,8 +75,8 @@ func TestGenerateRejectsZeroTime(t *testing.T) {
 func TestEveryFixtureIsConsistent(t *testing.T) {
 	set := generated(t)
 	names := set.Names()
-	if len(names) != len(catalogue(time.Now())) {
-		t.Fatalf("got %d fixtures, want %d", len(names), len(catalogue(time.Now())))
+	if len(names) != len(catalogue(time.Now()))+len(backendCatalogue()) {
+		t.Fatalf("got %d fixtures, want %d", len(names), len(catalogue(time.Now()))+len(backendCatalogue()))
 	}
 	for _, name := range names {
 		f := mustGet(t, set, name)
@@ -244,5 +249,107 @@ func TestDefaultIsGeneratedOnceForConcurrentCallers(t *testing.T) {
 		if set != sets[0] {
 			t.Fatal("Default returned different sets to concurrent callers")
 		}
+	}
+}
+
+func TestBackendServerCertificatesNameTheDialledHostAndChainToTheirAuthority(t *testing.T) {
+	set := generated(t)
+	for _, tc := range []struct{ server, authority, host string }{
+		{"backend-server-a", "backend-ca", TLSBackendHost},
+		{"backend-server-b", "backend-ca-b", TLSBackendHost},
+		{"backend-server-wronghost", "backend-ca", WrongHostName},
+	} {
+		server, authority := mustGet(t, set, tc.server), mustGet(t, set, tc.authority)
+		roots := x509.NewCertPool()
+		roots.AddCert(authority.Certificate)
+		if _, err := server.Certificate.Verify(x509.VerifyOptions{
+			DNSName: tc.host, Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}); err != nil {
+			t.Fatalf("%s does not verify for %q under %s: %v", tc.server, tc.host, tc.authority, err)
+		}
+		if tc.host == WrongHostName {
+			if err := server.Certificate.VerifyHostname(TLSBackendHost); err == nil {
+				t.Fatalf("%s must not be valid for %q", tc.server, TLSBackendHost)
+			}
+		}
+	}
+	other := mustGet(t, set, "backend-ca-b")
+	roots := x509.NewCertPool()
+	roots.AddCert(other.Certificate)
+	if _, err := mustGet(t, set, "backend-server-a").Certificate.Verify(x509.VerifyOptions{
+		DNSName: TLSBackendHost, Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err == nil {
+		t.Fatal("backend-server-a verified under backend-ca-b")
+	}
+}
+
+func TestKeyMismatchMatchesNoIdentity(t *testing.T) {
+	set := generated(t)
+	mismatch := mustGet(t, set, "key-mismatch")
+	for _, name := range []string{"gw-identity-a", "gw-identity-b"} {
+		if _, err := tls.X509KeyPair(mustGet(t, set, name).CertPEM, mismatch.KeyPEM); err == nil {
+			t.Fatalf("the key-mismatch key pairs with %s", name)
+		}
+	}
+}
+
+func TestEncryptedKeyDecryptsToTheFixtureKey(t *testing.T) {
+	f := mustGet(t, generated(t), "gw-identity-a")
+	first, err := f.EncryptedKeyPEM("test")
+	if err != nil {
+		t.Fatalf("EncryptedKeyPEM: %v", err)
+	}
+	second, err := f.EncryptedKeyPEM("test")
+	if err != nil {
+		t.Fatalf("EncryptedKeyPEM: %v", err)
+	}
+	if bytes.Equal(first, second) {
+		t.Fatal("two encryptions share a salt and IV")
+	}
+	block, _ := pem.Decode(first)
+	if block == nil || block.Type != "ENCRYPTED PRIVATE KEY" || len(block.Headers) != 0 {
+		t.Fatalf("want one headerless ENCRYPTED PRIVATE KEY block, got %q", first)
+	}
+	var info encryptedPrivateKeyInfo
+	if _, err := asn1.Unmarshal(block.Bytes, &info); err != nil || !info.EncryptionAlgorithm.Algorithm.Equal(oidPBES2) {
+		t.Fatalf("not PBES2: %v", err)
+	}
+	var params pbes2Params
+	if _, err := asn1.Unmarshal(info.EncryptionAlgorithm.Parameters.FullBytes, &params); err != nil {
+		t.Fatalf("PBES2 parameters: %v", err)
+	}
+	var kdf pbkdf2Params
+	if _, err := asn1.Unmarshal(params.KeyDerivationFunc.Parameters.FullBytes, &kdf); err != nil ||
+		!params.KeyDerivationFunc.Algorithm.Equal(oidPBKDF2) || !kdf.PRF.Algorithm.Equal(oidHMACSHA256) {
+		t.Fatalf("PBKDF2 parameters: %v", err)
+	}
+	var iv []byte
+	if _, err := asn1.Unmarshal(params.EncryptionScheme.Parameters.FullBytes, &iv); err != nil ||
+		!params.EncryptionScheme.Algorithm.Equal(oidAES256CBC) {
+		t.Fatalf("AES-256-CBC parameters: %v", err)
+	}
+	key, err := pbkdf2.Key(sha256.New, "test", kdf.Salt, kdf.IterationCount, 32)
+	if err != nil {
+		t.Fatalf("pbkdf2: %v", err)
+	}
+	aesBlock, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	plain := make([]byte, len(info.EncryptedData))
+	cipher.NewCBCDecrypter(aesBlock, iv).CryptBlocks(plain, info.EncryptedData)
+	plain = plain[:len(plain)-int(plain[len(plain)-1])]
+	want, _ := pem.Decode(f.KeyPEM)
+	if !bytes.Equal(plain, want.Bytes) {
+		t.Fatal("the decrypted key differs from the fixture key")
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(plain); err != nil {
+		t.Fatalf("decrypted key: %v", err)
+	}
+	if _, err := f.EncryptedKeyPEM(""); err == nil {
+		t.Fatal("an empty passphrase was accepted")
+	}
+	if _, err := (&Fixture{Name: "empty"}).EncryptedKeyPEM("test"); err == nil {
+		t.Fatal("a fixture without a key was encrypted")
 	}
 }

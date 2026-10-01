@@ -2039,8 +2039,11 @@ func (g *Gateway) analyticsEventCountAtLeast(ctx context.Context, want int) erro
 }
 
 // analyticsQuietWindow is how long the collector's count must stay unchanged for the events
-// to count as settled. It covers one analytics publish interval.
-const analyticsQuietWindow = 2 * time.Second
+// to count as settled.
+const analyticsQuietWindow = 3 * time.Second
+
+// mtlsAnalyticsQuietWindow is the quiet window for mutual TLS scenarios.
+const mtlsAnalyticsQuietWindow = 2 * time.Second
 
 // settleAnalyticsEventCount waits for the collector's count to stop changing for a quiet
 // period. A bare threshold poll would return the instant the count first reaches a target and
@@ -2048,7 +2051,11 @@ const analyticsQuietWindow = 2 * time.Second
 // verifies "no more are coming", used both to check an exact count and to drain a prior
 // request's own publish delay before a scenario resets the collector for its real assertion.
 func (g *Gateway) settleAnalyticsEventCount(ctx context.Context) (retry.Settled, error) {
-	settled, err := retry.SettledCount(ctx, retry.Options{Timeout: 12 * time.Second}, analyticsQuietWindow,
+	quiet := analyticsQuietWindow
+	if isMTLSScenario(ctx) {
+		quiet = mtlsAnalyticsQuietWindow
+	}
+	settled, err := retry.SettledCount(ctx, retry.Options{Timeout: 12 * time.Second}, quiet,
 		func(ctx context.Context) (int, error) { return g.analyticsEventCount(ctx) })
 	if err != nil {
 		return settled, err

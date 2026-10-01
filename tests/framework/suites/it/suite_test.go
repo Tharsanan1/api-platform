@@ -511,7 +511,8 @@ func TestEveryBlockSweepsEveryEngine(t *testing.T) {
 // runs two gateway stacks rather than an engine matrix, and the two-controller block needs
 // a database server both controllers share. The hostname blocks that set their own
 // downstream_tls settings run one engine: the settings do not depend on the database, and the
-// default block of the feature repeats on every engine.
+// default block of the feature repeats on every engine. So do the trust-any, observability and
+// default identity blocks, whose subjects are the data plane's behaviour, not the store.
 var singleEngineBlocks = map[string]components.DBType{
 	"devportal-webhook":                               components.Postgres,
 	"multigateway":                                    components.SQLite,
@@ -519,6 +520,10 @@ var singleEngineBlocks = map[string]components.DBType{
 	"gateway-mtls-hostnames-required":                 components.SQLite,
 	"gateway-mtls-hostnames-all-connections":          components.SQLite,
 	"gateway-mtls-hostnames-all-connections-required": components.SQLite,
+	"gateway-mtls-trust-any":                          components.SQLite,
+	"gateway-mtls-observability":                      components.SQLite,
+	"gateway-mtls-default-identity-off":               components.SQLite,
+	"gateway-mtls-default-identity-on":                components.SQLite,
 }
 
 const coverageSubject = "platform-gateway"

@@ -283,8 +283,7 @@ blocks:
     components:
       - name: platform-gateway
         overlay: tests/framework/core/catalog/overlays/mtls-header-trust-any.toml
-        db:
-          matrix: [sqlite, postgres, sqlserver]
+        db: sqlite
       - name: testbench
     runners:
       - name: mtls-header-bypass
@@ -299,8 +298,7 @@ blocks:
     components:
       - name: platform-gateway
         overlay: tests/framework/core/catalog/overlays/mtls-observability.toml
-        db:
-          matrix: [sqlite, postgres, sqlserver]
+        db: sqlite
       - name: testbench
       - name: tls-backend
     runners:
@@ -377,8 +375,7 @@ blocks:
     components:
       - name: platform-gateway
         overlay: tests/framework/core/catalog/overlays/mtls-event-hub.toml
-        db:
-          matrix: [sqlite, postgres, sqlserver]
+        db: sqlite
       - name: testbench
       - name: tls-backend
     runners:
@@ -392,8 +389,7 @@ blocks:
     components:
       - name: platform-gateway
         overlay: tests/framework/core/catalog/overlays/mtls-default-identity.toml
-        db:
-          matrix: [sqlite, postgres, sqlserver]
+        db: sqlite
       - name: testbench
       - name: tls-backend
     runners:

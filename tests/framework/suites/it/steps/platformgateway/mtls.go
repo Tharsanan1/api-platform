@@ -353,9 +353,11 @@ func (g *Gateway) sendHTTPS(ctx context.Context, method, path, phrase string) er
 
 // clientTLS builds the client side of the handshake a presentation describes.
 func (g *Gateway) clientTLS(ctx context.Context, p presentation) (*httpx.ClientTLS, error) {
-	// The listener serves a self-signed certificate; the scenarios assert on client
-	// certificates, not on the server's.
+	// The listener serves one self-signed certificate whatever server name arrives, so no
+	// name verifies against it; the scenarios assert on client certificates, not on the
+	// server's.
 	opts := &httpx.ClientTLS{ServerName: gatewaySNI, InsecureSkipVerify: true}
+	g.applyServerNameChoice(ctx, opts)
 	if p.reuseSession {
 		v, ok := tcontext.Get(ctx, keyTLSSession)
 		session, _ := v.(*tlsSession)

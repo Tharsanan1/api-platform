@@ -547,6 +547,25 @@ func TestClientTLSSendsTheChosenServerNameAndHost(t *testing.T) {
 	require.True(t, strings.HasSuffix(resp.Text(), " api.example.test"), resp.Text())
 }
 
+func TestClientTLSCanSendNoServerNameEvenToAHostnameURL(t *testing.T) {
+	server, sni := newClientAuthServer(t, tls.NoClientCert, false)
+	url := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	client := NewClient(Options{Timeout: 5 * time.Second})
+
+	resp, err := client.Do(context.Background(), Request{
+		URL: url, TLS: &ClientTLS{ServerName: "ignored.example", OmitServerName: true, InsecureSkipVerify: true},
+	}, 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, "", sni.Load())
+	require.Equal(t, "", resp.TLS.ServerName)
+	require.False(t, resp.TLS.ClientCertificateRequested)
+
+	resp, err = client.Do(context.Background(), Request{URL: url, TLS: &ClientTLS{InsecureSkipVerify: true}}, 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, "localhost", sni.Load())
+	require.Equal(t, "localhost", resp.TLS.ServerName)
+}
+
 func TestClientTLSVerifiesTheServerUnlessToldNotTo(t *testing.T) {
 	server, _ := newClientAuthServer(t, tls.NoClientCert, false)
 	_, err := NewClient(Options{Timeout: 5 * time.Second}).Do(context.Background(),

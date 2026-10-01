@@ -187,6 +187,62 @@ blocks:
         features:
           - features/apiportal_foreign_org_login.feature
 
+  # Which hostnames the HTTPS listener asks for a client certificate. What it asks is state of
+  # the whole gateway, so runners take turns, and each block sets its own downstream_tls
+  # settings. The settings do not depend on the database, so only the default block repeats
+  # on every engine.
+  - name: gateway-mtls-hostnames
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: mtls-hostnames
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_hostnames.feature
+
+  - name: gateway-mtls-hostnames-required
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls-dedicated-hostname.toml
+        db: sqlite
+      - name: testbench
+    runners:
+      - name: mtls-hostnames-required
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_hostnames_required.feature
+
+  - name: gateway-mtls-hostnames-all-connections
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls-all-connections.toml
+        db: sqlite
+      - name: testbench
+    runners:
+      - name: mtls-hostnames-all-connections
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_hostnames_all_connections.feature
+
+  - name: gateway-mtls-hostnames-all-connections-required
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls-all-connections-dedicated-hostname.toml
+        db: sqlite
+      - name: testbench
+    runners:
+      - name: mtls-hostnames-all-connections-required
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_hostnames_all_connections_required.feature
+
   # Mutual TLS scenarios change the client authority pool and whether the HTTPS listener
   # asks for a certificate, which is state of the whole gateway, so runners take turns.
   - name: gateway-mtls

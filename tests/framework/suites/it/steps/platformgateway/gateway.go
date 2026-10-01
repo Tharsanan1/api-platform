@@ -950,6 +950,7 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 	g.registerMTLSSteps(sc)
 	g.registerMTLSPoolSteps(sc)
 	g.registerOutboundMTLSSteps(sc)
+	g.registerMTLSHostnameSteps(sc)
 	g.registerWaitSteps(sc)
 	g.registerMTLSListenerSteps(sc)
 	g.registerMTLSHeaderBypassSteps(sc)

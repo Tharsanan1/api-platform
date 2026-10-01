@@ -108,7 +108,7 @@ Feature: Seeing what client and backend certificates did
     When I send a "GET" request to "${CTX:partnerContext}/${CTX:partnerVersion}/anything"
     Then the response status code should be 503
     And the response body should contain "upstream connect error"
-    And the "gateway-runtime" log since the latest request should contain "\"upTlsFail\":\"TLS_error:|268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED"
+    And the "gateway-runtime" log since the latest request should contain "\"upTlsFail\":\"TLS_error:|268435581:SSL_routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED:verify_cert_failed:_SAN_matcher,_certificate_SANs_are_[not-this-host.test]:TLS_error_end\""
 
   Scenario: Certificate gauges follow the pool and expiry is warned on every channel
     Given I generate a unique resource name from "obs-expiring" and store it as "expiring"

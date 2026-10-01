@@ -1404,7 +1404,7 @@ func TestValidationErrorAndMetricText(t *testing.T) {
 	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: 200, Body: []byte("policy_executions_total 1\n")}))
 	require.NoError(t, g.responseOmitsMetric(ctx, "mtls_auth_"))
 	require.NoError(t, g.funnel.Publish(ctx, &httpx.Response{StatusCode: 200, Body: []byte("# TYPE mtls_auth_total counter\n")}))
-	require.ErrorContains(t, g.responseOmitsMetric(ctx, `mtls_auth_`), "contains")
+	require.ErrorContains(t, g.responseOmitsMetric(ctx, `mtls_auth_`), `has the metric "mtls_auth_total"`)
 }
 
 func TestObservabilityHelpers(t *testing.T) {

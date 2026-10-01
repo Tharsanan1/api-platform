@@ -948,6 +948,7 @@ type resourceMetadata struct {
 func (g *Gateway) register(sc *godog.ScenarioContext) {
 	g.registerRawHTTPSteps(sc)
 	g.registerMTLSSteps(sc)
+	g.registerMTLSPoolSteps(sc)
 	g.registerWaitSteps(sc)
 	// Request state is runner-scoped, so clear it before each scenario.
 	sc.Before(func(ctx context.Context, _ *godog.Scenario) (context.Context, error) {

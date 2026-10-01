@@ -274,3 +274,25 @@ func TestEchoedHeaderAssertions(t *testing.T) {
 		})
 	}
 }
+
+func TestJSONFieldIsBool(t *testing.T) {
+	tests := []struct {
+		name, body, field, want string
+		ok                      bool
+	}{
+		{name: "true", body: `{"isLeaf":true}`, field: "isLeaf", want: "true", ok: true},
+		{name: "nested false", body: `{"a":{"isLeaf":false}}`, field: "a.isLeaf", want: "false", ok: true},
+		{name: "other value", body: `{"isLeaf":true}`, field: "isLeaf", want: "false"},
+		{name: "string spelling", body: `{"isLeaf":"true"}`, field: "isLeaf", want: "true"},
+		{name: "absent", body: `{}`, field: "isLeaf", want: "true"},
+		{name: "not JSON", body: `nope`, field: "isLeaf", want: "true"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+			require.NoError(t, tcontext.Set(ctx, httpx.ResponseKey, &httpx.Response{Body: []byte(tt.body)}))
+			err := (&Base{}).jsonFieldIsBool(ctx, tt.field, tt.want)
+			require.Equal(t, tt.ok, err == nil, "%v", err)
+		})
+	}
+}

@@ -60,6 +60,9 @@ Feature: Presenting a default client certificate to backends
       | spec.operations         | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees no client certificate
+    And the response header "X-Client-Verified" should be "false"
+    And the JSON response field "client" should be ""
+    And the JSON response field "verified" should be "false"
     And the response status code should be 200
 
   @default-identity-off
@@ -92,6 +95,7 @@ Feature: Presenting a default client certificate to backends
       | spec.operations         | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the gateway listener certificate
+    And the response header "X-Client-Verified" should be "false"
 
   @default-identity-on
   Scenario: Uploading a default identity changes what the backend sees without a redeploy
@@ -105,8 +109,10 @@ Feature: Presenting a default client certificate to backends
       | spec.operations         | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the gateway listener certificate
+    And the response header "X-Client-Verified" should be "false"
     When the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
     Then I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "gw-identity-a" while tolerating the gateway listener certificate
+    And the response header "X-Client-Verified" should be "true"
 
   @default-identity-on
   Scenario: Deleting the default identity falls back to the HTTPS listener certificate
@@ -121,9 +127,11 @@ Feature: Presenting a default client certificate to backends
       | spec.operations         | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "gw-identity-a"
+    And the response header "X-Client-Verified" should be "true"
     When I remove the gateway identity "${CTX:defaultIdentity}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the gateway listener certificate while tolerating the client certificate of "gw-identity-a"
+    And the response header "X-Client-Verified" should be "false"
 
   @default-identity-on
   Scenario: Rotating the default identity changes what the backend sees and keeps its role
@@ -138,9 +146,11 @@ Feature: Presenting a default client certificate to backends
       | spec.operations         | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "gw-identity-a"
+    And the response header "X-Client-Verified" should be "true"
     When I rotate the gateway identity "${CTX:defaultIdentity}" from fixture "gw-identity-b"
     Then the response status code should be 200
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "gw-identity-b" while tolerating the client certificate of "gw-identity-a"
+    And the response header "X-Client-Verified" should be "false"
     And the gateway identity listing should show role default only on "${CTX:defaultIdentity}"
 
   @default-identity-on
@@ -171,6 +181,7 @@ Feature: Presenting a default client certificate to backends
       | spec.operations         | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "corp-other-service"
+    And the response header "X-Client-Verified" should be "false"
     And the response status code should be 200
 
   # ==================== SWITCH ON: WHICH DEFINITIONS ====================
@@ -190,6 +201,7 @@ Feature: Presenting a default client certificate to backends
       | spec.operations           | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "gw-identity-b"
+    And the response header "X-Client-Verified" should be "false"
 
   @default-identity-on
   Scenario Outline: A tls block that names no identity presents the default
@@ -205,6 +217,7 @@ Feature: Presenting a default client certificate to backends
       | spec.operations           | [{"method":"GET","path":"/anything"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "gw-identity-a"
+    And the response header "X-Client-Verified" should be "true"
 
     Examples:
       | tls                                           |
@@ -229,6 +242,7 @@ Feature: Presenting a default client certificate to backends
     Then the response status code should be 201
     And I set header "Content-Type" to "application/json"
     And I send a "POST" request to "${CTX:providerContext}/chat/completions" until the backend sees the client certificate of "gw-identity-a"
+    And the response header "X-Client-Verified" should be "true"
 
   @default-identity-on @agent
   Scenario: An Agent upstream presents the default identity
@@ -245,6 +259,7 @@ Feature: Presenting a default client certificate to backends
       | spec.a2a          | {"protocolVersion":"1.0","operationConfigs":{"transports":[{"protocolBinding":"JSONRPC"}]},"agentCard":{"public":{"mode":"passthrough","rewriteUrls":false}}} |
     Then the response should be successful
     And I send a "GET" request to "${CTX:agentContext}/.well-known/agent-card.json" until the backend sees the client certificate of "gw-identity-a"
+    And the response header "X-Client-Verified" should be "true"
 
   # ==================== SWITCH ON: THE CERTIFICATE POOL ====================
 

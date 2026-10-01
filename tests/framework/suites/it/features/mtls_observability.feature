@@ -85,21 +85,22 @@ Feature: Seeing what client and backend certificates did
       | "tlsVer":null   |
 
   Scenario: A backend TLS failure is logged with its reason while the caller sees the sterile body
-    # The upstream is the gateway HTTPS listener. This API trusts a different authority, so the handshake fails.
+    # The upstream is the TLS backend on port 8445. Its certificate is issued by the authority this API trusts,
+    # for another hostname, so the gateway refuses it while verifying the name.
     Given I generate a unique resource name from "obs-identity-a" and store it as "identity"
-    And I generate a unique resource name from "obs-backend-ca-b" and store it as "backendCA"
+    And I generate a unique resource name from "obs-backend-ca" and store it as "backendCA"
     And I generate a unique value from "obs-partner" and store it as "partnerName"
     And I generate a unique API version from "obs-partner" and store it as "partnerVersion"
     And I generate a unique API context from "/obs-partner" and store it as "partnerContext"
     And the gateway identity fixture "gw-identity-a" is stored as "${CTX:identity}"
-    And the certificate fixture "backend-ca-b" is pooled as "${CTX:backendCA}" with usage "upstream"
+    And the certificate fixture "backend-ca" is pooled as "${CTX:backendCA}" with usage "upstream"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion                  | ${CTX:gatewaySpecVersion}                                                                                                                                                          |
       | name                        | ${CTX:partnerName}                                                                                                                                                                 |
       | spec.displayName            | Observability Partner API                                                                                                                                                          |
       | spec.version                | ${CTX:partnerVersion}                                                                                                                                                              |
       | spec.context                | ${CTX:partnerContext}/$version                                                                                                                                                     |
-      | spec.upstreamDefinitions    | [{"name":"partner-a","upstreams":[{"url":"https://127.0.0.1:8443"}],"tls":{"identity":"${CTX:identity}","trustedCAs":["${CTX:backendCA}"]}}]                                      |
+      | spec.upstreamDefinitions    | [{"name":"partner-a","upstreams":[{"url":"https://tls-backend:8445"}],"tls":{"identity":"${CTX:identity}","trustedCAs":["${CTX:backendCA}"]}}]                                      |
       | spec.upstream.main.ref      | partner-a                                                                                                                                                                          |
       | spec.operations             | [{"method":"GET","path":"/anything"}]                                                                                                                                              |
     Then the response should be successful

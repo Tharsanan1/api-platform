@@ -25,8 +25,8 @@ Feature: Presenting a default client certificate to backends
   With router.upstream.tls.present_default_identity on, an HTTPS backend whose upstream
   definition names no tls.identity is presented the gateway identity with role default, else the
   HTTPS listener certificate. A tls.identity always wins. Only one identity holds role default,
-  and uploading, rotating or deleting it takes effect without a redeploy. With the switch off,
-  no client certificate is presented to a backend that names no identity.
+  and uploading, rotating or deleting it takes effect without a redeploy. The scenarios with the
+  switch off are in mtls_default_identity_off.feature.
 
   The optional backend answers every request and reports the subject of whatever client
   certificate it was presented, or an empty subject. The required backend trusts the issuer of
@@ -45,45 +45,8 @@ Feature: Presenting a default client certificate to backends
     And I generate a unique resource name from "other-identity-cert" and store it as "otherIdentity"
     And the certificate fixture "backend-ca" is pooled as "${CTX:backendTrust}" with usage "upstream"
 
-  # ==================== SWITCH OFF ====================
-
-  @default-identity-off
-  Scenario: A default identity is not presented while the switch is off
-    Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
-    When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion              | ${CTX:gatewaySpecVersion}  |
-      | name                    | ${CTX:apiName}             |
-      | spec.displayName        | ${CTX:apiName}             |
-      | spec.version            | ${CTX:apiVersion}          |
-      | spec.context            | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url  | ${CTX:optionalBackend}     |
-      | spec.operations         | [{"method":"GET","path":"/anything"}] |
-    Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees no client certificate
-    And the response header "X-Client-Verified" should be "false"
-    And the JSON response field "client" should be ""
-    And the JSON response field "verified" should be "false"
-    And the response status code should be 200
-
-  @default-identity-off
-  Scenario: A backend requiring a client certificate refuses an API that names no identity while the switch is off
-    Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
-    When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion              | ${CTX:gatewaySpecVersion}  |
-      | name                    | ${CTX:apiName}             |
-      | spec.displayName        | ${CTX:apiName}             |
-      | spec.version            | ${CTX:apiVersion}          |
-      | spec.context            | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url  | ${CTX:requiredBackend}     |
-      | spec.operations         | [{"method":"GET","path":"/anything"}] |
-    Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees a refusal
-    And the response status code should be 400
-    And the response header "X-Client-Subject" should not exist
-
   # ==================== SWITCH ON: WHICH CERTIFICATE ====================
 
-  @default-identity-on
   Scenario: Without a default identity the backend sees the HTTPS listener certificate
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion              | ${CTX:gatewaySpecVersion}  |
@@ -97,7 +60,6 @@ Feature: Presenting a default client certificate to backends
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the gateway listener certificate
     And the response header "X-Client-Verified" should be "false"
 
-  @default-identity-on
   Scenario: Uploading a default identity changes what the backend sees without a redeploy
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion              | ${CTX:gatewaySpecVersion}  |
@@ -114,7 +76,6 @@ Feature: Presenting a default client certificate to backends
     Then I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "gw-identity-a" while tolerating the gateway listener certificate
     And the response header "X-Client-Verified" should be "true"
 
-  @default-identity-on
   Scenario: Deleting the default identity falls back to the HTTPS listener certificate
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -133,7 +94,6 @@ Feature: Presenting a default client certificate to backends
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the gateway listener certificate while tolerating the client certificate of "gw-identity-a"
     And the response header "X-Client-Verified" should be "false"
 
-  @default-identity-on
   Scenario: Rotating the default identity changes what the backend sees and keeps its role
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -153,7 +113,6 @@ Feature: Presenting a default client certificate to backends
     And the response header "X-Client-Verified" should be "false"
     And the gateway identity listing should show role default only on "${CTX:defaultIdentity}"
 
-  @default-identity-on
   Scenario: A required backend accepts the default identity when it trusts the identity's issuer
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -168,7 +127,6 @@ Feature: Presenting a default client certificate to backends
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "gw-identity-a"
     And the response status code should be 200
 
-  @default-identity-on
   Scenario: A backend that does not trust the default identity's issuer still answers
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "corp-other-service" with role default
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -186,7 +144,6 @@ Feature: Presenting a default client certificate to backends
 
   # ==================== SWITCH ON: WHICH DEFINITIONS ====================
 
-  @default-identity-on
   Scenario: A definition naming an identity presents it and not the default
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
     And the gateway identity "${CTX:otherIdentity}" is uploaded from fixture "gw-identity-b"
@@ -203,7 +160,6 @@ Feature: Presenting a default client certificate to backends
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until the backend sees the client certificate of "gw-identity-b"
     And the response header "X-Client-Verified" should be "false"
 
-  @default-identity-on
   Scenario Outline: A tls block that names no identity presents the default
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -224,7 +180,6 @@ Feature: Presenting a default client certificate to backends
       | {"trustedCAs":["${CTX:backendTrust}"]}        |
       | {"verifyHostName":true}                       |
 
-  @default-identity-on
   Scenario: An LLM provider upstream presents the default identity
     Given I generate a unique resource name from "default-identity-provider" and store it as "providerName"
     And I generate a unique API version from "default-identity-provider" and store it as "providerVersion"
@@ -244,7 +199,7 @@ Feature: Presenting a default client certificate to backends
     And I send a "POST" request to "${CTX:providerContext}/chat/completions" until the backend sees the client certificate of "gw-identity-a"
     And the response header "X-Client-Verified" should be "true"
 
-  @default-identity-on @agent
+  @agent
   Scenario: An Agent upstream presents the default identity
     Given I generate a unique resource name from "default-identity-agent" and store it as "agentName"
     And I generate a unique API context from "/default-identity-agent" and store it as "agentContext"
@@ -263,14 +218,12 @@ Feature: Presenting a default client certificate to backends
 
   # ==================== SWITCH ON: THE CERTIFICATE POOL ====================
 
-  @default-identity-on
   Scenario: A second default identity is refused
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
     When I upload the gateway identity "${CTX:otherIdentity}" from fixture "gw-identity-b" with role default
     Then the response status code should be 409
     And the JSON response field "message" should be "gateway identity ${CTX:defaultIdentity} already has role: default; delete it before uploading another default identity"
 
-  @default-identity-on
   Scenario Outline: Role default is refused for a usage other than identity
     When I upload the certificate fixture "<fixture>" as "${CTX:otherIdentity}" with usage "<usage>" and role "default"
     Then the response status code should be 400
@@ -281,7 +234,6 @@ Feature: Presenting a default client certificate to backends
       | ca-a       | downstream |
       | ca-b       | upstream   |
 
-  @default-identity-on
   Scenario: The listing shows role default only on the default identity
     Given the gateway identity "${CTX:defaultIdentity}" is uploaded from fixture "gw-identity-a" with role default
     And the gateway identity "${CTX:otherIdentity}" is uploaded from fixture "gw-identity-b"

@@ -301,6 +301,7 @@ blocks:
         db:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
+      - name: tls-backend
     runners:
       - name: mtls-observability
         tags: "gateway-version>1.2.0"
@@ -331,9 +332,10 @@ blocks:
     parallel: 1
     components:
       - name: platform-gateway
-        overlay: tests/framework/core/catalog/overlays/mtls.toml
+        overlay: tests/framework/core/catalog/overlays/mtls-ha.toml
         db: postgres
       - name: testbench
+      - name: tls-backend
     wiring:
       platform-gateway:
         controllers: 2
@@ -342,6 +344,61 @@ blocks:
         tags: "gateway-version>1.2.0"
         features:
           - features/mtls_auth.feature
+      - name: mtls-client-ca-pool
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_client_ca_pool.feature
+      - name: mtls-pool-references
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_pool_references.feature
+      - name: mtls-listener
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_listener.feature
+      - name: mtls-header-relay
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_header_relay.feature
+      - name: mtls-observability
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_observability.feature
+      - name: mtls-outbound
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_outbound.feature
+
+  # The default client certificate to backends. The switch is gateway configuration and the
+  # default identity is gateway-wide state, so each block runs its scenarios one at a time.
+  - name: gateway-mtls-default-identity-off
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+      - name: tls-backend
+    runners:
+      - name: mtls-default-identity-off
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_default_identity_off.feature
+
+  - name: gateway-mtls-default-identity-on
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls-default-identity.toml
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+      - name: tls-backend
+    runners:
+      - name: mtls-default-identity-on
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_default_identity.feature
 
   - name: gateway-core
     parallel: 7

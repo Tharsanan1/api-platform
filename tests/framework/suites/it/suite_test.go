@@ -509,11 +509,16 @@ func TestEveryBlockSweepsEveryEngine(t *testing.T) {
 // singleEngineBlocks are the gateway blocks that run one engine by design, with that engine.
 // The webhook block follows its control plane's PostgreSQL store, the multigateway block
 // runs two gateway stacks rather than an engine matrix, and the two-controller block needs
-// a database server both controllers share.
+// a database server both controllers share. The hostname blocks that set their own
+// downstream_tls settings run one engine: the settings do not depend on the database, and the
+// default block of the feature repeats on every engine.
 var singleEngineBlocks = map[string]components.DBType{
-	"devportal-webhook": components.Postgres,
-	"multigateway":      components.SQLite,
-	"gateway-mtls-ha":   components.Postgres,
+	"devportal-webhook":                               components.Postgres,
+	"multigateway":                                    components.SQLite,
+	"gateway-mtls-ha":                                 components.Postgres,
+	"gateway-mtls-hostnames-required":                 components.SQLite,
+	"gateway-mtls-hostnames-all-connections":          components.SQLite,
+	"gateway-mtls-hostnames-all-connections-required": components.SQLite,
 }
 
 const coverageSubject = "platform-gateway"

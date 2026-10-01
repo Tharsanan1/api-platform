@@ -1016,6 +1016,8 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 		g.analyticsRequestMethod)
 	sc.Step(`^the latest analytics event for path "([^"]*)" should have response status (\d+)$`,
 		g.analyticsResponseStatus)
+	sc.Step(`^the latest analytics event for API "([^"]*)" should have response status (\d+)$`,
+		g.analyticsResponseStatusForAPI)
 	sc.Step(`^the latest analytics event for path "([^"]*)" should have metadata field "([^"]*)" with value "([^"]*)"$`,
 		g.analyticsMetadataField)
 	sc.Step(`^the response should be an oob-template list$`, g.oobTemplateList)
@@ -1913,14 +1915,30 @@ func (g *Gateway) analyticsHeader(
 }
 
 func (g *Gateway) latestAnalyticsEvent(ctx context.Context, path string) (*analyticsEvent, error) {
+	return g.latestMatchingAnalyticsEvent(ctx, fmt.Sprintf("path %q", path), func(event *analyticsEvent) bool {
+		return analyticsEventMatchesPath(event.Request.URI, path)
+	})
+}
+
+// latestAnalyticsEventForAPI selects the event by the API name the gateway records in the
+// metadata of every event, which a request answered before routing still carries.
+func (g *Gateway) latestAnalyticsEventForAPI(ctx context.Context, name string) (*analyticsEvent, error) {
+	return g.latestMatchingAnalyticsEvent(ctx, fmt.Sprintf("API %q", name), func(event *analyticsEvent) bool {
+		return event.Metadata["apiName"] == name
+	})
+}
+
+// latestMatchingAnalyticsEvent polls the collector until an event satisfies match and returns
+// the latest such event; what names the selection in errors.
+func (g *Gateway) latestMatchingAnalyticsEvent(
+	ctx context.Context, what string, match func(*analyticsEvent) bool,
+) (*analyticsEvent, error) {
 	url, err := g.serviceURL(ctx, "analytics", "/test/events")
 	if err != nil {
 		return nil, err
 	}
 	var observed []string
-	accept := func(event *analyticsEvent) bool {
-		return event != nil && analyticsEventMatchesPath(event.Request.URI, path)
-	}
+	accept := func(event *analyticsEvent) bool { return event != nil && match(event) }
 	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	last, err := retry.Until(pollCtx, retry.Options{Interval: time.Second},
@@ -1949,11 +1967,10 @@ func (g *Gateway) latestAnalyticsEvent(ctx context.Context, path string) (*analy
 			return nil, nil
 		}, accept)
 	if err != nil {
-		return nil, fmt.Errorf("reading analytics event for path %q (observed URIs: %v): %w",
-			path, observed, err)
+		return nil, fmt.Errorf("reading analytics event for %s (observed URIs: %v): %w", what, observed, err)
 	}
 	if last == nil {
-		return nil, fmt.Errorf("no analytics event found for request path %q (observed URIs: %v)", path, observed)
+		return nil, fmt.Errorf("no analytics event found for %s (observed URIs: %v)", what, observed)
 	}
 	return last, nil
 }
@@ -2093,6 +2110,21 @@ func (g *Gateway) analyticsResponseStatus(ctx context.Context, path string, want
 	}
 	if event.Response.Status != want {
 		return fmt.Errorf("analytics event for %q has response status %d, want %d", path, event.Response.Status, want)
+	}
+	return nil
+}
+
+func (g *Gateway) analyticsResponseStatusForAPI(ctx context.Context, nameExpr string, want int) error {
+	name, err := stepscommon.Expand(ctx, nameExpr)
+	if err != nil {
+		return err
+	}
+	event, err := g.latestAnalyticsEventForAPI(ctx, name)
+	if err != nil {
+		return err
+	}
+	if event.Response.Status != want {
+		return fmt.Errorf("analytics event for API %q has response status %d, want %d", name, event.Response.Status, want)
 	}
 	return nil
 }

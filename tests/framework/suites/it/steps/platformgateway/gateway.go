@@ -952,6 +952,8 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 	g.registerWaitSteps(sc)
 	g.registerMTLSListenerSteps(sc)
 	g.registerMTLSHeaderBypassSteps(sc)
+	g.registerMTLSRelaySteps(sc)
+	g.registerMTLSObservabilitySteps(sc)
 	// Request state is runner-scoped, so clear it before each scenario.
 	sc.Before(func(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
 		if err := tcontext.Set(ctx, keyGatewaySpecVersion, gatewaySpecVersionForVersion(gatewayVersion(g.topo))); err != nil {
@@ -1863,6 +1865,7 @@ type analyticsEvent struct {
 		Headers map[string][]string `json:"headers"`
 	} `json:"response"`
 	Metadata map[string]any `json:"metadata"`
+	UserID   string         `json:"user_id"`
 }
 
 func (g *Gateway) analyticsHeader(

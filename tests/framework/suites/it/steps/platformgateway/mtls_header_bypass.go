@@ -21,10 +21,8 @@ package platformgateway
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 
 	"github.com/cucumber/godog"
@@ -62,6 +60,11 @@ func (r relayedCertificate) apply(headers map[string]string) error {
 	return nil
 }
 
+// value renders the relayed certificate the way a front proxy places it in the header.
+func (r relayedCertificate) value() (string, error) {
+	return encodeRelayedCertificate(r.fixture, r.encoding)
+}
+
 // encodeRelayedCertificate renders a fixture's certificate for a header. Empty means url.
 func encodeRelayedCertificate(fixtureName, encoding string) (string, error) {
 	fixtures, err := testpki.Default()
@@ -87,7 +90,6 @@ func encodeRelayedCertificate(fixtureName, encoding string) (string, error) {
 func (g *Gateway) registerMTLSHeaderBypassSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" with header "([^"]*)" carrying certificate "([^"]*)"(?: encoded as "([^"]*)")?$`,
 		g.sendRelayingCertificate)
-	sc.Step(`^the backend's X-Forwarded-Client-Cert should name certificate "([^"]*)"$`, g.forwardedCertificateNames)
 }
 
 // sendRelayingCertificate sends one plain HTTP request carrying a fixture's certificate in a
@@ -118,69 +120,4 @@ func (g *Gateway) sendRelayingCertificate(ctx context.Context, method, path, hea
 		return fmt.Errorf("invoking %s %s: %w", method, target, err)
 	}
 	return nil
-}
-
-// xfccHash reads the Hash element of an X-Forwarded-Client-Cert value.
-var xfccHash = regexp.MustCompile(`(?i)(?:^|;)Hash=([0-9a-f]{64})(?:;|$)`)
-
-// forwardedCertificateNames asserts the X-Forwarded-Client-Cert the echo backend received
-// describes the fixture: its Hash is the fixture's thumbprint and its Subject carries the
-// fixture's common name.
-func (g *Gateway) forwardedCertificateNames(ctx context.Context, fixtureName string) error {
-	xfcc, err := echoedForwardedCertificate(ctx)
-	if err != nil {
-		return err
-	}
-	if xfcc == "" {
-		return fmt.Errorf("expected the backend to receive X-Forwarded-Client-Cert naming %q, got none", fixtureName)
-	}
-	fixtures, err := testpki.Default()
-	if err != nil {
-		return err
-	}
-	fixture, err := fixtures.Get(fixtureName)
-	if err != nil {
-		return err
-	}
-	if m := xfccHash.FindStringSubmatch(xfcc); m == nil || !strings.EqualFold(m[1], fixture.Thumbprint) {
-		return fmt.Errorf("expected X-Forwarded-Client-Cert Hash to be the thumbprint of %q (%s), got %q",
-			fixtureName, fixture.Thumbprint, xfcc)
-	}
-	if cn := "CN=" + fixture.Certificate.Subject.CommonName; !strings.Contains(xfcc, cn) {
-		return fmt.Errorf("expected X-Forwarded-Client-Cert Subject to name %s, got %q", cn, xfcc)
-	}
-	return nil
-}
-
-// echoedForwardedCertificate returns the X-Forwarded-Client-Cert the echo backend reflected in
-// the published response, or "" when it received none.
-func echoedForwardedCertificate(ctx context.Context) (string, error) {
-	resp, err := httpx.Published(ctx)
-	if err != nil {
-		return "", err
-	}
-	var echo struct {
-		Headers map[string]any `json:"headers"`
-	}
-	if err := json.Unmarshal(resp.Body, &echo); err != nil || echo.Headers == nil {
-		return "", fmt.Errorf("the response is not an echo of the request headers: %s", resp.Describe())
-	}
-	for name, value := range echo.Headers {
-		if !strings.EqualFold(name, "X-Forwarded-Client-Cert") {
-			continue
-		}
-		switch v := value.(type) {
-		case string:
-			return v, nil
-		case []any:
-			parts := make([]string, 0, len(v))
-			for _, item := range v {
-				parts = append(parts, fmt.Sprint(item))
-			}
-			return strings.Join(parts, ","), nil
-		default:
-			return "", fmt.Errorf("the echoed X-Forwarded-Client-Cert is %T, not a string or a list", value)
-		}
-	}
-	return "", nil
 }

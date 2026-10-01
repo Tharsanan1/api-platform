@@ -43,9 +43,6 @@ import (
 // HTTPS listener must keep not asking for a client certificate.
 const listenerHoldWindow = 5 * time.Second
 
-// certificateField is an extra field of a certificate upload body, such as its role.
-type certificateField struct{ name, value string }
-
 func (g *Gateway) registerMTLSListenerSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the certificate fixtures? "([^"]*)" (?:is|are) pooled as "([^"]*)"$`, g.poolCertificateFixturesWithoutUsage)
 	sc.Step(`^I upload the certificate fixtures? "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)"$`,
@@ -78,7 +75,7 @@ func (g *Gateway) poolCertificateFixturesWithoutUsage(ctx context.Context, fixtu
 }
 
 func (g *Gateway) uploadCertificateFixturesWithRole(ctx context.Context, fixtureList, name, usage, role string) error {
-	_, err := g.uploadFixtures(ctx, fixtureList, name, usage, certificateField{name: "role", value: role})
+	_, err := g.uploadFixtures(ctx, fixtureList, name, certificateUpload{usage: usage, role: role})
 	return err
 }
 

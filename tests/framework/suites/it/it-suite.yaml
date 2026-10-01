@@ -214,6 +214,10 @@ blocks:
         tags: "gateway-version>1.2.0"
         features:
           - features/mtls_listener.feature
+      - name: mtls-header-relay
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_header_relay.feature
 
   # The relayed client certificate header is believed from any connection here, a gateway-wide
   # setting the other mutual TLS blocks must not see.
@@ -230,6 +234,22 @@ blocks:
         tags: "gateway-version>1.2.0"
         features:
           - features/mtls_header_bypass.feature
+
+  # Mutual TLS outcomes in the access log, analytics and metrics. The block reads gateway-wide
+  # certificate gauges and its own JSON access log lines, so runners take turns.
+  - name: gateway-mtls-observability
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls-observability.toml
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: mtls-observability
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_observability.feature
 
   - name: gateway-core
     parallel: 7

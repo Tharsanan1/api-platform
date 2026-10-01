@@ -306,20 +306,25 @@ func (g *Gateway) deleteCertificate(ctx context.Context, stored storedCertificat
 // ── Assertions on the published response ───────────────────────────────────────
 
 // publishedCertificates returns the certificates of the published listing. An empty listing
-// renders its certificates as null; a body without the listing's totalCount is no listing.
+// renders its certificates as null; a body without the certificates key is no listing.
 func publishedCertificates(ctx context.Context) ([]map[string]any, *httpx.Response, error) {
 	resp, err := httpx.Published(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	var listing struct {
-		Certificates []map[string]any `json:"certificates"`
-		TotalCount   *int             `json:"totalCount"`
-	}
-	if err := json.Unmarshal(resp.Body, &listing); err != nil || listing.TotalCount == nil {
+	var listing map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Body, &listing); err != nil {
 		return nil, resp, fmt.Errorf("the published response is not a certificate listing: %s", resp.Describe())
 	}
-	return listing.Certificates, resp, nil
+	raw, present := listing["certificates"]
+	if !present {
+		return nil, resp, fmt.Errorf("the published response is not a certificate listing: %s", resp.Describe())
+	}
+	var certificates []map[string]any
+	if err := json.Unmarshal(raw, &certificates); err != nil {
+		return nil, resp, fmt.Errorf("the published response is not a certificate listing: %s", resp.Describe())
+	}
+	return certificates, resp, nil
 }
 
 // listedCertificate returns the named entry of the published listing, failing when it is absent.

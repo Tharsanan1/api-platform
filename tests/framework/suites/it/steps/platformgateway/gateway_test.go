@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -50,6 +52,7 @@ import (
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
 	"github.com/wso2/api-platform/tests/framework/core/util/testpki"
 	stepscommon "github.com/wso2/api-platform/tests/framework/suites/it/steps/common"
+	"github.com/wso2/api-platform/tests/framework/testbench/services/tlsbackend"
 )
 
 func TestServiceUpstreamURLPreservesServiceBasePath(t *testing.T) {
@@ -1328,7 +1331,7 @@ func TestCertificateUploadOptions(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []any{"lb.corp.test"}, match["dnsSANs"])
 
-	require.NoError(t, g.storeGatewayIdentity(ctx, "gw-identity-a", "${CTX:edgeLB}"))
+	require.NoError(t, g.storeIdentity(ctx, "gw-identity-a", "${CTX:edgeLB}"))
 	require.Equal(t, "identity", fake.uploads[2]["usage"])
 	require.Contains(t, fake.uploads[2]["privateKey"], "PRIVATE KEY")
 	require.Contains(t, fake.uploads[2]["certificate"], "BEGIN CERTIFICATE")
@@ -1338,7 +1341,7 @@ func TestCertificateUploadOptions(t *testing.T) {
 	require.Equal(t, "cert-1", registry.Pending()[0].ID)
 
 	fake.uploadStatus = http.StatusBadRequest
-	require.ErrorContains(t, g.storeGatewayIdentity(ctx, "gw-identity-a", "${CTX:edgeLB}"), "status 201")
+	require.ErrorContains(t, g.storeIdentity(ctx, "gw-identity-a", "${CTX:edgeLB}"), "status 201")
 }
 
 func TestDeleteCertificateNamed(t *testing.T) {
@@ -1806,4 +1809,1387 @@ func valueTable(t *testing.T, pairs ...string) *godog.Table {
 	var table godog.Table
 	require.NoError(t, json.Unmarshal(raw, &table))
 	return &table
+}
+
+// twoControllerGatewayUnderTest serves management on one fake and the xDS controller's admin
+// API on another, so a test sees which controller each read reaches.
+func twoControllerGatewayUnderTest(t *testing.T, management, xds *fakeMTLSGateway) (*Gateway, context.Context) {
+	t.Helper()
+	managementServer := httptest.NewServer(management)
+	t.Cleanup(managementServer.Close)
+	xdsServer := httptest.NewServer(xds)
+	t.Cleanup(xdsServer.Close)
+	port := func(raw string) int {
+		parsed, err := url.Parse(raw)
+		require.NoError(t, err)
+		p, err := strconv.Atoi(parsed.Port())
+		require.NoError(t, err)
+		return p
+	}
+	mapped := map[int]int{
+		9090: port(managementServer.URL), 9092: port(managementServer.URL),
+		9002: port(managementServer.URL), 9901: port(managementServer.URL),
+		9094: port(xdsServer.URL),
+	}
+	definition := &components.Definition{
+		Name: "platform-gateway", Alias: "platform-gateway",
+		Endpoints: []components.Endpoint{
+			{Name: "rest", Port: 9090, Scheme: "http"},
+			{Name: "admin", Port: 9092, Scheme: "http"},
+			{Name: "policy-admin", Port: 9002, Scheme: "http"},
+			{Name: "envoy-admin", Port: 9901, Scheme: "http"},
+			{Name: xdsControllerAdminEndpoint, Port: 9094, Scheme: "http"},
+		},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "127.0.0.1", mapped)
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+
+	shared := tcontext.NewShared("block")
+	shared.Set(frameworkruntime.KeyAdminUser, "admin")
+	shared.Set(frameworkruntime.KeyAdminPass, "secret")
+	ctx := tcontext.WithLocal(tcontext.WithShared(context.Background(), shared), tcontext.NewLocal("runner"))
+	require.NoError(t, cleanup.Install(ctx, cleanup.NewRegistry(nil)))
+	client := httpx.NewClient(httpx.Options{Timeout: 5 * time.Second})
+	return &Gateway{topo: &frameworkruntime.Topology{Instances: instances}, funnel: httpx.NewFunnel(client, 0, time.Millisecond), base: stubBase{}}, ctx
+}
+
+func TestRuntimeControllerAdminIsTheManagementControllerOnOneController(t *testing.T) {
+	g, _ := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	service, separate, err := g.runtimeControllerAdmin()
+	require.NoError(t, err)
+	require.False(t, separate)
+	require.Equal(t, managementControllerAdmin, service)
+}
+
+func TestRuntimeControllerAdminIsTheXDSControllerOnTwoControllers(t *testing.T) {
+	g, _ := twoControllerGatewayUnderTest(t, consistentMTLSGateway(t), consistentMTLSGateway(t))
+	service, separate, err := g.runtimeControllerAdmin()
+	require.NoError(t, err)
+	require.True(t, separate)
+	require.Equal(t, xdsControllerAdmin, service)
+}
+
+func TestPolicySnapshotVersionsReadTheControllerThatFeedsTheRuntime(t *testing.T) {
+	management, xds := consistentMTLSGateway(t), consistentMTLSGateway(t)
+	management.controllerVersion, management.engineVersion = "9", "4"
+	xds.controllerVersion = "4"
+	g, ctx := twoControllerGatewayUnderTest(t, management, xds)
+	got, err := g.policySnapshotVersions(ctx)
+	require.NoError(t, err)
+	require.Equal(t, policySync{controller: "4", engine: "4"}, got)
+}
+
+func TestRuntimeControllerAgreementWaitsForTheEventPath(t *testing.T) {
+	management, xds := consistentMTLSGateway(t), consistentMTLSGateway(t)
+	xds.attachesMTLSAuth = false
+	g, ctx := twoControllerGatewayUnderTest(t, management, xds)
+
+	require.Equal(t, "tolerated", outcome(g.requireRuntimeControllerAgrees(ctx, true)))
+	require.NoError(t, g.requireRuntimeControllerAgrees(ctx, false))
+
+	xds.mu.Lock()
+	xds.attachesMTLSAuth = true
+	xds.mu.Unlock()
+	require.NoError(t, g.requireRuntimeControllerAgrees(ctx, true))
+	require.Equal(t, "tolerated", outcome(g.requireRuntimeControllerAgrees(ctx, false)))
+}
+
+func TestRuntimeControllerAgreementIsNothingToWaitForOnOneController(t *testing.T) {
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	require.NoError(t, g.requireRuntimeControllerAgrees(ctx, true))
+	require.NoError(t, g.requireRuntimeControllerAgrees(ctx, false))
+}
+
+func noListener() (string, error) { return "", errors.New("no listener") }
+
+func TestParseBackendView(t *testing.T) {
+	gatewayA := mtlsFixture(t, "gw-identity-a").Certificate.Subject.String()
+	require.Equal(t, "CN=gateway-a", gatewayA)
+	listener := func() (string, error) { return "CN=localhost", nil }
+
+	for phrase, want := range map[string]backendView{
+		`no client certificate`: {kind: viewNone},
+		`a refusal`:             {kind: viewRefused},
+		`the client certificate of "gw-identity-a"`:     {kind: viewSubject, subject: gatewayA},
+		`the gateway listener certificate`:              {kind: viewSubject, subject: "CN=localhost"},
+		`  the client certificate of "gw-identity-a"  `: {kind: viewSubject, subject: gatewayA},
+	} {
+		got, err := parseBackendView(phrase, listener)
+		require.NoError(t, err, phrase)
+		require.Equal(t, want, got, phrase)
+	}
+
+	_, err := parseBackendView("a certificate", listener)
+	require.ErrorContains(t, err, `unknown backend view "a certificate"`)
+	_, err = parseBackendView(`the client certificate of "no-such-fixture"`, listener)
+	require.ErrorContains(t, err, "unknown fixture")
+	_, err = parseBackendView("the gateway listener certificate", noListener)
+	require.ErrorContains(t, err, "no listener")
+}
+
+func TestBackendViewString(t *testing.T) {
+	require.Equal(t, "no client certificate", backendView{kind: viewNone}.String())
+	require.Equal(t, "a refusal", backendView{kind: viewRefused}.String())
+	require.Equal(t, `the client certificate "CN=a"`, backendView{kind: viewSubject, subject: "CN=a"}.String())
+}
+
+func echoResponse(status int, upstream bool, subject string) *httpx.Response {
+	headers := http.Header{}
+	if upstream {
+		headers.Set(headerUpstreamServiceTime, "2")
+	}
+	if subject != "" {
+		headers.Set(tlsbackend.HeaderClientSubject, subject)
+	}
+	return &httpx.Response{StatusCode: status, Headers: headers, Method: http.MethodGet, URL: "http://gw/anything"}
+}
+
+func TestJudgeBackendResponse(t *testing.T) {
+	listener := backendView{kind: viewSubject, subject: "CN=localhost"}
+	gatewayA := backendView{kind: viewSubject, subject: "CN=gateway-a"}
+	none := backendView{kind: viewNone}
+	refused := backendView{kind: viewRefused}
+
+	noRoute := &httpx.Response{StatusCode: http.StatusNotFound, Body: []byte(noRouteBody), Headers: http.Header{}}
+	warming := &httpx.Response{StatusCode: http.StatusServiceUnavailable, Body: []byte("no healthy upstream"), Headers: http.Header{}}
+
+	for _, tc := range []struct {
+		name      string
+		resp      *httpx.Response
+		want      backendView
+		inBetween []backendView
+		outcome   string
+		message   string
+	}{
+		{name: "the expected subject", resp: echoResponse(200, true, "CN=gateway-a"), want: gatewayA},
+		{name: "an empty subject is no certificate", resp: echoResponse(200, true, ""), want: none},
+		{name: "a refusal", resp: echoResponse(400, true, ""), want: refused},
+		{name: "no route yet", resp: noRoute, want: gatewayA, outcome: "tolerated", message: "Envoy has no route yet"},
+		{name: "a warming upstream", resp: warming, want: gatewayA, outcome: "tolerated", message: "still warming"},
+		{name: "the previous subject while it propagates", resp: echoResponse(200, true, "CN=localhost"),
+			want: gatewayA, inBetween: []backendView{listener}, outcome: "tolerated", message: "expected the client certificate"},
+		{name: "a subject nobody listed", resp: echoResponse(200, true, "CN=intruder"),
+			want: gatewayA, inBetween: []backendView{listener}, outcome: "fail", message: `sees the client certificate "CN=intruder"`},
+		{name: "the previous subject without a tolerance", resp: echoResponse(200, true, "CN=localhost"),
+			want: gatewayA, outcome: "fail", message: "expected the client certificate"},
+		{name: "no certificate where one is expected", resp: echoResponse(200, true, ""),
+			want: gatewayA, inBetween: []backendView{listener}, outcome: "fail", message: "sees no client certificate"},
+		{name: "a refusal where a subject is expected", resp: echoResponse(400, true, ""),
+			want: gatewayA, outcome: "fail", message: "sees a refusal"},
+		{name: "a subject where a refusal is expected", resp: echoResponse(200, true, "CN=gateway-a"),
+			want: refused, outcome: "fail", message: `sees the client certificate "CN=gateway-a"`},
+		{name: "a backend error", resp: echoResponse(500, true, ""), want: gatewayA, outcome: "fail", message: "answered 500"},
+		{name: "a reply of the gateway that is no in-between state", resp: echoResponse(502, false, ""),
+			want: gatewayA, outcome: "fail", message: "expected the request to reach the backend"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := judgeBackendResponse(tc.resp, tc.want, tc.inBetween)
+			require.Equal(t, tc.outcome, outcome(err))
+			if tc.message != "" {
+				require.ErrorContains(t, err, tc.message)
+			}
+		})
+	}
+}
+
+// subjectDataPlane answers each request with the next scripted reply, repeating the last one.
+type subjectDataPlane struct {
+	mu      sync.Mutex
+	replies []subjectReply
+	served  int
+}
+
+type subjectReply struct {
+	status   int
+	upstream bool
+	subject  string
+	body     string
+}
+
+func (d *subjectDataPlane) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	d.mu.Lock()
+	reply := d.replies[min(d.served, len(d.replies)-1)]
+	d.served++
+	d.mu.Unlock()
+	if reply.upstream {
+		w.Header().Set(headerUpstreamServiceTime, "3")
+	}
+	if reply.subject != "" {
+		w.Header().Set(tlsbackend.HeaderClientSubject, reply.subject)
+	}
+	w.WriteHeader(reply.status)
+	_, _ = w.Write([]byte(reply.body))
+}
+
+func TestSendUntilBackendSees(t *testing.T) {
+	const gatewayA = "CN=gateway-a"
+	noRoute := subjectReply{status: 404, body: noRouteBody}
+	warming := subjectReply{status: 503, body: "no healthy upstream"}
+	for _, tc := range []struct {
+		name    string
+		phrase  string
+		replies []subjectReply
+		status  int
+		err     string
+		served  int
+	}{
+		{name: "polls through the route coming up and the old view", phrase: `the client certificate of "gw-identity-a" while tolerating no client certificate`,
+			replies: []subjectReply{noRoute, warming, {status: 200, upstream: true}, {status: 200, upstream: true, subject: gatewayA}},
+			status:  200, served: 4},
+		{name: "two tolerated views", phrase: `the client certificate of "gw-identity-a" while tolerating no client certificate or a refusal`,
+			replies: []subjectReply{{status: 400, upstream: true}, {status: 200, upstream: true}, {status: 200, upstream: true, subject: gatewayA}},
+			status:  200, served: 3},
+		{name: "a subject that was not listed ends the wait", phrase: `the client certificate of "gw-identity-a" while tolerating a refusal`,
+			replies: []subjectReply{{status: 200, upstream: true, subject: "CN=intruder"}}, err: `sees the client certificate "CN=intruder"`, served: 1},
+		{name: "the old view is fatal without a tolerance", phrase: `the client certificate of "gw-identity-a"`,
+			replies: []subjectReply{{status: 200, upstream: true}}, err: "sees no client certificate", served: 1},
+		{name: "a refusal is awaited", phrase: `a refusal`,
+			replies: []subjectReply{noRoute, {status: 400, upstream: true}}, status: 400, served: 2},
+		{name: "an unknown view", phrase: `somebody`, err: "unknown backend view"},
+		{name: "an unknown tolerated view", phrase: `a refusal while tolerating somebody`, err: "unknown backend view"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataPlane := &subjectDataPlane{replies: tc.replies}
+			if len(tc.replies) == 0 {
+				dataPlane.replies = []subjectReply{{status: 500}}
+			}
+			server := httptest.NewServer(dataPlane)
+			t.Cleanup(server.Close)
+			g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+			g.base = stubBase{dataPlane: server.URL}
+
+			err := g.sendUntilBackendSees(ctx, "get", "/anything", tc.phrase)
+			if tc.err == "" {
+				require.NoError(t, err)
+				published, pubErr := httpx.Published(ctx)
+				require.NoError(t, pubErr)
+				require.Equal(t, tc.status, published.StatusCode)
+			} else {
+				require.ErrorContains(t, err, tc.err)
+			}
+			require.Equal(t, tc.served, dataPlane.served)
+		})
+	}
+}
+
+func TestListenerSubjectIsReadFromTheHTTPSListener(t *testing.T) {
+	https := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(https.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), https)
+
+	subject, err := g.listenerSubject(ctx)
+	require.NoError(t, err)
+	require.Equal(t, https.Certificate().Subject.String(), subject)
+
+	dataPlane := &subjectDataPlane{replies: []subjectReply{{status: 200, upstream: true, subject: subject}}}
+	server := httptest.NewServer(dataPlane)
+	t.Cleanup(server.Close)
+	g.base = stubBase{dataPlane: server.URL}
+	require.NoError(t, g.sendUntilBackendSees(ctx, "GET", "/anything", "the gateway listener certificate"))
+
+	stopped := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closed, closedCtx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), stopped)
+	stopped.Close()
+	_, err = closed.listenerSubject(closedCtx)
+	require.ErrorContains(t, err, "reading the HTTPS listener certificate")
+}
+
+func TestStoreEchoBackendURL(t *testing.T) {
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	require.NoError(t, g.storeEchoBackendURL(ctx, "optional", "optionalBackend"))
+	require.NoError(t, g.storeEchoBackendURL(ctx, "required", "requiredBackend"))
+	optional, err := stepscommon.StoredValue(ctx, "optionalBackend")
+	require.NoError(t, err)
+	require.Equal(t, "https://tls-backend:8446", optional)
+	required, err := stepscommon.StoredValue(ctx, "requiredBackend")
+	require.NoError(t, err)
+	require.Equal(t, "https://tls-backend:8443", required)
+	require.ErrorContains(t, g.storeEchoBackendURL(ctx, "other", "x"), `unknown TLS backend kind "other"`)
+	require.ErrorContains(t, g.storeEchoBackendURL(context.Background(), "optional", "x"), "without runner context")
+}
+
+// fakeIdentityController serves the certificate endpoints the identity steps use.
+type fakeIdentityController struct {
+	mu       sync.Mutex
+	identity []identityEntry
+	status   int
+	posted   []map[string]string
+	put      map[string]map[string]string
+	deleted  []string
+	message  string
+}
+
+func (f *fakeIdentityController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	write := func(status int, v any) {
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(v)
+	}
+	switch {
+	case r.URL.Path == "/api/management/v1/certificates" && r.Method == http.MethodPost:
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.posted = append(f.posted, body)
+		if f.status != http.StatusCreated {
+			write(f.status, map[string]string{"message": f.message})
+			return
+		}
+		write(http.StatusCreated, map[string]string{"id": "cert-" + body["name"]})
+	case r.URL.Path == "/api/management/v1/certificates" && r.URL.Query().Get("usage") == "identity":
+		write(http.StatusOK, map[string]any{"certificates": f.identity})
+	case strings.HasPrefix(r.URL.Path, "/api/management/v1/certificates/") && r.Method == http.MethodPut:
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if f.put == nil {
+			f.put = map[string]map[string]string{}
+		}
+		f.put[strings.TrimPrefix(r.URL.Path, "/api/management/v1/certificates/")] = body
+		write(http.StatusOK, map[string]string{"status": "success"})
+	case strings.HasPrefix(r.URL.Path, "/api/management/v1/certificates/") && r.Method == http.MethodDelete:
+		f.deleted = append(f.deleted, strings.TrimPrefix(r.URL.Path, "/api/management/v1/certificates/"))
+		write(http.StatusOK, map[string]string{"status": "success"})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func TestUploadingAGatewayIdentityCarriesKeyAndRole(t *testing.T) {
+	fake := &fakeIdentityController{status: http.StatusCreated}
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "default-identity", "defaultIdentity"))
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "other-identity", "otherIdentity"))
+	gatewayA := mtlsFixture(t, "gw-identity-a")
+
+	require.NoError(t, g.storeGatewayIdentityWithRole(ctx, "${CTX:defaultIdentity}", "gw-identity-a", " with role default"))
+	require.NoError(t, g.uploadGatewayIdentity(ctx, "${CTX:otherIdentity}", "gw-identity-a", ""))
+	require.Len(t, fake.posted, 2)
+
+	name, err := stepscommon.StoredValue(ctx, "defaultIdentity")
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{
+		"name": name, "usage": "identity", "role": "default",
+		"certificate": string(gatewayA.CertPEM), "privateKey": string(gatewayA.KeyPEM),
+	}, fake.posted[0])
+	require.NotContains(t, fake.posted[1], "role")
+	require.Equal(t, string(gatewayA.KeyPEM), fake.posted[1]["privateKey"])
+
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.Len(t, registry.Pending(), 2)
+
+	require.ErrorContains(t, g.uploadGatewayIdentity(ctx, "literal-name", "gw-identity-a", ""), "is not generated")
+	require.ErrorContains(t, g.uploadGatewayIdentity(ctx, "${CTX:otherIdentity}", "no-such-fixture", ""), "unknown fixture")
+}
+
+func TestUploadingAnotherUsageCarriesTheRoleWithoutAKey(t *testing.T) {
+	fake := &fakeIdentityController{status: http.StatusBadRequest, message: "invalid"}
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "pool", "pool"))
+
+	require.NoError(t, g.uploadFixtureWithRole(ctx, "ca-b", "${CTX:pool}", "upstream", "default", ""))
+	require.Len(t, fake.posted, 1)
+	require.Equal(t, "upstream", fake.posted[0]["usage"])
+	require.Equal(t, "default", fake.posted[0]["role"])
+	require.NotContains(t, fake.posted[0], "privateKey")
+
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, published.StatusCode)
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.Empty(t, registry.Pending(), "a refused upload leaves nothing to clean up")
+}
+
+func TestARefusedGatewayIdentityIsReportedWithItsAnswer(t *testing.T) {
+	fake := &fakeIdentityController{status: http.StatusConflict, message: "already has role: default"}
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "default-identity", "defaultIdentity"))
+
+	err := g.storeGatewayIdentityWithRole(ctx, "${CTX:defaultIdentity}", "gw-identity-a", " with role default")
+	require.ErrorContains(t, err, "status 201")
+	require.ErrorContains(t, err, "already has role: default")
+	require.NoError(t, g.uploadGatewayIdentity(ctx, "${CTX:defaultIdentity}", "gw-identity-a", " with role default"))
+	published, pubErr := httpx.Published(ctx)
+	require.NoError(t, pubErr)
+	require.Equal(t, http.StatusConflict, published.StatusCode)
+}
+
+func TestRotatingAndRemovingAGatewayIdentityAddressItByName(t *testing.T) {
+	fake := &fakeIdentityController{identity: []identityEntry{
+		{ID: "id-1", Name: "first", Role: "default"}, {ID: "id-2", Name: "second"},
+	}}
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	gatewayB := mtlsFixture(t, "gw-identity-b")
+
+	require.NoError(t, g.rotateGatewayIdentity(ctx, "first", "gw-identity-b"))
+	require.Equal(t, map[string]string{
+		"certificate": string(gatewayB.CertPEM), "privateKey": string(gatewayB.KeyPEM),
+	}, fake.put["id-1"])
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, published.StatusCode)
+
+	require.NoError(t, g.deleteGatewayIdentity(ctx, "second"))
+	require.Equal(t, []string{"id-2"}, fake.deleted)
+
+	require.ErrorContains(t, g.rotateGatewayIdentity(ctx, "missing", "gw-identity-b"), `no identity named "missing"`)
+	require.ErrorContains(t, g.deleteGatewayIdentity(ctx, "missing"), `no identity named "missing"`)
+	require.ErrorContains(t, g.rotateGatewayIdentity(ctx, "first", "no-such-fixture"), "unknown fixture")
+}
+
+func TestListingShowsDefaultOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity []identityEntry
+		err      string
+	}{
+		{name: "the default alone", identity: []identityEntry{{Name: "first", Role: "default"}, {Name: "second"}}},
+		{name: "the named identity has no role", identity: []identityEntry{{Name: "first"}, {Name: "second"}}, err: `"first" has role ""`},
+		{name: "another identity is the default too", identity: []identityEntry{{Name: "first", Role: "default"}, {Name: "second", Role: "default"}},
+			err: `"second" has role "default", only "first" should have one`},
+		{name: "the identity is missing", identity: []identityEntry{{Name: "second"}}, err: `no identity named "first"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, ctx := mtlsGatewayUnderTest(t, &fakeIdentityController{identity: tc.identity}, nil)
+			err := g.listingShowsDefaultOnly(ctx, "first")
+			if tc.err == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.err)
+			}
+		})
+	}
+}
+
+func TestRoleFromPhrase(t *testing.T) {
+	require.Equal(t, "", roleFromPhrase(""))
+	require.Equal(t, "default", roleFromPhrase(" with role default"))
+}
+
+const askedServerName = "asked.example"
+
+// listenerAskingOn serves HTTPS and asks for a client certificate only on connections that send
+// askedServerName, as the gateway's listener does for the hostname of an mtls-auth API. It
+// records the server name of the last handshake.
+func listenerAskingOn(t *testing.T) (*httptest.Server, *atomic.Value) {
+	t.Helper()
+	var sni atomic.Value
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("hello " + r.Host))
+	}))
+	server.TLS = &tls.Config{
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			sni.Store(hello.ServerName)
+			if strings.EqualFold(hello.ServerName, askedServerName) {
+				return &tls.Config{Certificates: server.TLS.Certificates, ClientAuth: tls.RequestClientCert}, nil
+			}
+			return nil, nil
+		},
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server, &sni
+}
+
+func TestServerNameChoiceAppliesToTheClientHandshake(t *testing.T) {
+	opts := &httpx.ClientTLS{ServerName: gatewaySNI}
+	serverNameChoice{}.apply(opts)
+	require.Equal(t, gatewaySNI, opts.ServerName)
+	require.False(t, opts.OmitServerName)
+
+	serverNameChoice{name: "api.example"}.apply(opts)
+	require.Equal(t, "api.example", opts.ServerName)
+
+	serverNameChoice{none: true}.apply(opts)
+	require.Empty(t, opts.ServerName)
+	require.True(t, opts.OmitServerName)
+}
+
+func TestServerNameChoiceOfExpandsAndRejectsNothing(t *testing.T) {
+	_, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "orders", "label"))
+	label, err := stepscommon.StoredValue(ctx, "label")
+	require.NoError(t, err)
+
+	choice, err := serverNameChoiceOf(ctx, "${CTX:label}.example", "")
+	require.NoError(t, err)
+	require.Equal(t, label+".example", choice.name)
+
+	choice, err = serverNameChoiceOf(ctx, "${CTX:label}.example", " in upper case")
+	require.NoError(t, err)
+	require.Equal(t, strings.ToUpper(label)+".EXAMPLE", choice.name)
+
+	_, err = serverNameChoiceOf(ctx, " ", "")
+	require.ErrorContains(t, err, "expands to nothing")
+	_, err = serverNameChoiceOf(ctx, "${CTX:missing}.example", "")
+	require.ErrorContains(t, err, `no value in context for key "missing"`)
+}
+
+func TestHTTPSRequestsSendTheChosenServerNameUntilTheScenarioEnds(t *testing.T) {
+	server, sni := listenerAskingOn(t)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), server)
+	send := func() *httpx.TLSState {
+		require.NoError(t, g.sendHTTPS(ctx, "GET", "/anything", "with no client certificate"))
+		published, err := httpx.Published(ctx)
+		require.NoError(t, err)
+		return published.TLS
+	}
+
+	require.Equal(t, gatewaySNI, send().ServerName)
+	require.Equal(t, gatewaySNI, sni.Load())
+
+	require.NoError(t, sendServerName(ctx, askedServerName, " in upper case"))
+	state := send()
+	require.Equal(t, strings.ToUpper(askedServerName), state.ServerName)
+	require.True(t, state.ClientCertificateRequested)
+
+	require.NoError(t, sendNoServerName(ctx))
+	state = send()
+	require.Empty(t, state.ServerName)
+	require.Empty(t, sni.Load())
+	require.False(t, state.ClientCertificateRequested)
+
+	_, err := resetHostnameState(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, gatewaySNI, send().ServerName)
+}
+
+func TestObserveAskedReportsTheListenersCertificateRequest(t *testing.T) {
+	server, _ := listenerAskingOn(t)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), server)
+
+	asked, err := g.observeAsked(ctx, serverNameChoice{name: askedServerName})
+	require.NoError(t, err)
+	require.True(t, asked)
+	asked, err = g.observeAsked(ctx, serverNameChoice{name: strings.ToUpper(askedServerName)})
+	require.NoError(t, err)
+	require.True(t, asked)
+	asked, err = g.observeAsked(ctx, serverNameChoice{name: "public.example"})
+	require.NoError(t, err)
+	require.False(t, asked)
+	asked, err = g.observeAsked(ctx, serverNameChoice{none: true})
+	require.NoError(t, err)
+	require.False(t, asked)
+
+	server.Close()
+	_, err = g.observeAsked(ctx, serverNameChoice{name: askedServerName})
+	require.Equal(t, "tolerated", outcome(err), "%v", err)
+	require.ErrorContains(t, err, "did not complete a handshake")
+}
+
+func TestHandshakeAskedWaitsForTheStateTheStepNames(t *testing.T) {
+	server, _ := listenerAskingOn(t)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), server)
+
+	require.NoError(t, g.handshakeAsked(ctx, `with server name "asked.example"`, askedServerName, "", ""))
+	require.NoError(t, g.handshakeAsked(ctx, `with server name "asked.example" in upper case`, askedServerName, " in upper case", ""))
+	require.NoError(t, g.awaitNotAsked(ctx, serverNameChoice{name: "public.example"}, 300*time.Millisecond))
+	require.NoError(t, g.awaitNotAsked(ctx, serverNameChoice{none: true}, 300*time.Millisecond))
+	require.ErrorContains(t, g.handshakeAsked(ctx, `with server name "${CTX:missing}"`, "${CTX:missing}", "", "not "),
+		`no value in context for key "missing"`)
+}
+
+func TestNotAskedHoldFailsTheMomentTheListenerAsks(t *testing.T) {
+	var asking atomic.Bool
+	flipped := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	flipped.TLS = &tls.Config{
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			if asking.Load() {
+				return &tls.Config{Certificates: flipped.TLS.Certificates, ClientAuth: tls.RequestClientCert}, nil
+			}
+			return nil, nil
+		},
+	}
+	flipped.StartTLS()
+	t.Cleanup(flipped.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), flipped)
+	time.AfterFunc(700*time.Millisecond, func() { asking.Store(true) })
+	err := g.awaitNotAsked(ctx, serverNameChoice{name: "x.example"}, 5*time.Second)
+	require.ErrorContains(t, err, "the invariant was violated")
+}
+
+func TestConnectionAskedAndSessionResumedReadThePublishedHandshake(t *testing.T) {
+	_, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	funnel := httpx.NewFunnel(httpx.NewClient(httpx.Options{}), 0, time.Millisecond)
+
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: 200}))
+	require.ErrorContains(t, connectionAsked(ctx, ""), "did not arrive over an HTTPS request step")
+	require.ErrorContains(t, sessionResumed(ctx), "did not arrive over an HTTPS request step")
+
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: 200, TLS: &httpx.TLSState{ServerName: "a.example", ClientCertificateRequested: true}}))
+	require.NoError(t, connectionAsked(ctx, ""))
+	require.ErrorContains(t, connectionAsked(ctx, "not "), `asked the connection for a client certificate (server name "a.example")`)
+	require.ErrorContains(t, sessionResumed(ctx), "full TLS handshake")
+
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: 200, TLS: &httpx.TLSState{DidResume: true}}))
+	require.NoError(t, connectionAsked(ctx, "not "))
+	require.ErrorContains(t, connectionAsked(ctx, ""), "did not ask the connection")
+	require.NoError(t, sessionResumed(ctx))
+}
+
+func TestPoolRelayFixtureUploadsTheRelayRoleAndRegistersItForCleanup(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "relay", "relayName"))
+
+	require.ErrorContains(t, g.poolRelayFixture(ctx, "edge-lb-ca", "literal-name"), "is not generated")
+	require.ErrorContains(t, g.poolRelayFixture(ctx, "no-such-fixture", "${CTX:relayName}"), "unknown fixture")
+	require.NoError(t, g.poolRelayFixture(ctx, "edge-lb-ca", "${CTX:relayName}"))
+
+	name, err := stepscommon.StoredValue(ctx, "relayName")
+	require.NoError(t, err)
+	require.Len(t, fake.uploads, 1)
+	require.Equal(t, name, fake.uploads[0]["name"])
+	require.Equal(t, "downstream", fake.uploads[0]["usage"])
+	require.Equal(t, "relay", fake.uploads[0]["role"])
+	require.Equal(t, string(mtlsFixture(t, "edge-lb-ca").CertPEM), fake.uploads[0]["certificate"])
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Contains(t, published.Text(), "cert-1")
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	pending := registry.Pending()
+	require.Len(t, pending, 1)
+	require.Equal(t, cleanup.KindCertificate.Name, pending[0].Kind.Name)
+	require.Equal(t, "cert-1", pending[0].ID)
+
+	fake.uploadStatus = http.StatusConflict
+	require.ErrorContains(t, g.poolRelayFixture(ctx, "edge-lb-ca", "${CTX:relayName}"), "status 201")
+	require.Len(t, registry.Pending(), 1)
+}
+
+func TestKeptAliveConnectionCarriesSeveralRequestsAndNamesAClosure(t *testing.T) {
+	var connections atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("host=" + r.Host + " path=" + r.URL.Path))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), server)
+
+	require.ErrorContains(t, g.sendOnKeptAliveConnection(ctx, "/second"), "open one first")
+
+	require.NoError(t, g.openKeptAliveConnection(ctx, "public.example", "anything"))
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, published.StatusCode)
+	require.Equal(t, "host=public.example path=/anything", published.Text())
+
+	require.NoError(t, g.sendOnKeptAliveConnection(ctx, "/second"))
+	published, err = httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "host=public.example path=/second", published.Text())
+	require.EqualValues(t, 1, connections.Load())
+
+	server.CloseClientConnections()
+	err = g.sendOnKeptAliveConnection(ctx, "/third")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "kept-alive HTTPS connection")
+	_, published2 := httpx.Published(ctx)
+	require.Error(t, published2, "a failed request leaves no stale response behind")
+
+	_, err = closeKeptAliveConnection(ctx, nil, nil)
+	require.NoError(t, err)
+	require.False(t, tcontext.Contains(ctx, keyKeptAliveConnection))
+	require.ErrorContains(t, g.sendOnKeptAliveConnection(ctx, "/fourth"), "open one first")
+}
+
+// fakeCertificates is the controller's certificates endpoint: it keeps what is uploaded and
+// records every request.
+type fakeCertificates struct {
+	mu        sync.Mutex
+	status    int // answer to an upload; 0 means 201
+	listed    []map[string]string
+	requests  []string
+	bodies    [][]byte
+	deleteAns int // answer to a delete; 0 means 204
+}
+
+func (f *fakeCertificates) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	body, _ := io.ReadAll(r.Body)
+	f.requests = append(f.requests, r.Method+" "+r.URL.RequestURI())
+	f.bodies = append(f.bodies, body)
+	switch {
+	case r.Method == http.MethodPost:
+		status := f.status
+		if status == 0 {
+			status = http.StatusCreated
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"id":"cert-1","status":"success"}`))
+	case r.Method == http.MethodGet:
+		out := []map[string]string{}
+		for _, c := range f.listed {
+			if usage := r.URL.Query().Get("usage"); usage == "" || usage == c["usage"] {
+				out = append(out, c)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"certificates": out})
+	case r.Method == http.MethodDelete:
+		status := f.deleteAns
+		if status == 0 {
+			status = http.StatusNoContent
+		}
+		w.WriteHeader(status)
+	default:
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func certificatesUnderTest(t *testing.T) (*fakeCertificates, *Gateway, context.Context) {
+	t.Helper()
+	fake := &fakeCertificates{listed: []map[string]string{
+		{"id": "id-identity", "name": "identity-1", "usage": "identity"},
+		{"id": "id-trust", "name": "trust-1", "usage": "upstream"},
+	}}
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "identity", "identity"))
+	return fake, g, ctx
+}
+
+func (f *fakeCertificates) last() (string, map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var body map[string]string
+	_ = json.Unmarshal(f.bodies[len(f.bodies)-1], &body)
+	return f.requests[len(f.requests)-1], body
+}
+
+func TestIdentityMaterial(t *testing.T) {
+	leaf := mtlsFixture(t, "gw-identity-a")
+	certificate, key, err := identityMaterial(leaf, false)
+	require.NoError(t, err)
+	require.Equal(t, string(leaf.CertPEM), certificate)
+	require.Equal(t, string(leaf.KeyPEM), key)
+
+	chained := mtlsFixture(t, "gw-identity-via-intermediate")
+	certificate, _, err = identityMaterial(chained, true)
+	require.NoError(t, err)
+	require.Equal(t, string(chained.CertPEM)+string(chained.ChainPEM), certificate)
+	require.Equal(t, 2, strings.Count(certificate, "BEGIN CERTIFICATE"))
+
+	_, _, err = identityMaterial(leaf, true)
+	require.ErrorContains(t, err, "has no issuing chain")
+}
+
+func TestPublishedFixtureMaterialIsJSONReady(t *testing.T) {
+	_, _, ctx := certificatesUnderTest(t)
+	require.NoError(t, func() error { _, err := publishFixtureMaterial(ctx, taggedScenario(t, tagMTLS)); return err }())
+
+	for _, form := range []string{"pem", "key", "encryptedKey"} {
+		value, err := tcontext.ResolveString(ctx, "fixture.gw-identity-a."+form)
+		require.NoError(t, err, form)
+		var decoded string
+		require.NoError(t, json.Unmarshal([]byte(`"`+value+`"`), &decoded), form)
+		require.Contains(t, decoded, "-----BEGIN", form)
+		require.NotContains(t, value, "\n", form)
+	}
+	pem, err := tcontext.ResolveString(ctx, "fixture.gw-identity-a.pem")
+	require.NoError(t, err)
+	require.Equal(t, jsonEscaped(mtlsFixture(t, "gw-identity-a").CertPEM), pem)
+	encrypted, err := tcontext.ResolveString(ctx, "fixture.gw-identity-a.encryptedKey")
+	require.NoError(t, err)
+	require.Contains(t, encrypted, "ENCRYPTED PRIVATE KEY")
+
+	expanded, err := stepscommon.Expand(ctx, `{"privateKey":"${CTX:fixture.key-mismatch.key}"}`)
+	require.NoError(t, err)
+	require.Contains(t, expanded, "PRIVATE KEY")
+}
+
+func TestUploadIdentityPostsTheIdentityAndRegistersIt(t *testing.T) {
+	fake, g, ctx := certificatesUnderTest(t)
+	name, err := stepscommon.StoredValue(ctx, "identity")
+	require.NoError(t, err)
+
+	require.ErrorContains(t, g.uploadIdentity(ctx, "gw-identity-a", "literal"), "is not generated")
+	require.ErrorContains(t, g.uploadIdentity(ctx, "no-such-fixture", "${CTX:identity}"), "unknown fixture")
+
+	require.NoError(t, g.uploadIdentity(ctx, "gw-identity-a", "${CTX:identity}"))
+	request, body := fake.last()
+	require.Equal(t, "POST /api/management/v1/certificates", request)
+	require.Equal(t, map[string]string{
+		"name": name, "usage": "identity",
+		"certificate": string(mtlsFixture(t, "gw-identity-a").CertPEM),
+		"privateKey":  string(mtlsFixture(t, "gw-identity-a").KeyPEM),
+	}, body)
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.Len(t, registry.Pending(), 1)
+	require.Equal(t, "cert-1", registry.Pending()[0].ID)
+
+	require.NoError(t, g.uploadIdentityWithChain(ctx, "gw-identity-via-intermediate", "${CTX:identity}"))
+	_, body = fake.last()
+	require.Equal(t, 2, strings.Count(body["certificate"], "BEGIN CERTIFICATE"))
+	require.ErrorContains(t, g.uploadIdentityWithChain(ctx, "gw-identity-a", "${CTX:identity}"), "has no issuing chain")
+}
+
+func TestStoreIdentityRequiresACreatedIdentity(t *testing.T) {
+	fake, g, ctx := certificatesUnderTest(t)
+	require.NoError(t, g.storeIdentity(ctx, "gw-identity-a", "${CTX:identity}"))
+
+	fake.status = http.StatusConflict
+	require.ErrorContains(t, g.storeIdentity(ctx, "gw-identity-a", "${CTX:identity}"), "status 201")
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.Len(t, registry.Pending(), 1, "a refused upload registers nothing")
+}
+
+func TestUploadIdentityBodyExpandsFixtureMaterialAndRegistersACreatedCertificate(t *testing.T) {
+	fake, g, ctx := certificatesUnderTest(t)
+	require.NoError(t, func() error { _, err := publishFixtureMaterial(ctx, taggedScenario(t, tagMTLS)); return err }())
+	body := &godog.DocString{Content: `{"name":"${CTX:identity}","usage":"identity","certificate":"${CTX:fixture.gw-identity-a.pem}","privateKey":"${CTX:fixture.gw-identity-a.key}"}`}
+
+	require.NoError(t, g.uploadIdentityBody(ctx, body))
+	_, sent := fake.last()
+	require.Equal(t, string(mtlsFixture(t, "gw-identity-a").CertPEM), sent["certificate"])
+	require.Equal(t, string(mtlsFixture(t, "gw-identity-a").KeyPEM), sent["privateKey"])
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.Len(t, registry.Pending(), 1)
+
+	fake.status = http.StatusBadRequest
+	require.NoError(t, g.uploadIdentityBody(ctx, body))
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, published.StatusCode)
+	require.Len(t, registry.Pending(), 1)
+
+	require.NoError(t, g.uploadIdentityBody(ctx, &godog.DocString{Content: "not json"}))
+	require.ErrorContains(t, g.uploadIdentityBody(ctx, &godog.DocString{Content: "${CTX:missing}"}), "no value in context")
+}
+
+func TestDeleteResolvesTheNameAndKeepsRefusedDeletesRegistered(t *testing.T) {
+	fake, g, ctx := certificatesUnderTest(t)
+	fake.listed[0]["name"] = mustStored(t, ctx, "identity")
+	require.NoError(t, cleanup.Register(ctx, cleanup.Resource{Kind: cleanup.KindCertificate, ID: "id-identity", Actor: "admin"}))
+
+	require.NoError(t, g.deleteCertificateNamed(ctx, "${CTX:identity}"))
+	request, _ := fake.last()
+	require.Equal(t, "DELETE /api/management/v1/certificates/id-identity", request)
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.Empty(t, registry.Pending(), "a deleted identity leaves the cleanup list")
+
+	require.NoError(t, g.deleteCertificateNamed(ctx, "trust-1"))
+	request, _ = fake.last()
+	require.Equal(t, "DELETE /api/management/v1/certificates/id-trust", request)
+
+	fake.deleteAns = http.StatusConflict
+	require.NoError(t, cleanup.Register(ctx, cleanup.Resource{Kind: cleanup.KindCertificate, ID: "id-trust", Actor: "admin"}))
+	require.NoError(t, g.deleteCertificateNamed(ctx, "trust-1"))
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, published.StatusCode)
+	require.Len(t, registry.Pending(), 1, "a refused deletion leaves the certificate registered")
+}
+
+func mustStored(t *testing.T, ctx context.Context, key string) string {
+	t.Helper()
+	value, err := stepscommon.StoredValue(ctx, key)
+	require.NoError(t, err)
+	return value
+}
+
+func TestIdentityUpdates(t *testing.T) {
+	fake, g, ctx := certificatesUnderTest(t)
+	fake.listed[0]["name"] = mustStored(t, ctx, "identity")
+
+	require.NoError(t, g.rotateIdentity(ctx, "${CTX:identity}", "gw-identity-via-intermediate"))
+	request, body := fake.last()
+	require.Equal(t, "PUT /api/management/v1/certificates/id-identity", request)
+	require.Equal(t, 2, strings.Count(body["certificate"], "BEGIN CERTIFICATE"))
+	require.Equal(t, string(mtlsFixture(t, "gw-identity-via-intermediate").KeyPEM), body["privateKey"])
+	require.Len(t, body, 2, "an update names neither the certificate nor its usage")
+
+	require.NoError(t, g.updateCertificateWithIdentity(ctx, "trust-1", "gw-identity-a"))
+	request, body = fake.last()
+	require.Equal(t, "PUT /api/management/v1/certificates/id-trust", request)
+	require.Equal(t, string(mtlsFixture(t, "gw-identity-a").CertPEM), body["certificate"])
+
+	require.ErrorContains(t, g.rotateIdentity(ctx, "${CTX:identity}", "gw-identity-a"), "has no issuing chain")
+	require.ErrorContains(t, g.updateCertificateWithIdentity(ctx, "trust-1", "no-such-fixture"), "unknown fixture")
+}
+
+func publishStatus(t *testing.T, ctx context.Context, status int, body string) {
+	t.Helper()
+	funnel := httpx.NewFunnel(httpx.NewClient(httpx.Options{}), 0, time.Millisecond)
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: status, Body: []byte(body)}))
+}
+
+func upstreamReply(status int, body string) *httpx.Response {
+	headers := http.Header{}
+	headers.Set(headerUpstreamServiceTime, "3")
+	return &httpx.Response{StatusCode: status, Headers: headers, Body: []byte(body)}
+}
+
+func envoyReply(status int, body string) *httpx.Response {
+	return &httpx.Response{StatusCode: status, Headers: http.Header{}, Body: []byte(body)}
+}
+
+const connectFailureBody = "upstream connect error or disconnect/reset before headers. reset reason: remote connection failure, transport failure reason: TLS_error"
+
+func TestJudgeBackendRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		resp *httpx.Response
+		want string
+	}{
+		{"the backend's 400", upstreamReply(400, `{"backend":"a"}`), ""},
+		{"no route yet", envoyReply(404, noRouteBody), "tolerated"},
+		{"cluster warming", envoyReply(503, "no healthy upstream"), "tolerated"},
+		{"an upstream connect failure is not a warming cluster", envoyReply(503, connectFailureBody), "fail"},
+		{"the backend accepted the request", upstreamReply(200, "{}"), "fail"},
+		{"a 400 Envoy produced itself", envoyReply(400, ""), "fail"},
+		{"a backend 404", upstreamReply(404, "{}"), "fail"},
+		{"a backend 503", upstreamReply(503, "down"), "fail"},
+	} {
+		require.Equal(t, tc.want, outcome(judgeBackendRefusal(tc.resp)), tc.name)
+	}
+	require.ErrorContains(t, judgeBackendRefusal(envoyReply(503, connectFailureBody)), "upstream TLS connection failed")
+}
+
+func TestJudgeUpstreamTLSFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		resp *httpx.Response
+		want string
+	}{
+		{"the connect failure", envoyReply(503, connectFailureBody), ""},
+		{"no route yet", envoyReply(404, noRouteBody), "tolerated"},
+		{"cluster warming", envoyReply(503, ""), "tolerated"},
+		{"the backend answered, so the connection succeeded", upstreamReply(200, "{}"), "fail"},
+		{"the backend refused", upstreamReply(400, "{}"), "fail"},
+		{"a backend 503 carrying the marker", upstreamReply(503, connectFailureBody), "fail"},
+		{"another Envoy status", envoyReply(502, ""), "fail"},
+	} {
+		require.Equal(t, tc.want, outcome(judgeUpstreamTLSFailure(tc.resp)), tc.name)
+	}
+}
+
+func TestSendUntilJudgedPollsThroughInBetweenStatesAndSettles(t *testing.T) {
+	var mu sync.Mutex
+	answers := []func(http.ResponseWriter){
+		func(w http.ResponseWriter) { w.WriteHeader(404); _, _ = w.Write([]byte(noRouteBody)) },
+		func(w http.ResponseWriter) { w.WriteHeader(503) },
+		func(w http.ResponseWriter) { w.Header().Set(headerUpstreamServiceTime, "1"); w.WriteHeader(400) },
+	}
+	calls := 0
+	dataPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		answers[min(calls, len(answers)-1)](w)
+		calls++
+	}))
+	t.Cleanup(dataPlane.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	g.base = stubBase{dataPlane: dataPlane.URL}
+
+	require.NoError(t, g.sendUntilBackendRefuses(ctx, "get", "/out/anything"))
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 400, published.StatusCode)
+	require.Equal(t, 3, calls)
+}
+
+func TestSendUntilJudgedFailsAtOnceOnAContradiction(t *testing.T) {
+	calls := 0
+	dataPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set(headerUpstreamServiceTime, "1")
+		_, _ = w.Write([]byte("accepted"))
+	}))
+	t.Cleanup(dataPlane.Close)
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	g.base = stubBase{dataPlane: dataPlane.URL}
+
+	err := g.sendUntilUpstreamTLSFails(ctx, "GET", "/out/anything")
+	require.ErrorContains(t, err, "expected Envoy's 503")
+	require.ErrorContains(t, err, "200")
+	require.Equal(t, 1, calls)
+	require.ErrorContains(t, g.sendUntilUpstreamTLSFails(ctx, "GET", "${CTX:missing}"), "no value in context")
+}
+
+func TestPoolWithoutUsageOmitsTheUsage(t *testing.T) {
+	fake, g, ctx := certificatesUnderTest(t)
+	require.NoError(t, g.poolCertificateFixturesWithoutUsage(ctx, "backend-ca", "${CTX:identity}"))
+	_, body := fake.last()
+	_, hasUsage := body["usage"]
+	require.False(t, hasUsage)
+	require.Equal(t, string(mtlsFixture(t, "backend-ca").CertPEM), body["certificate"])
+}
+
+// fakeCertificateStore serves the controller's certificate collection.
+type fakeCertificateStore struct {
+	mu          sync.Mutex
+	listing     []map[string]any
+	references  []int // referencedByApis served on successive listings; the last repeats
+	listings    int
+	postStatus  int
+	postBodies  [][]byte
+	deleteCode  int
+	deletedIDs  []string
+	deleteAuths []string
+}
+
+func (f *fakeCertificateStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	const collection = "/api/management/v1/certificates"
+	switch {
+	case r.URL.Path == collection && r.Method == http.MethodPost:
+		body, _ := io.ReadAll(r.Body)
+		f.postBodies = append(f.postBodies, body)
+		w.WriteHeader(f.postStatus)
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": fmt.Sprintf("cert-%d", len(f.postBodies))})
+	case r.URL.Path == collection:
+		listing := f.listing
+		if len(f.references) > 0 {
+			i := min(f.listings, len(f.references)-1)
+			listing = []map[string]any{{"id": "cert-1", "name": "named", "referencedByApis": f.references[i]}}
+		}
+		f.listings++
+		_ = json.NewEncoder(w).Encode(map[string]any{"certificates": listing})
+	case strings.HasPrefix(r.URL.Path, collection+"/") && r.Method == http.MethodDelete:
+		f.deletedIDs = append(f.deletedIDs, strings.TrimPrefix(r.URL.Path, collection+"/"))
+		f.deleteAuths = append(f.deleteAuths, r.Header.Get("Authorization"))
+		w.WriteHeader(f.deleteCode)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// adminOnly rejects reads that are not the admin's, as the lookup must always be one.
+func adminOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.Header.Get("Authorization") != BasicAuthHeader("admin", "secret") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func publish(t *testing.T, ctx context.Context, body string) {
+	t.Helper()
+	require.NoError(t, tcontext.Set(ctx, httpx.ResponseKey, &httpx.Response{StatusCode: http.StatusOK, Body: []byte(body)}))
+}
+
+// taggedScenario builds a scenario carrying the given tags.
+func taggedScenario(t *testing.T, tags ...string) *godog.Scenario {
+	t.Helper()
+	var doc struct {
+		Tags []map[string]string `json:"tags"`
+	}
+	for _, tag := range tags {
+		doc.Tags = append(doc.Tags, map[string]string{"name": tag})
+	}
+	raw, err := json.Marshal(doc)
+	require.NoError(t, err)
+	var sc godog.Scenario
+	require.NoError(t, json.Unmarshal(raw, &sc))
+	return &sc
+}
+
+func pendingCertificates(t *testing.T, ctx context.Context) []string {
+	t.Helper()
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	var ids []string
+	for _, r := range registry.Pending() {
+		if r.Kind.Name == cleanup.KindCertificate.Name {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids
+}
+
+func TestPublishFixtureMaterialOnlyForMTLSScenarios(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	_, err := publishFixtureMaterial(ctx, taggedScenario(t, "@other"))
+	require.NoError(t, err)
+	_, ok := tcontext.Get(ctx, fixturePEMKey("ca-a"))
+	require.False(t, ok)
+	_, err = publishFixtureMaterial(ctx, nil)
+	require.NoError(t, err)
+
+	_, err = publishFixtureMaterial(ctx, taggedScenario(t, "@other", tagMTLS))
+	require.NoError(t, err)
+	caA := mtlsFixture(t, "ca-a")
+	body, err := stepscommon.Expand(ctx, `{"certificate":"${CTX:fixture.ca-a.pem}\n${CTX:fixture.ca-a.key}"}`)
+	require.NoError(t, err)
+	var decoded struct{ Certificate string }
+	require.NoError(t, json.Unmarshal([]byte(body), &decoded))
+	require.Equal(t, string(caA.CertPEM)+"\n"+string(caA.KeyPEM), decoded.Certificate)
+	subject, err := stepscommon.Expand(ctx, "${CTX:fixture.ca-a-intermediate.subject}")
+	require.NoError(t, err)
+	require.Equal(t, "CN=Partner A Issuing CA 1,O=Partner A", subject)
+	_, err = stepscommon.Expand(ctx, "${CTX:fixture.backend-ca.pem}")
+	require.NoError(t, err)
+}
+
+func TestJSONEscaped(t *testing.T) {
+	require.Equal(t, `a\nb\"c\\`, jsonEscaped([]byte("a\nb\"c\\")))
+	require.Equal(t, "", jsonEscaped(nil))
+}
+
+func TestUploadFixtureSendsUsageRoleAndNarrowing(t *testing.T) {
+	store := &fakeCertificateStore{postStatus: http.StatusCreated}
+	g, ctx := mtlsGatewayUnderTest(t, store, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "relay", "relay"))
+
+	require.ErrorContains(t, g.uploadFixtureWithRole(ctx, "edge-lb-ca", "literal", "downstream", "relay", ""), "is not generated")
+	require.NoError(t, g.uploadFixtureWithRole(ctx, "edge-lb-ca", "${CTX:relay}", "downstream", "relay", ""))
+	require.NoError(t, g.uploadFixtureWithRole(ctx, "edge-lb-ca", "${CTX:relay}", "downstream", "relay", "lb.corp.test"))
+	require.NoError(t, g.uploadUpstreamFixture(ctx, "backend-ca", "${CTX:relay}"))
+
+	var plain, narrowed, upstream map[string]any
+	require.NoError(t, json.Unmarshal(store.postBodies[0], &plain))
+	require.NoError(t, json.Unmarshal(store.postBodies[1], &narrowed))
+	require.NoError(t, json.Unmarshal(store.postBodies[2], &upstream))
+	require.Equal(t, "relay", plain["role"])
+	require.Equal(t, "downstream", plain["usage"])
+	require.NotContains(t, plain, "match")
+	require.Equal(t, map[string]any{"dnsSANs": []any{"lb.corp.test"}}, narrowed["match"])
+	require.NotContains(t, upstream, "usage")
+	require.NotContains(t, upstream, "role")
+	require.Equal(t, string(mtlsFixture(t, "backend-ca").CertPEM), upstream["certificate"])
+	require.ElementsMatch(t, []string{"cert-1", "cert-2", "cert-3"}, pendingCertificates(t, ctx))
+}
+
+func TestPoolUpstreamFixtureRequiresCreated(t *testing.T) {
+	store := &fakeCertificateStore{postStatus: http.StatusConflict}
+	g, ctx := mtlsGatewayUnderTest(t, store, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "trust", "trust"))
+	require.ErrorContains(t, g.poolCertificateFixturesWithoutUsage(ctx, "ca-a", "${CTX:trust}"), "status 201")
+	require.ErrorContains(t, g.poolCertificateFixturesWithoutUsage(ctx, "no-such-fixture", "${CTX:trust}"), "unknown fixture")
+	require.Empty(t, pendingCertificates(t, ctx))
+}
+
+func TestUploadCertificateBodyRegistersOnlyAnAcceptedUpload(t *testing.T) {
+	store := &fakeCertificateStore{postStatus: http.StatusBadRequest}
+	g, ctx := mtlsGatewayUnderTest(t, store, nil)
+	require.NoError(t, tcontext.Set(ctx, "certName", "body-cert"))
+
+	require.NoError(t, g.uploadCertificateBody(ctx, &godog.DocString{Content: `{"name":"${CTX:certName}","usage":"downstream"}`}))
+	require.JSONEq(t, `{"name":"body-cert","usage":"downstream"}`, string(store.postBodies[0]))
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, published.StatusCode)
+	require.Empty(t, pendingCertificates(t, ctx))
+
+	store.postStatus = http.StatusCreated
+	require.NoError(t, g.uploadCertificateBody(ctx, &godog.DocString{Content: `not json`}))
+	require.Equal(t, "not json", string(store.postBodies[1]))
+	require.Equal(t, []string{"cert-2"}, pendingCertificates(t, ctx))
+	require.Error(t, g.uploadCertificateBody(ctx, &godog.DocString{Content: `${CTX:missing}`}))
+}
+
+func TestUploadOversizedCertificateExceedsTheLimitByATenth(t *testing.T) {
+	store := &fakeCertificateStore{postStatus: http.StatusRequestEntityTooLarge}
+	g, ctx := mtlsGatewayUnderTest(t, store, nil)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "big", "big"))
+	require.NoError(t, g.uploadOversizedCertificate(ctx, "${CTX:big}", "downstream"))
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(store.postBodies[0], &body))
+	require.Len(t, body["certificate"], certificateUploadLimitBytes+certificateUploadLimitBytes/10)
+	require.Equal(t, "downstream", body["usage"])
+	require.ErrorContains(t, g.uploadOversizedCertificate(ctx, "literal", "downstream"), "is not generated")
+}
+
+func TestDeleteCertificateNamedLooksUpAsAdminAndDeletesAsTheCaller(t *testing.T) {
+	store := &fakeCertificateStore{
+		listing:    []map[string]any{{"id": "id-a", "name": "pool-a"}, {"id": "id-b", "name": "pool-b"}},
+		deleteCode: http.StatusForbidden,
+	}
+	g, ctx := mtlsGatewayUnderTest(t, adminOnly(store), nil)
+	registry, err := cleanup.Of(ctx)
+	require.NoError(t, err)
+	require.NoError(t, registry.Register(cleanup.Resource{Kind: cleanup.KindCertificate, ID: "id-b", Actor: "admin"}))
+	require.NoError(t, tcontext.Set(ctx, "b", "pool-b"))
+
+	require.NoError(t, g.deleteCertificateNamed(ctx, "${CTX:b}"))
+	require.Equal(t, []string{"id-b"}, store.deletedIDs)
+	published, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, published.StatusCode)
+	require.Equal(t, []string{"id-b"}, pendingCertificates(t, ctx), "a refused delete stays registered")
+
+	store.deleteCode = http.StatusNoContent
+	require.NoError(t, g.deleteCertificateNamed(ctx, "pool-b"))
+	require.Empty(t, pendingCertificates(t, ctx))
+	require.ErrorContains(t, g.deleteCertificateNamed(ctx, "pool-c"), `no certificate named "pool-c"`)
+}
+
+func TestDeleteCertificateOnceUnreferenced(t *testing.T) {
+	store := &fakeCertificateStore{references: []int{1, 0}, deleteCode: http.StatusOK}
+	g, ctx := mtlsGatewayUnderTest(t, store, nil)
+	require.NoError(t, g.deleteCertificateOnceUnreferenced(ctx, "named"))
+	require.Equal(t, 2, store.listings)
+	require.Equal(t, []string{"cert-1"}, store.deletedIDs)
+
+	uncounted := &fakeCertificateStore{listing: []map[string]any{{"id": "x", "name": "named"}}}
+	g, ctx = mtlsGatewayUnderTest(t, uncounted, nil)
+	require.ErrorContains(t, g.deleteCertificateOnceUnreferenced(ctx, "named"), "without a referencedByApis count")
+	require.Equal(t, 1, uncounted.listings, "a listing without a count fails at once")
+	require.ErrorContains(t, g.deleteCertificateOnceUnreferenced(ctx, "absent"), `no certificate named "absent"`)
+	require.Empty(t, uncounted.deletedIDs)
+}
+
+func TestCertificateListAssertions(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	require.NoError(t, tcontext.Set(ctx, "a", "pool-a"))
+	publish(t, ctx, `{"certificates":[
+		{"name":"pool-a","usage":"downstream","referencedByApis":0,"isLeaf":true,
+		 "warnings":[{"code":"CERT_EXPIRES_SOON","field":"notAfter"}]},
+		{"name":"pool-b","usage":"upstream","warnings":[]}]}`)
+
+	require.NoError(t, certificateListContains(ctx, "contain", "${CTX:a}"))
+	require.NoError(t, certificateListContains(ctx, "not contain", "pool-c"))
+	require.Error(t, certificateListContains(ctx, "contain", "pool-c"))
+	require.Error(t, certificateListContains(ctx, "not contain", "pool-a"))
+
+	require.NoError(t, listedCertificateFieldEquals(ctx, "${CTX:a}", "usage", `"downstream"`))
+	require.NoError(t, listedCertificateFieldEquals(ctx, "pool-a", "referencedByApis", "0"))
+	require.NoError(t, listedCertificateFieldEquals(ctx, "pool-a", "isLeaf", "true"))
+	require.ErrorContains(t, listedCertificateFieldEquals(ctx, "pool-a", "referencedByApis", `"0"`), "expected 0 (string)")
+	require.Error(t, listedCertificateFieldEquals(ctx, "pool-a", "isLeaf", "false"))
+	require.Error(t, listedCertificateFieldEquals(ctx, "pool-a", "isLeaf", `"true"`))
+	require.ErrorContains(t, listedCertificateFieldEquals(ctx, "pool-b", "referencedByApis", "0"), "without field")
+	require.ErrorContains(t, listedCertificateFieldEquals(ctx, "pool-c", "usage", `"upstream"`), "not in the listing")
+
+	require.NoError(t, listedCertificateLacksField(ctx, "pool-b", "referencedByApis"))
+	require.Error(t, listedCertificateLacksField(ctx, "pool-a", "referencedByApis"))
+
+	require.NoError(t, listedCertificateHasWarning(ctx, "pool-a", "code", "CERT_EXPIRES_SOON"))
+	require.NoError(t, listedCertificateHasWarning(ctx, "pool-a", "field", "notAfter"))
+	require.Error(t, listedCertificateHasWarning(ctx, "pool-a", "code", "notAfter"))
+	require.Error(t, listedCertificateHasWarning(ctx, "pool-b", "code", "CERT_EXPIRES_SOON"))
+	require.NoError(t, listedCertificateHasNoWarnings(ctx, "pool-b"))
+	require.Error(t, listedCertificateHasNoWarnings(ctx, "pool-a"))
+
+	publish(t, ctx, `{"status":"error"}`)
+	require.ErrorContains(t, certificateListContains(ctx, "not contain", "pool-a"), "not a certificate listing")
+	httpx.ClearPublished(ctx)
+	require.Error(t, certificateListContains(ctx, "not contain", "pool-a"))
+}
+
+func TestValidationErrorListed(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	require.NoError(t, tcontext.Set(ctx, "api", "ref-api-1"))
+	publish(t, ctx, `{"status":"error","errors":[
+		{"field":"name","message":"name may contain only letters"},
+		{"field":"spec.policies[0]","message":"named by ref-api-1"}]}`)
+
+	require.NoError(t, validationErrorListed(ctx, "name", "with message", "name may contain only letters"))
+	require.Error(t, validationErrorListed(ctx, "name", "with message", "name may contain"))
+	require.NoError(t, validationErrorListed(ctx, "name", "containing", "may contain"))
+	require.NoError(t, validationErrorListed(ctx, "spec.policies[0]", "containing", "${CTX:api}"))
+	require.NoError(t, validationErrorListed(ctx, "name", "", ""))
+	require.Error(t, validationErrorListed(ctx, "role", "", ""))
+	require.Error(t, validationErrorListed(ctx, "spec.policies[0]", "with message", "name may contain only letters"))
+
+	publish(t, ctx, `not json`)
+	require.ErrorContains(t, validationErrorListed(ctx, "name", "", ""), "not a JSON error response")
+}
+
+// settleCounter counts the controller config dumps an observation of the gateway reads.
+type settleCounter struct {
+	http.Handler
+	dumps atomic.Int32
+}
+
+func (c *settleCounter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == "/config_dump" {
+		c.dumps.Add(1)
+	}
+	c.Handler.ServeHTTP(w, r)
+}
+
+func TestGatewayChangePendingState(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	require.False(t, gatewayChangePending(ctx), "nothing changed before a scenario starts")
+	markGatewayChanged(ctx)
+	require.True(t, gatewayChangePending(ctx))
+	markGatewayChanged(ctx)
+	require.True(t, gatewayChangePending(ctx))
+	clearGatewayChange(ctx)
+	require.False(t, gatewayChangePending(ctx))
+}
+
+func TestSettleAfterChangeSettlesOnlyWhenSomethingChanged(t *testing.T) {
+	fake := &settleCounter{Handler: consistentMTLSGateway(t)}
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+
+	require.NoError(t, g.settleAfterChange(ctx))
+	require.Zero(t, fake.dumps.Load(), "no change, no settle")
+
+	markGatewayChanged(ctx)
+	require.NoError(t, g.settleAfterChange(ctx))
+	settled := fake.dumps.Load()
+	require.Positive(t, settled, "a change is settled")
+	require.False(t, gatewayChangePending(ctx), "a settle clears the change")
+
+	require.NoError(t, g.settleAfterChange(ctx))
+	require.Equal(t, settled, fake.dumps.Load(), "a second request settles nothing")
+}
+
+func TestExplicitSettleClearsThePendingChange(t *testing.T) {
+	g, ctx := mtlsGatewayUnderTest(t, consistentMTLSGateway(t), nil)
+	markGatewayChanged(ctx)
+	require.NoError(t, g.awaitGatewayApplied(ctx))
+	require.False(t, gatewayChangePending(ctx))
+}
+
+func TestAFailedSettleKeepsTheChangePending(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	fake.controllerStatus = http.StatusForbidden
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	markGatewayChanged(ctx)
+	require.Error(t, g.awaitGatewayApplied(ctx))
+	require.True(t, gatewayChangePending(ctx))
+}
+
+func TestMTLSScenarioStartMarksTheGatewayChanged(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	fake.pool, fake.listenerNamesCA, fake.secret = map[string][]string{}, false, nil
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+
+	_, err := g.beginMTLSScenario(ctx, taggedScenario(t, tagMTLS))
+	require.NoError(t, err)
+	require.True(t, gatewayChangePending(ctx), "the first request of a scenario settles")
+	require.NoError(t, g.settleAfterChange(ctx))
+	require.False(t, gatewayChangePending(ctx))
+}
+
+func TestStepsThatChangeTheGatewayMarkIt(t *testing.T) {
+	fake := consistentMTLSGateway(t)
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.False(t, gatewayChangePending(ctx))
+
+	require.NoError(t, g.beforeAPIMutation(ctx))
+	require.True(t, gatewayChangePending(ctx), "creating, updating or deleting an API")
+
+	clearGatewayChange(ctx)
+	require.NoError(t, stepscommon.GenerateResourceAndStore(ctx, "settle-cert", "cert"))
+	require.NoError(t, g.poolCertificateFixtures(ctx, "ca-a", "${CTX:cert}", "downstream"))
+	require.True(t, gatewayChangePending(ctx), "uploading a certificate")
+
+	clearGatewayChange(ctx)
+	require.NoError(t, g.deleteCertificate(ctx, storedCertificate{ID: "cert-1", Name: "x"}))
+	require.True(t, gatewayChangePending(ctx), "deleting a certificate")
+
+	clearGatewayChange(ctx)
+	fake.extraCerts = []map[string]any{{"id": "cert-9", "name": "named-identity"}}
+	require.NoError(t, g.rotateIdentity(ctx, "named-identity", "gw-identity-via-intermediate"))
+	require.True(t, gatewayChangePending(ctx), "rotating an identity")
 }

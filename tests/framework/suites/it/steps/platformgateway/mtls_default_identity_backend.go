@@ -25,23 +25,16 @@ import (
 	"github.com/cucumber/godog"
 
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
+	"github.com/wso2/api-platform/tests/framework/core/util/testpki"
+	"github.com/wso2/api-platform/tests/framework/testbench/services/tlsbackend"
 )
 
-// The TLS echo backends the gateway dials, as the testbench serves them. A required backend
-// answers 400 to a request without a certificate it trusts; the optional backend always
-// answers 200 and reports the subject of any presented certificate, or an empty one.
-const (
-	echoBackendHost         = "tls-backend"
-	echoBackendPortRequired = 8443
-	echoBackendPortOptional = 8446
-
-	// echoHeaderClientSubject carries the subject of the verified client certificate.
-	echoHeaderClientSubject = "X-Client-Subject"
-)
-
+// The TLS echo backends the gateway dials are the tls-backend component's. The required
+// backend answers 400 to a request without a certificate it trusts; the optional backend
+// always answers 200 and reports the subject of any presented certificate, or an empty one.
 var echoBackendPorts = map[string]int{
-	"required": echoBackendPortRequired,
-	"optional": echoBackendPortOptional,
+	"required": tlsbackend.PortA,
+	"optional": tlsbackend.PortOptional,
 }
 
 func (g *Gateway) registerEchoBackendSteps(sc *godog.ScenarioContext) {
@@ -59,6 +52,6 @@ func (g *Gateway) storeEchoBackendURL(ctx context.Context, kind, key string) err
 	if !ok || local == nil {
 		return fmt.Errorf("cannot store the %s TLS backend URL %q without runner context", kind, key)
 	}
-	local.Set(key, fmt.Sprintf("https://%s:%d", echoBackendHost, port))
+	local.Set(key, fmt.Sprintf("https://%s:%d", testpki.TLSBackendHost, port))
 	return nil
 }

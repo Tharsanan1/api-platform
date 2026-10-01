@@ -183,6 +183,7 @@ func (g *Gateway) uploadOversizedCertificate(ctx context.Context, nameExpr, usag
 // postCertificate posts a certificate upload as the scenario's caller, publishes the response
 // and registers an accepted certificate for cleanup at once.
 func (g *Gateway) postCertificate(ctx context.Context, name string, payload []byte) (*httpx.Response, error) {
+	markGatewayChanged(ctx)
 	url, err := g.serviceURL(ctx, "gateway-controller", "/certificates")
 	if err != nil {
 		return nil, err
@@ -285,6 +286,7 @@ func (g *Gateway) deleteCertificateOnceUnreferenced(ctx context.Context, nameExp
 // deleteCertificate deletes a stored certificate as the scenario's caller, publishes the
 // response and, once it is gone, drops it from cleanup.
 func (g *Gateway) deleteCertificate(ctx context.Context, stored storedCertificate) error {
+	markGatewayChanged(ctx)
 	url, err := g.serviceURL(ctx, "gateway-controller", "/certificates/"+stored.ID)
 	if err != nil {
 		return err

@@ -4,6 +4,7 @@ go 1.26.5
 
 require (
 	github.com/cucumber/godog v0.16.0
+	github.com/cucumber/messages/go/v34 v34.2.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/knadh/koanf/parsers/toml/v2 v2.2.2
@@ -44,7 +45,6 @@ require (
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
 	github.com/cucumber/gherkin/go/v42 v42.0.0 // indirect
-	github.com/cucumber/messages/go/v34 v34.2.0 // indirect
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/buildx v0.35.0 // indirect

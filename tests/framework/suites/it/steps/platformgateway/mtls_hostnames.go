@@ -22,7 +22,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -33,7 +32,6 @@ import (
 
 	"github.com/cucumber/godog"
 
-	"github.com/wso2/api-platform/tests/framework/core/cleanup"
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
 	"github.com/wso2/api-platform/tests/framework/core/util/retry"
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
@@ -258,51 +256,15 @@ func (g *Gateway) awaitNotAsked(ctx context.Context, choice serverNameChoice, ho
 
 // ── Relay entries in the pool ───────────────────────────────────────────────────
 
-// poolRelayFixture uploads a fixture as a relay entry under a generated name, publishes the
-// response, and registers an accepted certificate for cleanup at once.
+// poolRelayFixture uploads a fixture as a relay entry under a generated name and requires the
+// gateway to have created it.
 func (g *Gateway) poolRelayFixture(ctx context.Context, fixture, nameExpr string) error {
-	name, err := g.generatedCertificateName(ctx, nameExpr)
-	if err != nil {
-		return err
-	}
-	pemBundle, err := fixturePEMBundle(fixture)
-	if err != nil {
-		return err
-	}
-	payload, err := json.Marshal(map[string]string{
-		"name": name, "certificate": pemBundle, "usage": "downstream", "role": "relay",
-	})
-	if err != nil {
-		return fmt.Errorf("encoding the relay entry upload: %w", err)
-	}
-	endpoint, err := g.serviceURL(ctx, "gateway-controller", "/certificates")
-	if err != nil {
-		return err
-	}
-	resp, err := g.funnel.Post(ctx, endpoint, g.headerWith(ctx, "Content-Type", "application/json"), payload)
+	resp, err := g.uploadFixtures(ctx, fixture, nameExpr, certificateUpload{usage: "downstream", role: "relay"})
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("expected relay entry %q to be pooled with status 201, got %s", fixture, resp.Describe())
-	}
-	var created struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(resp.Body, &created); err != nil || created.ID == "" {
-		return fmt.Errorf("relay entry %q was accepted without an id: %s", name, resp.Describe())
-	}
-	if err := cleanup.Register(ctx, cleanup.Resource{
-		Kind: cleanup.KindCertificate, ID: created.ID, Actor: "admin",
-		Description: "relay entry " + name + " uploaded by " + scenarioLabel(ctx),
-	}); err != nil {
-		deleteURL, urlErr := g.serviceURL(ctx, "gateway-controller", "/certificates/"+created.ID)
-		if urlErr == nil {
-			if deleteErr := g.compensateDelete(ctx, deleteURL, g.scenarioHeaders(ctx)); deleteErr != nil {
-				return fmt.Errorf("registering relay entry %q for cleanup: %w; compensation failed: %v", name, err, deleteErr)
-			}
-		}
-		return fmt.Errorf("registering relay entry %q for cleanup: %w", name, err)
 	}
 	return nil
 }

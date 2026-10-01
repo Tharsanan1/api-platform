@@ -55,7 +55,6 @@ func (g *Gateway) registerMTLSObservabilitySteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the "([^"]*)" log `+sinceLatestPhrase+` should contain "(.*)"$`, g.logSinceLatestRequestContains)
 	sc.Step(`^the latest analytics event for path "([^"]*)" should have the user id of fixture "([^"]*)"$`, g.analyticsUserIDOfFixture)
 	sc.Step(`^the latest analytics event for path "([^"]*)" should not have metadata field "([^"]*)"$`, g.analyticsMetadataFieldAbsent)
-	sc.Step(`^the gateway identity fixture "([^"]*)" is stored as "([^"]*)"$`, g.storeGatewayIdentity)
 	sc.Step(`^the response should contain metric "([^"]*)" with labels (\{.*\}) and value (\S+)$`, g.metricSampleHasValue)
 	sc.Step(`^the response should (contain|not contain) metric "([^"]*)" with labels (\{.*\})$`, g.metricSeriesPresence)
 	sc.Step(`^the response should not contain metric "(.*)"$`, g.responseOmitsMetric)
@@ -427,25 +426,6 @@ func (g *Gateway) metricSampleHasValue(ctx context.Context, name, set, value str
 		return nil
 	}
 	return fmt.Errorf("no sample of metric %s with labels %s: %s", name, set, resp.Describe())
-}
-
-// storeGatewayIdentity uploads a fixture as a gateway identity, certificate and private key,
-// and requires the gateway to accept it.
-func (g *Gateway) storeGatewayIdentity(ctx context.Context, fixtureName, name string) error {
-	fixture, err := mtlsFixtureNamed(fixtureName)
-	if err != nil {
-		return err
-	}
-	resp, err := g.uploadFixtures(ctx, fixtureName, name, certificateUpload{
-		usage: "identity", privateKey: string(fixture.KeyPEM),
-	})
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("expected gateway identity %q to be stored with status 201, got %s", fixtureName, resp.Describe())
-	}
-	return nil
 }
 
 // responseOmitsMetric fails when the published exposition contains the text. The text is a

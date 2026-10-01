@@ -35,7 +35,6 @@ import (
 
 	"github.com/cucumber/godog"
 
-	"github.com/wso2/api-platform/tests/framework/core/cleanup"
 	frameworkruntime "github.com/wso2/api-platform/tests/framework/core/runtime"
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
@@ -136,7 +135,11 @@ func (g *Gateway) beginMTLSScenario(ctx context.Context, sc *godog.Scenario) (co
 			return ctx, err
 		}
 	}
-	return ctx, g.requireCleanGateway(ctx)
+	if err := g.requireCleanGateway(ctx); err != nil {
+		return ctx, err
+	}
+	markGatewayChanged(ctx)
+	return ctx, nil
 }
 
 func scenarioTags(sc *godog.Scenario) []string {
@@ -232,36 +235,7 @@ func (g *Gateway) uploadFixtures(ctx context.Context, fixtureList, nameExpr stri
 	if err != nil {
 		return nil, fmt.Errorf("encoding the certificate upload: %w", err)
 	}
-	url, err := g.serviceURL(ctx, "gateway-controller", "/certificates")
-	if err != nil {
-		return nil, err
-	}
-	resp, err := g.funnel.Post(ctx, url, g.headerWith(ctx, "Content-Type", "application/json"), payload)
-	if err != nil {
-		return nil, err
-	}
-	if !resp.Succeeded() {
-		return resp, nil
-	}
-	var created struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(resp.Body, &created); err != nil || created.ID == "" {
-		return resp, fmt.Errorf("certificate %q was accepted without an id: %s", name, resp.Describe())
-	}
-	id := created.ID
-	if err := cleanup.Register(ctx, cleanup.Resource{
-		Kind: cleanup.KindCertificate, ID: id, Actor: "admin", Description: "certificate " + name + " uploaded by " + scenarioLabel(ctx),
-	}); err != nil {
-		deleteURL, urlErr := g.serviceURL(ctx, "gateway-controller", "/certificates/"+id)
-		if urlErr == nil {
-			if deleteErr := g.compensateDelete(ctx, deleteURL, g.scenarioHeaders(ctx)); deleteErr != nil {
-				return resp, fmt.Errorf("registering certificate %q for cleanup: %w; compensation failed: %v", name, err, deleteErr)
-			}
-		}
-		return resp, fmt.Errorf("registering certificate %q for cleanup: %w", name, err)
-	}
-	return resp, nil
+	return g.postCertificate(ctx, name, payload)
 }
 
 // generatedCertificateName expands a certificate name and requires it to be generated for
@@ -338,7 +312,7 @@ func (g *Gateway) sendHTTPS(ctx context.Context, method, path, phrase string) er
 		return err
 	}
 	if isMTLSScenario(ctx) {
-		if err := g.awaitGatewayApplied(ctx); err != nil {
+		if err := g.settleAfterChange(ctx); err != nil {
 			return err
 		}
 	}
@@ -428,7 +402,11 @@ type clientAuthority struct {
 // Policy chain versions are left to awaitPolicySnapshotSync: the controller publishes an empty
 // policy snapshot when its last API is removed, and the policy engine is never sent it.
 func (g *Gateway) awaitGatewayApplied(ctx context.Context) error {
-	return awaitState(ctx, "waiting for the gateway to apply the client authority pool", g.observeGatewayApplied)
+	if err := awaitState(ctx, "waiting for the gateway to apply the client authority pool", g.observeGatewayApplied); err != nil {
+		return err
+	}
+	clearGatewayChange(ctx)
+	return nil
 }
 
 // observeGatewayApplied returns nil once the runtime holds what the controller holds, a
@@ -523,6 +501,7 @@ func poolThumbprints(pool map[string]clientAuthority) map[string]bool {
 // beforeAPIMutation records the controller's policy chain version before an @mtls scenario
 // changes an API, so a later policy snapshot wait can require the controller to move past it.
 func (g *Gateway) beforeAPIMutation(ctx context.Context) error {
+	markGatewayChanged(ctx)
 	if !isMTLSScenario(ctx) {
 		return nil
 	}

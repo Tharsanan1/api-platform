@@ -2187,6 +2187,7 @@ const (
 func (g *Gateway) mutateResource(
 	ctx context.Context, method, collection, id string, body *godog.DocString,
 ) error {
+	markGatewayChanged(ctx)
 	resolvedID, err := stepscommon.Expand(ctx, id)
 	if err != nil {
 		return err

@@ -32,10 +32,10 @@ import (
 
 	"github.com/cucumber/godog"
 
-	"github.com/wso2/api-platform/tests/framework/core/cleanup"
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
 	"github.com/wso2/api-platform/tests/framework/core/util/testpki"
 	stepscommon "github.com/wso2/api-platform/tests/framework/suites/it/steps/common"
+	"github.com/wso2/api-platform/tests/framework/testbench/services/tlsbackend"
 )
 
 // roleDefault marks the one gateway identity presented to backends that name none.
@@ -43,10 +43,8 @@ const roleDefault = "default"
 
 func (g *Gateway) registerDefaultIdentitySteps(sc *godog.ScenarioContext) {
 	g.registerEchoBackendSteps(sc)
-	sc.Step(`^the gateway identity "([^"]*)" is uploaded from fixture "([^"]*)"( with role default)?$`, g.storeGatewayIdentity)
+	sc.Step(`^the gateway identity "([^"]*)" is uploaded from fixture "([^"]*)"( with role default)?$`, g.storeGatewayIdentityWithRole)
 	sc.Step(`^I upload the gateway identity "([^"]*)" from fixture "([^"]*)"( with role default)?$`, g.uploadGatewayIdentity)
-	sc.Step(`^I upload the certificate fixture "([^"]*)" as "([^"]*)" with usage "([^"]*)" and role "([^"]*)"$`,
-		g.uploadCertificateWithRole)
 	sc.Step(`^I rotate the gateway identity "([^"]*)" from fixture "([^"]*)"$`, g.rotateGatewayIdentity)
 	sc.Step(`^I remove the gateway identity "([^"]*)"$`, g.deleteGatewayIdentity)
 	sc.Step(`^the gateway identity listing should show role default only on "([^"]*)"$`, g.listingShowsDefaultOnly)
@@ -55,8 +53,8 @@ func (g *Gateway) registerDefaultIdentitySteps(sc *godog.ScenarioContext) {
 
 // ── Gateway identities ─────────────────────────────────────────────────────────
 
-// certificateUpload describes one upload of a fixture to the certificate pool.
-type certificateUpload struct {
+// fixtureUpload describes one upload of a fixture to the certificate pool.
+type fixtureUpload struct {
 	fixture string
 	name    string
 	usage   string
@@ -64,8 +62,8 @@ type certificateUpload struct {
 	withKey bool
 }
 
-func (g *Gateway) storeGatewayIdentity(ctx context.Context, name, fixture, role string) error {
-	resp, err := g.uploadCertificate(ctx, certificateUpload{
+func (g *Gateway) storeGatewayIdentityWithRole(ctx context.Context, name, fixture, role string) error {
+	resp, err := g.uploadCertificate(ctx, fixtureUpload{
 		fixture: fixture, name: name, usage: "identity", role: roleFromPhrase(role), withKey: true,
 	})
 	if err != nil {
@@ -78,14 +76,9 @@ func (g *Gateway) storeGatewayIdentity(ctx context.Context, name, fixture, role 
 }
 
 func (g *Gateway) uploadGatewayIdentity(ctx context.Context, name, fixture, role string) error {
-	_, err := g.uploadCertificate(ctx, certificateUpload{
+	_, err := g.uploadCertificate(ctx, fixtureUpload{
 		fixture: fixture, name: name, usage: "identity", role: roleFromPhrase(role), withKey: true,
 	})
-	return err
-}
-
-func (g *Gateway) uploadCertificateWithRole(ctx context.Context, fixture, name, usage, role string) error {
-	_, err := g.uploadCertificate(ctx, certificateUpload{fixture: fixture, name: name, usage: usage, role: role})
 	return err
 }
 
@@ -105,9 +98,8 @@ func fixtureChainPEM(fixture *testpki.Fixture) string {
 	return chain
 }
 
-// uploadCertificate uploads a fixture under a generated name, publishes the response, and
-// registers an accepted certificate for cleanup at once.
-func (g *Gateway) uploadCertificate(ctx context.Context, u certificateUpload) (*httpx.Response, error) {
+// uploadCertificate uploads a fixture under a generated name through postCertificate.
+func (g *Gateway) uploadCertificate(ctx context.Context, u fixtureUpload) (*httpx.Response, error) {
 	name, err := g.generatedCertificateName(ctx, u.name)
 	if err != nil {
 		return nil, err
@@ -131,30 +123,7 @@ func (g *Gateway) uploadCertificate(ctx context.Context, u certificateUpload) (*
 	if err != nil {
 		return nil, fmt.Errorf("encoding the certificate upload: %w", err)
 	}
-	endpoint, err := g.serviceURL(ctx, "gateway-controller", "/certificates")
-	if err != nil {
-		return nil, err
-	}
-	resp, err := g.funnel.Post(ctx, endpoint, g.headerWith(ctx, "Content-Type", "application/json"), payload)
-	if err != nil {
-		return nil, err
-	}
-	if !resp.Succeeded() {
-		return resp, nil
-	}
-	var created struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(resp.Body, &created); err != nil || created.ID == "" {
-		return resp, fmt.Errorf("certificate %q was accepted without an id: %s", name, resp.Describe())
-	}
-	if err := cleanup.Register(ctx, cleanup.Resource{
-		Kind: cleanup.KindCertificate, ID: created.ID, Actor: "admin",
-		Description: "certificate " + name + " uploaded by " + scenarioLabel(ctx),
-	}); err != nil {
-		return resp, fmt.Errorf("registering certificate %q for cleanup: %w", name, err)
-	}
-	return resp, nil
+	return g.postCertificate(ctx, name, payload)
 }
 
 // identityEntry is one gateway identity in the certificate listing.
@@ -215,6 +184,7 @@ func (g *Gateway) rotateGatewayIdentity(ctx context.Context, nameExpr, fixtureNa
 	if err != nil {
 		return err
 	}
+	markGatewayChanged(ctx)
 	_, err = g.funnel.Put(ctx, endpoint, g.headerWith(ctx, "Content-Type", "application/json"), payload)
 	return err
 }
@@ -228,6 +198,7 @@ func (g *Gateway) deleteGatewayIdentity(ctx context.Context, nameExpr string) er
 	if err != nil {
 		return err
 	}
+	markGatewayChanged(ctx)
 	_, err = g.funnel.Delete(ctx, endpoint, g.scenarioHeaders(ctx))
 	return err
 }
@@ -356,7 +327,7 @@ func (g *Gateway) listenerSubject(ctx context.Context) (string, error) {
 func backendViewOf(resp *httpx.Response) (backendView, error) {
 	switch resp.StatusCode {
 	case http.StatusOK:
-		if subject := resp.Headers.Get(echoHeaderClientSubject); subject != "" {
+		if subject := resp.Headers.Get(tlsbackend.HeaderClientSubject); subject != "" {
 			return backendView{kind: viewSubject, subject: subject}, nil
 		}
 		return backendView{kind: viewNone}, nil

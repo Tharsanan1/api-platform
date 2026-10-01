@@ -109,7 +109,7 @@ func (g *Gateway) sendRelayingCertificate(ctx context.Context, method, path, hea
 		return err
 	}
 	if isMTLSScenario(ctx) {
-		if err := g.awaitGatewayApplied(ctx); err != nil {
+		if err := g.settleAfterChange(ctx); err != nil {
 			return err
 		}
 	}

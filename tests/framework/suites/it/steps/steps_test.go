@@ -20,16 +20,25 @@ package steps
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sync"
 	"testing"
 
+	"github.com/cucumber/godog"
+	"github.com/cucumber/godog/formatters"
+	messages "github.com/cucumber/messages/go/v34"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+
+	frameworkruntime "github.com/wso2/api-platform/tests/framework/core/runtime"
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
-	"gopkg.in/yaml.v3"
 )
 
 func TestSetRequestHostExpandsContextValues(t *testing.T) {
@@ -294,6 +303,85 @@ func TestJSONFieldIsBool(t *testing.T) {
 			require.NoError(t, tcontext.Set(ctx, httpx.ResponseKey, &httpx.Response{Body: []byte(tt.body)}))
 			err := (&Base{}).jsonFieldIsBool(ctx, tt.field, tt.want)
 			require.Equal(t, tt.ok, err == nil, "%v", err)
+		})
+	}
+}
+
+// mtlsFeatureFiles lists every feature that exercises mutual TLS: each mtls_*.feature and
+// certificates.feature.
+func mtlsFeatureFiles(t *testing.T, featureRoot string) []string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(featureRoot, "features", "mtls_*.feature"))
+	require.NoError(t, err)
+	require.NotEmpty(t, paths)
+	certificates := filepath.Join(featureRoot, "features", "certificates.feature")
+	_, err = os.Stat(certificates)
+	require.NoError(t, err)
+	return append(paths, certificates)
+}
+
+// unresolvedSteps records every step godog could not resolve to exactly one registered
+// definition. godog reports the definition it matched before it runs a scenario hook, and
+// reports none for a step that is undefined or, in strict mode, matches two patterns.
+type unresolvedSteps struct {
+	*godog.BaseFmt
+	mu    sync.Mutex
+	steps []string
+}
+
+func (u *unresolvedSteps) Defined(pickle *messages.Pickle, step *messages.PickleStep, def *formatters.StepDefinition) {
+	if def != nil {
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.steps = append(u.steps, fmt.Sprintf("%s: %s", pickle.Name, step.Text))
+}
+
+// stepResolution is the formatter the check installs; it hands back the recorder of the
+// run in progress.
+var (
+	stepResolutionMu sync.Mutex
+	stepResolution   *unresolvedSteps
+)
+
+func init() {
+	godog.Format("step-resolution", "records steps that match no pattern or more than one",
+		func(suite string, out io.Writer) formatters.Formatter {
+			stepResolutionMu.Lock()
+			defer stepResolutionMu.Unlock()
+			stepResolution = &unresolvedSteps{BaseFmt: godog.NewBaseFmt(suite, out)}
+			return stepResolution
+		})
+}
+
+// TestMTLSFeatureStepsAreDefined matches every step of every mutual TLS feature against the
+// registered steps without running one: a hook that fails every scenario skips the steps, and
+// godog still resolves each one first. A step that matches no pattern, or two, is reported.
+func TestMTLSFeatureStepsAreDefined(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	featureRoot := filepath.Join(filepath.Dir(source), "..")
+	for _, path := range mtlsFeatureFiles(t, featureRoot) {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			suite, err := New(&frameworkruntime.Topology{}, featureRoot)
+			require.NoError(t, err)
+
+			godog.TestSuite{
+				ScenarioInitializer: func(sc *godog.ScenarioContext) {
+					suite.Register(sc)
+					sc.Before(func(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
+						return ctx, errors.New("steps are matched, not run")
+					})
+				},
+				Options: &godog.Options{Format: "step-resolution", Output: io.Discard, NoColors: true, Strict: true, Paths: []string{path}},
+			}.Run()
+
+			stepResolutionMu.Lock()
+			recorded := stepResolution
+			stepResolutionMu.Unlock()
+			require.NotNil(t, recorded)
+			require.Empty(t, recorded.steps, "steps that match no pattern or more than one")
 		})
 	}
 }

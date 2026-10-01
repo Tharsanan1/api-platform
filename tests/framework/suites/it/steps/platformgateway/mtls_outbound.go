@@ -173,6 +173,7 @@ func (g *Gateway) putIdentityShape(ctx context.Context, nameExpr, usage, fixture
 	if err != nil {
 		return err
 	}
+	markGatewayChanged(ctx)
 	_, err = g.funnel.Put(ctx, url, g.headerWith(ctx, "Content-Type", "application/json"), payload)
 	return err
 }

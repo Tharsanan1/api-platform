@@ -74,10 +74,11 @@ type presentation struct {
 	withChain    bool
 	resumable    bool
 	reuseSession bool
+	relayed      relayedCertificate
 	bearer       string
 }
 
-var presentationPattern = regexp.MustCompile(`^(?:(with no client certificate)|with client certificate "([^"]+)"( and its chain)?( on a resumable TLS session)?|(on a new connection from the same TLS session cache))(?: and bearer token "([^"]+)")?$`)
+var presentationPattern = regexp.MustCompile(`^(?:(with no client certificate)|with client certificate "([^"]+)"( and its chain)?( on a resumable TLS session)?|(on a new connection from the same TLS session cache))(?: and header "([^"]+)" carrying certificate "([^"]+)"(?: encoded as "([^"]+)")?)?(?: and bearer token "([^"]+)")?$`)
 
 // parsePresentation reads the phrase that ends an HTTPS request step.
 func parsePresentation(phrase string) (presentation, error) {
@@ -86,14 +87,16 @@ func parsePresentation(phrase string) (presentation, error) {
 		return presentation{}, fmt.Errorf("unknown HTTPS request phrasing %q: expected "+
 			`with no client certificate, with client certificate "<fixture>" [and its chain] `+
 			`[on a resumable TLS session], or on a new connection from the same TLS session cache; `+
-			`each optionally followed by and bearer token "<token>"`, phrase)
+			`each optionally followed by and header "<name>" carrying certificate "<fixture>" [encoded as "<encoding>"] `+
+			`and by and bearer token "<token>"`, phrase)
 	}
 	return presentation{
 		fixture:      m[2],
 		withChain:    m[3] != "",
 		resumable:    m[4] != "",
 		reuseSession: m[5] != "",
-		bearer:       m[6],
+		relayed:      relayedCertificate{header: m[6], fixture: m[7], encoding: m[8]},
+		bearer:       m[9],
 	}, nil
 }
 
@@ -193,7 +196,7 @@ func (g *Gateway) uploadCertificateFixtures(ctx context.Context, fixtureList, na
 
 // uploadFixtures uploads the named fixtures as one PEM under a generated name, publishes the
 // response, and registers an accepted certificate for cleanup at once.
-func (g *Gateway) uploadFixtures(ctx context.Context, fixtureList, nameExpr, usage string) (*httpx.Response, error) {
+func (g *Gateway) uploadFixtures(ctx context.Context, fixtureList, nameExpr, usage string, fields ...certificateField) (*httpx.Response, error) {
 	name, err := g.generatedCertificateName(ctx, nameExpr)
 	if err != nil {
 		return nil, err
@@ -205,6 +208,9 @@ func (g *Gateway) uploadFixtures(ctx context.Context, fixtureList, nameExpr, usa
 	body := map[string]string{"name": name, "certificate": pemBundle}
 	if usage = strings.TrimSpace(usage); usage != "" {
 		body["usage"] = usage
+	}
+	for _, f := range fields {
+		body[f.name] = f.value
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -311,6 +317,9 @@ func (g *Gateway) sendHTTPS(ctx context.Context, method, path, phrase string) er
 			return expandErr
 		}
 		headers["Authorization"] = "Bearer " + token
+	}
+	if err := p.relayed.apply(headers); err != nil {
+		return err
 	}
 	if isMTLSScenario(ctx) {
 		if err := g.awaitGatewayApplied(ctx); err != nil {

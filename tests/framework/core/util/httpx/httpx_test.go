@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -610,4 +611,119 @@ func TestFunnelPublishesAClientTLSResponse(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, published.TLS.ClientCertificateRequested)
 	require.True(t, strings.HasPrefix(published.Text(), "client-valid "), published.Text())
+}
+
+// handshakeListener accepts one TLS connection, records the client certificate it saw, and
+// reports whether any bytes followed the handshake.
+func handshakeListener(t *testing.T, auth tls.ClientAuthType) (string, *tls.Certificate, <-chan string, <-chan int) {
+	t.Helper()
+	serverCert := clientCertificate(t, "ca-a")
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{*serverCert},
+		ClientAuth:   auth,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	subjects := make(chan string, 1)
+	bytesRead := make(chan int, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		tlsConn := conn.(*tls.Conn)
+		if handshakeErr := tlsConn.Handshake(); handshakeErr != nil {
+			return
+		}
+		state := tlsConn.ConnectionState()
+		subject := "none"
+		if len(state.PeerCertificates) > 0 {
+			subject = state.PeerCertificates[0].Subject.CommonName
+		}
+		subjects <- subject
+		_ = tlsConn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		n, _ := tlsConn.Read(make([]byte, 8))
+		bytesRead <- n
+	}()
+	return ln.Addr().String(), serverCert, subjects, bytesRead
+}
+
+func TestHandshakeReportsTheRequestWithoutAnHTTPRequest(t *testing.T) {
+	client := NewClient(Options{Timeout: 5 * time.Second})
+	address, serverCert, subjects, bytesRead := handshakeListener(t, tls.RequestClientCert)
+	state, err := client.Handshake(context.Background(), address, &ClientTLS{
+		Certificate: clientCertificate(t, "client-valid"), ServerName: "localhost", InsecureSkipVerify: true,
+	})
+	require.NoError(t, err)
+	require.True(t, state.ClientCertificateRequested)
+	require.Equal(t, "localhost", state.ServerName)
+	require.Equal(t, serverCert.Certificate[0], state.PeerCertificates[0].Raw)
+	require.Equal(t, "client-valid", <-subjects)
+	require.Zero(t, <-bytesRead)
+
+	quietAddress, _, _, quietBytes := handshakeListener(t, tls.NoClientCert)
+	state, err = client.Handshake(context.Background(), quietAddress, &ClientTLS{
+		InsecureSkipVerify: true, ServerName: "localhost",
+	})
+	require.NoError(t, err)
+	require.False(t, state.ClientCertificateRequested)
+	require.NotEmpty(t, state.PeerCertificates)
+	require.Zero(t, <-quietBytes)
+}
+
+func TestHandshakeRejectsAMissingConfigAndAClosedPort(t *testing.T) {
+	_, err := NewClient(Options{}).Handshake(context.Background(), "127.0.0.1:1", nil)
+	require.ErrorContains(t, err, "no client TLS")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	_, err = NewClient(Options{Timeout: time.Second}).Handshake(context.Background(), address, &ClientTLS{InsecureSkipVerify: true})
+	require.Error(t, err)
+}
+
+func TestHandshakeKeepsAShortTimeoutAndCapsALongOne(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	address := ln.Addr().String()
+
+	t.Run("shorter client timeout is kept", func(t *testing.T) {
+		started := time.Now()
+		_, err := NewClient(Options{Timeout: 200 * time.Millisecond}).Handshake(context.Background(), address,
+			&ClientTLS{InsecureSkipVerify: true})
+		require.Error(t, err)
+		require.Less(t, time.Since(started), time.Second)
+	})
+	t.Run("longer client timeout is capped", func(t *testing.T) {
+		started := time.Now()
+		_, err := NewClient(Options{Timeout: 30 * time.Second}).Handshake(context.Background(), address,
+			&ClientTLS{InsecureSkipVerify: true})
+		elapsed := time.Since(started)
+		require.Error(t, err)
+		require.Greater(t, elapsed, time.Second)
+		require.Less(t, elapsed, defaultHandshakeTimeout+3*time.Second)
+	})
 }

@@ -210,6 +210,26 @@ blocks:
         tags: "gateway-version>1.2.0"
         features:
           - features/mtls_pool_references.feature
+      - name: mtls-listener
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_listener.feature
+
+  # The relayed client certificate header is believed from any connection here, a gateway-wide
+  # setting the other mutual TLS blocks must not see.
+  - name: gateway-mtls-trust-any
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: tests/framework/core/catalog/overlays/mtls-header-trust-any.toml
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: mtls-header-bypass
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_header_bypass.feature
 
   - name: gateway-core
     parallel: 7

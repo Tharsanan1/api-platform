@@ -950,6 +950,8 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 	g.registerMTLSSteps(sc)
 	g.registerMTLSPoolSteps(sc)
 	g.registerWaitSteps(sc)
+	g.registerMTLSListenerSteps(sc)
+	g.registerMTLSHeaderBypassSteps(sc)
 	// Request state is runner-scoped, so clear it before each scenario.
 	sc.Before(func(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
 		if err := tcontext.Set(ctx, keyGatewaySpecVersion, gatewaySpecVersionForVersion(gatewayVersion(g.topo))); err != nil {
@@ -1625,8 +1627,9 @@ func (g *Gateway) serviceRequestWithBody(
 	}
 
 	// The config dump lags the deploy by one event-hub poll and nothing else exposes that, so
-	// the framework waits here rather than making every scenario encode the timing.
-	if method == http.MethodGet && strings.HasPrefix(strings.TrimPrefix(path, "/"), "config_dump") {
+	// the framework waits here rather than making every scenario encode the timing. Envoy's own
+	// dump names no API handles, so it is read as it is.
+	if method == http.MethodGet && service != "envoy-admin" && strings.HasPrefix(strings.TrimPrefix(path, "/"), "config_dump") {
 		if err := g.awaitDumpConsistent(ctx, url); err != nil {
 			return err
 		}

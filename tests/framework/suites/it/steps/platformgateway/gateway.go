@@ -1461,10 +1461,13 @@ var serviceEndpoints = map[string]struct {
 }{
 	"gateway-controller":       {component: "platform-gateway", endpoint: "rest", basePath: ManagementBasePath},
 	"gateway-controller-admin": {component: "platform-gateway", endpoint: "admin", basePath: adminBasePath},
-	"policy-engine":            {component: "platform-gateway", endpoint: "policy-admin"},
-	"analytics":                {component: "testbench", endpoint: "analytics", partitioned: true},
-	"capture":                  {component: "testbench", endpoint: "capture", partitioned: true},
-	"oauth2":                   {component: "testbench", endpoint: "oauth2", partitioned: true},
+	// The admin API of the controller that feeds the runtime over xDS, on a gateway that
+	// runs it apart from the management controller.
+	"gateway-controller-xds-admin": {component: "platform-gateway", endpoint: "xds-admin", basePath: adminBasePath},
+	"policy-engine":                {component: "platform-gateway", endpoint: "policy-admin"},
+	"analytics":                    {component: "testbench", endpoint: "analytics", partitioned: true},
+	"capture":                      {component: "testbench", endpoint: "capture", partitioned: true},
+	"oauth2":                       {component: "testbench", endpoint: "oauth2", partitioned: true},
 	// Metrics live on a DIFFERENT compose service from the one tests normally address —
 	// controller metrics on the controller, policy-engine metrics on the runtime — which the
 	// component contract resolves via Endpoint.Service. No base path: a scrape is not an API.
@@ -1535,7 +1538,7 @@ func (g *Gateway) serviceBasePath(service, defaultPath string) string {
 	switch service {
 	case "gateway-controller":
 		return gatewayManagementBasePath(g.topo)
-	case "gateway-controller-admin":
+	case "gateway-controller-admin", "gateway-controller-xds-admin":
 		return gatewayAdminBasePath(g.topo)
 	default:
 		return defaultPath

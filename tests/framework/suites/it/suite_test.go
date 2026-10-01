@@ -493,14 +493,27 @@ func TestEveryBlockSweepsEveryEngine(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, variants)
+	for source, engine := range singleEngineBlocks {
+		require.Contains(t, variants, source, "single-engine block %q is not in the suite", source)
+		require.Equal(t, []components.DBType{engine}, variants[source], "single-engine block %q", source)
+	}
 	for source, got := range variants {
-		if source == "devportal-webhook" || source == "multigateway" {
-			require.Len(t, got, 1, "single-engine block %q", source)
+		if _, single := singleEngineBlocks[source]; single {
 			continue
 		}
 		sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
 		require.Equal(t, coverageEngines, got, "block %q database coverage", source)
 	}
+}
+
+// singleEngineBlocks are the gateway blocks that run one engine by design, with that engine.
+// The webhook block follows its control plane's PostgreSQL store, the multigateway block
+// runs two gateway stacks rather than an engine matrix, and the two-controller block needs
+// a database server both controllers share.
+var singleEngineBlocks = map[string]components.DBType{
+	"devportal-webhook": components.Postgres,
+	"multigateway":      components.SQLite,
+	"gateway-mtls-ha":   components.Postgres,
 }
 
 const coverageSubject = "platform-gateway"

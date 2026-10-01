@@ -437,8 +437,11 @@ func (g *Gateway) observeGatewayApplied(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	attached, err := g.controllerAttachesMTLSAuth(ctx)
+	attached, err := g.controllerAttachesMTLSAuth(ctx, managementControllerAdmin)
 	if err != nil {
+		return err
+	}
+	if err := g.requireRuntimeControllerAgrees(ctx, attached); err != nil {
 		return err
 	}
 	held, err := g.policyEngineClientAuthorities(ctx)
@@ -585,11 +588,17 @@ func (s policySync) String() string {
 	return fmt.Sprintf("controller %q, policy engine %q", s.controller, s.engine)
 }
 
+// policySnapshotVersions reads the policy chain version of the controller that feeds the
+// runtime, since each controller numbers its own snapshots, and the policy engine's.
 func (g *Gateway) policySnapshotVersions(ctx context.Context) (policySync, error) {
 	var controller, engine struct {
 		Version *string `json:"policy_chain_version"`
 	}
-	if err := g.readJSON(ctx, "gateway-controller-admin", "/xds_sync_status", &controller); err != nil {
+	service, _, err := g.runtimeControllerAdmin()
+	if err != nil {
+		return policySync{}, err
+	}
+	if err := g.readJSON(ctx, service, "/xds_sync_status", &controller); err != nil {
 		return policySync{}, err
 	}
 	if err := g.readJSON(ctx, "policy-engine", "/xds_sync_status", &engine); err != nil {
@@ -624,9 +633,9 @@ func (g *Gateway) controllerClientAuthorities(ctx context.Context) (map[string]c
 	return out, nil
 }
 
-// controllerAttachesMTLSAuth reports whether any API the controller holds attaches mtls-auth,
-// at API level or on an operation.
-func (g *Gateway) controllerAttachesMTLSAuth(ctx context.Context) (bool, error) {
+// controllerAttachesMTLSAuth reports whether any API the controller behind an admin service
+// holds attaches mtls-auth, at API level or on an operation.
+func (g *Gateway) controllerAttachesMTLSAuth(ctx context.Context, adminService string) (bool, error) {
 	type policy struct {
 		Name string `json:"name"`
 	}
@@ -642,7 +651,7 @@ func (g *Gateway) controllerAttachesMTLSAuth(ctx context.Context) (bool, error) 
 			} `json:"configuration"`
 		} `json:"apis"`
 	}
-	if err := g.readJSON(ctx, "gateway-controller-admin", "/config_dump", &dump); err != nil {
+	if err := g.readJSON(ctx, adminService, "/config_dump", &dump); err != nil {
 		return false, err
 	}
 	for _, api := range dump.APIs {

@@ -1,0 +1,3 @@
+# Refuse to deploy an mtls-auth API that has no hostname of its own.
+[router.downstream_tls]
+mtls_requires_dedicated_hostname = true

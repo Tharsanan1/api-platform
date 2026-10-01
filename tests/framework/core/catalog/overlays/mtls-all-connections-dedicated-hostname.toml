@@ -1,0 +1,5 @@
+# Ask every HTTPS connection for a client certificate and require a dedicated hostname,
+# which has no effect while every connection is asked.
+[router.downstream_tls]
+client_certificate_request = "all_connections"
+mtls_requires_dedicated_hostname = true

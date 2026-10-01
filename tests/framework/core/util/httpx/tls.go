@@ -19,8 +19,10 @@
 package httpx
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"net"
 	"net/http"
 	"sync/atomic"
 )
@@ -33,6 +35,9 @@ type ClientTLS struct {
 	Certificate *tls.Certificate
 	// ServerName is the SNI value sent. Empty sends the URL host, which Go omits for an IP.
 	ServerName string
+	// OmitServerName sends no SNI whatever the URL host is. It ignores ServerName and needs
+	// InsecureSkipVerify, since a certificate cannot be verified against no name.
+	OmitServerName bool
 	// Sessions is shared by requests that may resume one another's TLS session. Nil
 	// disables resumption.
 	Sessions tls.ClientSessionCache
@@ -68,6 +73,9 @@ func (c *Client) newClientTLSExchange(opts *ClientTLS) *clientTLSExchange {
 	exchange := &clientTLSExchange{}
 	config := c.tlsConfig.Clone()
 	config.ServerName = opts.ServerName
+	if opts.OmitServerName {
+		config.ServerName = ""
+	}
 	config.InsecureSkipVerify = opts.InsecureSkipVerify //nolint:gosec // explicit opt-in for local self-signed listeners
 	config.ClientSessionCache = opts.Sessions
 	config.Certificates = nil
@@ -78,12 +86,33 @@ func (c *Client) newClientTLSExchange(opts *ClientTLS) *clientTLSExchange {
 		}
 		return opts.Certificate, nil
 	}
+	transport := &http.Transport{TLSClientConfig: config, DisableKeepAlives: true}
+	if opts.OmitServerName {
+		transport.DialTLSContext = dialWithoutServerName(config)
+	}
 	exchange.client = &http.Client{
 		Timeout:       c.http.Timeout,
 		CheckRedirect: c.http.CheckRedirect,
-		Transport:     &http.Transport{TLSClientConfig: config, DisableKeepAlives: true},
+		Transport:     transport,
 	}
 	return exchange
+}
+
+// dialWithoutServerName dials and handshakes itself, because the transport fills an empty
+// ServerName in from the URL host and a hostname URL would then send an SNI.
+func dialWithoutServerName(config *tls.Config) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		conn := tls.Client(raw, config)
+		if err := conn.HandshakeContext(ctx); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		return conn, nil
+	}
 }
 
 // state describes the handshake of a completed exchange.

@@ -1,0 +1,3 @@
+# Ask every HTTPS connection for a client certificate, whatever its hostname.
+[router.downstream_tls]
+client_certificate_request = "all_connections"

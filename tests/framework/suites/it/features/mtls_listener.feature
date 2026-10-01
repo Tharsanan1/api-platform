@@ -89,6 +89,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
       | spec.operations        | [{"method":"GET","path":"/health"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:neighbourContext}/${CTX:neighbourVersion}/health" until the route answers 200
+    And the HTTPS listener should request a client certificate
     When I send a "GET" request over HTTPS to "${CTX:neighbourContext}/${CTX:neighbourVersion}/health" with no client certificate
     Then the response status code should be 200
     When I send a "GET" request over HTTPS to "${CTX:neighbourContext}/${CTX:neighbourVersion}/health" with client certificate "client-valid"
@@ -230,6 +231,7 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
 
   Scenario: Attaching mtls-auth while the pool holds only relay entries is refused
     Given I upload the certificate fixture "edge-lb-ca" as "${CTX:edgeLb}" with usage "downstream" and role "relay"
+    And the response status should be 201
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion}       |
       | name                   | ${CTX:apiName}                  |

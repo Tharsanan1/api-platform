@@ -1188,59 +1188,65 @@ func (b *Base) echoedHeaderAbsent(ctx context.Context, name string) error {
 }
 
 func (b *Base) assertEchoedHeader(ctx context.Context, name, want string) error {
-	got, resolved, err := b.echoedHeaderValue(ctx, name, want)
+	values, resolved, err := b.echoedHeaderValues(ctx, name, want)
 	if err != nil {
 		return err
 	}
-	if got != resolved {
-		return fmt.Errorf("expected echoed header %q to be %q, got %q", name, resolved, got)
+	if len(values) != 1 || values[0] != resolved {
+		return fmt.Errorf("expected echoed header %q to be exactly %q, got %q", name, resolved, values)
 	}
 	return nil
 }
 
-// echoedHeaderContains asserts the gateway forwarded a header upstream whose value contains
-// the given text.
+// echoedHeaderContains asserts the gateway forwarded a header upstream with a value that
+// contains the given text.
 func (b *Base) echoedHeaderContains(ctx context.Context, name, want string) error {
-	got, resolved, err := b.echoedHeaderValue(ctx, name, want)
+	values, resolved, err := b.echoedHeaderValues(ctx, name, want)
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(got, resolved) {
-		return fmt.Errorf("expected echoed header %q to contain %q, got %q", name, resolved, got)
+	for _, value := range values {
+		if strings.Contains(value, resolved) {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("expected echoed header %q to contain %q, got %q", name, resolved, values)
 }
 
-// echoedHeaderValue returns the first value of an echoed header and the expanded expectation.
-func (b *Base) echoedHeaderValue(ctx context.Context, name, want string) (string, string, error) {
+// echoedHeaderValues returns every value of an echoed header and the expanded expectation.
+func (b *Base) echoedHeaderValues(ctx context.Context, name, want string) ([]string, string, error) {
 	resp, err := httpx.Published(ctx)
 	if err != nil {
-		return "", "", err
+		return nil, "", err
 	}
 	resolved, err := stepscommon.Expand(ctx, want)
 	if err != nil {
-		return "", "", err
+		return nil, "", err
 	}
 	headers, err := echoedHeaders(resp)
 	if err != nil {
-		return "", "", err
+		return nil, "", err
 	}
 	value, found := lookupEchoed(headers, name)
 	if !found {
-		return "", "", fmt.Errorf("expected echoed header %q to exist in response", name)
+		return nil, "", fmt.Errorf("expected echoed header %q to exist in response", name)
 	}
 
-	// A JSON echo may render a header as a string or an array; use the first value.
+	// A JSON echo may render a header as a string or an array of values.
 	switch v := value.(type) {
 	case string:
-		return v, resolved, nil
+		return []string{v}, resolved, nil
 	case []any:
 		if len(v) == 0 {
-			return "", "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
+			return nil, "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
 		}
-		return fmt.Sprintf("%v", v[0]), resolved, nil
+		values := make([]string, len(v))
+		for i, item := range v {
+			values[i] = fmt.Sprintf("%v", item)
+		}
+		return values, resolved, nil
 	default:
-		return "", "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
+		return nil, "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
 	}
 }
 

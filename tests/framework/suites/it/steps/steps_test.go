@@ -264,7 +264,10 @@ func TestEchoedHeaderAssertions(t *testing.T) {
 		wantContains bool
 	}{
 		{name: "string value", body: `{"headers":{"X-Forwarded-Client-Cert":"Subject=\"CN=client\";URI=urn:a"}}`, wantContains: true},
-		{name: "array value", body: `{"headers":{"x-forwarded-client-cert":["URI=urn:a","other"]}}`, wantExact: true, wantContains: true},
+		{name: "single element array", body: `{"headers":{"x-forwarded-client-cert":["URI=urn:a"]}}`, wantExact: true, wantContains: true},
+		{name: "expected value first of several", body: `{"headers":{"x-forwarded-client-cert":["URI=urn:a","other"]}}`, wantContains: true},
+		{name: "expected value after a forged one", body: `{"headers":{"x-forwarded-client-cert":["forged","URI=urn:a"]}}`, wantContains: true},
+		{name: "expected value in no element", body: `{"headers":{"x-forwarded-client-cert":["forged","other"]}}`},
 		{name: "other value", body: `{"headers":{"x-forwarded-client-cert":"URI=urn:b"}}`},
 		{name: "absent header", body: `{"headers":{}}`},
 		{name: "empty array", body: `{"headers":{"x-forwarded-client-cert":[]}}`},

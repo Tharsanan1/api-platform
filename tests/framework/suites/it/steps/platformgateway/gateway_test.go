@@ -3193,3 +3193,27 @@ func TestStepsThatChangeTheGatewayMarkIt(t *testing.T) {
 	require.NoError(t, g.rotateIdentity(ctx, "named-identity", "gw-identity-via-intermediate"))
 	require.True(t, gatewayChangePending(ctx), "rotating an identity")
 }
+
+func TestPublishedCertificatesAcceptsAnEmptyListingAndRefusesOtherBodies(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+		ok   bool
+	}{
+		{name: "empty listing renders null", body: `{"certificates":null,"totalCount":0,"totalBytes":0,"status":"success"}`, ok: true},
+		{name: "empty array", body: `{"certificates":[],"totalCount":0}`, ok: true},
+		{name: "one certificate", body: `{"certificates":[{"name":"a"}],"totalCount":1}`, want: 1, ok: true},
+		{name: "error body", body: `{"status":"error","message":"nope"}`},
+		{name: "not JSON", body: `nope`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+			require.NoError(t, tcontext.Set(ctx, httpx.ResponseKey, &httpx.Response{StatusCode: http.StatusOK, Body: []byte(tt.body)}))
+			certs, _, err := publishedCertificates(ctx)
+			require.Equal(t, tt.ok, err == nil, "%v", err)
+			require.Len(t, certs, tt.want)
+		})
+	}
+}

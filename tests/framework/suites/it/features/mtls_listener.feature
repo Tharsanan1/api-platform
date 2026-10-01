@@ -341,12 +341,14 @@ Feature: HTTPS listener derived from the APIs that use mutual TLS
   Scenario: A single-authority pool produces no inheritance warning
     Given the client authority pool is empty
     And the certificate fixture "ca-a" is pooled as "${CTX:partnerA}" with usage "downstream"
+    And I generate a unique resource name from "listener-host" and store it as "listenerLabel"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion}       |
       | name                   | ${CTX:apiName}                  |
       | spec.displayName       | mTLS Warned API                 |
       | spec.version           | ${CTX:apiVersion}               |
       | spec.context           | ${CTX:apiContext}/$version      |
+      | spec.vhosts.main       | ${CTX:listenerLabel}.example    |
       | spec.upstream.main.url | http://testbench:3000/api/v1    |
       | spec.policies          | [{"name":"mtls-auth","version":"v1"}] |
       | spec.operations        | [{"method":"GET","path":"/health"}] |

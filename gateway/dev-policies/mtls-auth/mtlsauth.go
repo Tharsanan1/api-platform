@@ -358,12 +358,15 @@ func (p *MtlsAuthPolicy) evaluateHeaderCertificate(set *authoritySet, values []s
 		return withLeafInfo(deny, leaf)
 	}
 
-	result := p.evaluateAcceptList(set, leaf, set.pool, now, "")
+	// Certificates after the caller's own in the value may only link it to a
+	// pooled authority, as the intermediates of a handshake do.
+	intermediates := set.headerIntermediates(values[0])
+	result := p.evaluateAcceptList(set, leaf, intermediates, now, "")
 	// No handshake verified this certificate, so the policy distinguishes the
 	// two ways it can reach no accept entry: it chains to no pooled authority
 	// at all (untrusted_chain), or it does but this API does not accept that
 	// authority (authority_not_accepted).
-	if result.reason == reasonAuthorityNotAccepted && !set.chainsToPool(leaf, now) {
+	if result.reason == reasonAuthorityNotAccepted && !verifyLeafAgainstRoots(leaf, set.pool, intermediates, now) {
 		result.reason = reasonUntrustedChain
 	}
 	result.source = source
@@ -558,6 +561,40 @@ func (s *authoritySet) connectionIntermediates(reqCtx *policy.RequestHeaderConte
 		intermediates.AddCert(c)
 	}
 	return intermediates
+}
+
+// headerIntermediates is the pool plus every certificate after the first in a
+// header value that carries a PEM chain. A value holding one certificate, or
+// DER, adds nothing.
+func (s *authoritySet) headerIntermediates(raw string) *x509.CertPool {
+	chain := headerPEMChain(raw)
+	if len(chain) < 2 {
+		return s.pool
+	}
+	intermediates := s.pool.Clone()
+	for _, c := range chain[1:] {
+		intermediates.AddCert(c)
+	}
+	return intermediates
+}
+
+// headerPEMChain returns every certificate in a header value carrying PEM, in
+// any form decodeHeaderCertificate accepts, or nil when it carries none.
+func headerPEMChain(raw string) []*x509.Certificate {
+	raw = strings.TrimSpace(raw)
+	candidate := raw
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		candidate = decoded
+	}
+	for _, text := range []string{raw, candidate} {
+		if certs := parsePEMCertificates(text); len(certs) > 0 {
+			return certs
+		}
+	}
+	if rebuilt := reconstitutePEMArmor(candidate); rebuilt != "" {
+		return parsePEMCertificates(rebuilt)
+	}
+	return nil
 }
 
 // verifyLeafAgainstRoots is the one x509 verification every check in this

@@ -1163,6 +1163,48 @@ func TestMtlsAuthPolicy_OnlyClientLeavesAuthenticate(t *testing.T) {
 	})
 }
 
+// A relayed chain links a caller to a pooled root through its intermediate, as
+// a handshake chain does; the intermediate never authenticates by itself.
+func TestMtlsAuthPolicy_RelayedChainLinksToAPooledRoot(t *testing.T) {
+	root := newRootCA(t, "Partner C Root CA")
+	intermediate := newIntermediateCA(t, root, "Partner C Issuing CA")
+	caller := newLeaf(t, intermediate, "caller-c", certOpts{})
+	otherRoot := newRootCA(t, "Other Root CA")
+	otherIntermediate := newIntermediateCA(t, otherRoot, "Other Issuing CA")
+	stranger := newLeaf(t, otherIntermediate, "stranger", certOpts{})
+
+	relayCA := newRootCA(t, "Edge LB CA")
+	relayLeaf := newLeaf(t, relayCA, "edge-lb", certOpts{dnsSANs: []string{"edge-lb.internal"}})
+
+	acceptEntries := []entrySpec{{ca: "partner-c-root", roots: []*testEntity{root}}}
+	pool := []*testEntity{root, relayCA}
+	relays := []relaySpec{{name: "relay-edge-lb", roots: []*testEntity{relayCA}}}
+	p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+	viaRelay := func(value string) *policy.RequestHeaderContext {
+		return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, value)
+	}
+
+	t.Run("the leaf alone does not reach the pooled root", func(t *testing.T) {
+		assertDenied(t, p, viaRelay(urlEncodedPEMHeaderValue(caller)), reasonUntrustedChain)
+	})
+	t.Run("leaf then intermediate, URL-encoded, authenticates the leaf", func(t *testing.T) {
+		result := assertAuthenticated(t, p, viaRelay(url.PathEscape(caller.pemCert()+intermediate.pemCert())), 0)
+		if result.subjectDN != caller.cert.Subject.String() {
+			t.Errorf("subject = %q, want the caller %q", result.subjectDN, caller.cert.Subject.String())
+		}
+	})
+	t.Run("leaf then intermediate, line breaks as spaces, authenticates the leaf", func(t *testing.T) {
+		value := strings.ReplaceAll(strings.TrimSpace(caller.pemCert()+intermediate.pemCert()), "\n", " ")
+		assertAuthenticated(t, p, viaRelay(value), 0)
+	})
+	t.Run("an intermediate from another root does not help", func(t *testing.T) {
+		assertDenied(t, p, viaRelay(url.PathEscape(stranger.pemCert()+otherIntermediate.pemCert())), reasonUntrustedChain)
+	})
+	t.Run("an intermediate first is refused, not used as the caller", func(t *testing.T) {
+		assertDenied(t, p, viaRelay(url.PathEscape(intermediate.pemCert()+caller.pemCert())), reasonInvalidCert)
+	})
+}
+
 func TestParseHeaderConfig(t *testing.T) {
 	for name, tc := range map[string]struct {
 		params map[string]interface{}

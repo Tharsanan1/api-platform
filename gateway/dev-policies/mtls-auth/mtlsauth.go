@@ -411,6 +411,12 @@ func (p *MtlsAuthPolicy) evaluateAcceptList(set *authoritySet, leaf *x509.Certif
 		}
 	}
 
+	// A certificate authority issues callers' certificates; it is never a caller.
+	if leaf.IsCA {
+		deny.reason = reasonInvalidCert
+		return deny
+	}
+
 	inPool := 0
 	for i, entry := range p.acceptEntries(set) {
 		roots, ok := set.clients[entry.ca]
@@ -418,7 +424,7 @@ func (p *MtlsAuthPolicy) evaluateAcceptList(set *authoritySet, leaf *x509.Certif
 			continue
 		}
 		inPool++
-		if !verifyLeafAgainstRoots(leaf, roots, intermediates, now) {
+		if !verifyClientLeafAgainstRoots(leaf, roots, intermediates, now) {
 			continue
 		}
 
@@ -495,7 +501,7 @@ func (s *authoritySet) matchRelay(reqCtx *policy.RequestHeaderContext, tls *poli
 	intermediates := s.connectionIntermediates(reqCtx, tls)
 	for i := range s.relays {
 		entry := &s.relays[i]
-		if !verifyLeafAgainstRoots(leaf, entry.roots, intermediates, now) {
+		if !verifyClientLeafAgainstRoots(leaf, entry.roots, intermediates, now) {
 			continue
 		}
 		if _, ok := sanNarrowedSubject(leaf, entry.uriSANs, entry.dnsSANs); !ok {
@@ -557,10 +563,22 @@ func (s *authoritySet) connectionIntermediates(reqCtx *policy.RequestHeaderConte
 // verifyLeafAgainstRoots is the one x509 verification every check in this
 // package uses.
 func verifyLeafAgainstRoots(leaf *x509.Certificate, roots, intermediates *x509.CertPool, now time.Time) bool {
+	return verifyLeaf(leaf, roots, intermediates, now, x509.ExtKeyUsageAny)
+}
+
+// verifyClientLeafAgainstRoots is verifyLeafAgainstRoots for a certificate
+// that authenticates a caller or a relay: its chain must allow client
+// authentication, as the TLS handshake requires. A certificate with no
+// extended key usage allows any use.
+func verifyClientLeafAgainstRoots(leaf *x509.Certificate, roots, intermediates *x509.CertPool, now time.Time) bool {
+	return verifyLeaf(leaf, roots, intermediates, now, x509.ExtKeyUsageClientAuth)
+}
+
+func verifyLeaf(leaf *x509.Certificate, roots, intermediates *x509.CertPool, now time.Time, usage x509.ExtKeyUsage) bool {
 	_, err := leaf.Verify(x509.VerifyOptions{
 		Roots:         roots,
 		Intermediates: intermediates,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		KeyUsages:     []x509.ExtKeyUsage{usage},
 		CurrentTime:   now,
 	})
 	return err == nil

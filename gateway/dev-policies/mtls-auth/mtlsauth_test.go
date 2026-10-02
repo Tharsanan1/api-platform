@@ -243,7 +243,7 @@ func issueCert(t *testing.T, cn string, opts certOpts) *testEntity {
 		tmpl.ExtKeyUsage = opts.ekus
 	case !opts.isCA:
 		// Client leaves default to clientAuth-only EKU, as real client
-		// certificates do, so every test exercises ExtKeyUsageAny verification.
+		// certificates do.
 		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
 	}
 
@@ -1124,6 +1124,43 @@ func TestGetPolicy_EmptyNarrowingFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A relayed certificate is held to the same rules as one on the handshake: it
+// must allow client authentication, and a certificate authority is never a
+// caller, however it arrives.
+func TestMtlsAuthPolicy_OnlyClientLeavesAuthenticate(t *testing.T) {
+	rootA := newRootCA(t, "Partner A Root CA")
+	clientLeaf := newLeaf(t, rootA, "client-valid", certOpts{})
+	serverOnlyLeaf := newLeaf(t, rootA, "partner-web", certOpts{ekus: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
+
+	relayCA := newRootCA(t, "Edge LB CA")
+	relayLeaf := newLeaf(t, relayCA, "edge-lb", certOpts{dnsSANs: []string{"edge-lb.internal"}})
+
+	acceptEntries := []entrySpec{{ca: "auth-ca-a", roots: []*testEntity{rootA}}}
+	pool := []*testEntity{rootA, relayCA}
+	relays := []relaySpec{{name: "relay-edge-lb", roots: []*testEntity{relayCA}}}
+	p := mustBuildRelayPolicy(t, pool, acceptEntries, relays, nil)
+	viaRelay := func(value string) *policy.RequestHeaderContext {
+		return reqCtxWithTLSAndHeader(downstreamTLSFromLeaf(relayLeaf, true), defaultHeaderName, value)
+	}
+
+	t.Run("a relayed client leaf authenticates", func(t *testing.T) {
+		assertAuthenticated(t, p, viaRelay(urlEncodedPEMHeaderValue(clientLeaf)), 0)
+	})
+	t.Run("a relayed server-only leaf is refused", func(t *testing.T) {
+		assertDenied(t, p, viaRelay(urlEncodedPEMHeaderValue(serverOnlyLeaf)), reasonAuthorityNotAccepted)
+	})
+	t.Run("a relayed certificate authority is refused", func(t *testing.T) {
+		assertDenied(t, p, viaRelay(urlEncodedPEMHeaderValue(rootA)), reasonInvalidCert)
+	})
+	t.Run("a relayed chain with the authority first is refused", func(t *testing.T) {
+		chain := url.PathEscape(rootA.pemCert() + clientLeaf.pemCert())
+		assertDenied(t, p, viaRelay(chain), reasonInvalidCert)
+	})
+	t.Run("a certificate authority on the handshake is refused", func(t *testing.T) {
+		assertDenied(t, p, reqCtxWithTLS(downstreamTLSFromLeaf(rootA, true)), reasonInvalidCert)
+	})
 }
 
 func TestParseHeaderConfig(t *testing.T) {

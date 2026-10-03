@@ -97,7 +97,7 @@ jobs:
           flags: platform-api-unit
 
   integration:
-    name: Integration suite (${{ matrix.leg }})
+    name: Integration suite (${{ matrix.leg }}, ${{ matrix.shard }})
     needs: unit
     runs-on: ubuntu-24.04
     env:
@@ -107,12 +107,58 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The source-built coverage instrumented Gateway.
+          # One job per mutual TLS block, and per engine for the blocks that sweep every engine.
           - leg: gateway-latest
-            suite_flags: '-coverage'
-          # The released 1.2.0 Gateway.
-          - leg: gateway-1.2.0
-            suite_flags: '-gateway-version=1.2.0'
+            shard: gateway-mtls-sqlite
+            suite_flags: '-blocks=gateway-mtls/sqlite'
+          - leg: gateway-latest
+            shard: gateway-mtls-postgres
+            suite_flags: '-blocks=gateway-mtls/postgres'
+          - leg: gateway-latest
+            shard: gateway-mtls-sqlserver
+            suite_flags: '-blocks=gateway-mtls/sqlserver'
+          - leg: gateway-latest
+            shard: gateway-mtls-ha
+            suite_flags: '-blocks=gateway-mtls-ha'
+          - leg: gateway-latest
+            shard: gateway-mtls-outbound-sqlite
+            suite_flags: '-blocks=gateway-mtls-outbound/sqlite'
+          - leg: gateway-latest
+            shard: gateway-mtls-outbound-postgres
+            suite_flags: '-blocks=gateway-mtls-outbound/postgres'
+          - leg: gateway-latest
+            shard: gateway-mtls-outbound-sqlserver
+            suite_flags: '-blocks=gateway-mtls-outbound/sqlserver'
+          - leg: gateway-latest
+            shard: gateway-mtls-trust-any
+            suite_flags: '-blocks=gateway-mtls-trust-any'
+          - leg: gateway-latest
+            shard: gateway-mtls-observability
+            suite_flags: '-blocks=gateway-mtls-observability'
+          - leg: gateway-latest
+            shard: gateway-mtls-default-identity-off
+            suite_flags: '-blocks=gateway-mtls-default-identity-off'
+          - leg: gateway-latest
+            shard: gateway-mtls-default-identity-on
+            suite_flags: '-blocks=gateway-mtls-default-identity-on'
+          - leg: gateway-latest
+            shard: gateway-mtls-hostnames-sqlite
+            suite_flags: '-blocks=gateway-mtls-hostnames/sqlite'
+          - leg: gateway-latest
+            shard: gateway-mtls-hostnames-postgres
+            suite_flags: '-blocks=gateway-mtls-hostnames/postgres'
+          - leg: gateway-latest
+            shard: gateway-mtls-hostnames-sqlserver
+            suite_flags: '-blocks=gateway-mtls-hostnames/sqlserver'
+          - leg: gateway-latest
+            shard: gateway-mtls-hostnames-required
+            suite_flags: '-blocks=gateway-mtls-hostnames-required'
+          - leg: gateway-latest
+            shard: gateway-mtls-hostnames-all-connections
+            suite_flags: '-blocks=gateway-mtls-hostnames-all-connections'
+          - leg: gateway-latest
+            shard: gateway-mtls-hostnames-all-connections-required
+            suite_flags: '-blocks=gateway-mtls-hostnames-all-connections-required'
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -162,21 +208,21 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: container-logs-${{ matrix.leg }}
+          name: container-logs-${{ matrix.leg }}-${{ matrix.shard }}
           path: tests/framework/suites/it/logs-out/**/*.log
           if-no-files-found: warn
           include-hidden-files: true
 
       # Coverage belongs to the source-built leg only.
       - name: Generate integration coverage report
-        if: matrix.leg == 'gateway-latest'
+        if: matrix.leg == 'gateway-latest' && contains(matrix.suite_flags, '-coverage')
         run: make -C tests/framework coverage-report
 
       - name: Upload coverage HTML reports
-        if: matrix.leg == 'gateway-latest'
+        if: matrix.leg == 'gateway-latest' && contains(matrix.suite_flags, '-coverage')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: coverage-reports-${{ matrix.leg }}
+          name: coverage-reports-${{ matrix.leg }}-${{ matrix.shard }}
           # The whole report tree: splitting by extension dropped the LCOV files Codecov
           # actually consumes and the CSS/JS/images the HTML reports need to render. The
           # raw per-run inputs live under a dot-prefixed .run-* directory, which
@@ -189,7 +235,7 @@ jobs:
       # Gated on the report above having been generated from a clean run; continue-on-error
       # keeps Codecov's availability from failing an otherwise green suite.
       - name: Upload gateway-controller integration coverage to Codecov
-        if: matrix.leg == 'gateway-latest'
+        if: matrix.leg == 'gateway-latest' && contains(matrix.suite_flags, '-coverage')
         continue-on-error: true
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
@@ -199,7 +245,7 @@ jobs:
           flags: gateway-controller-integration
 
       - name: Upload policy-engine integration coverage to Codecov
-        if: matrix.leg == 'gateway-latest'
+        if: matrix.leg == 'gateway-latest' && contains(matrix.suite_flags, '-coverage')
         continue-on-error: true
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
@@ -209,7 +255,7 @@ jobs:
           flags: policy-engine-integration
 
       - name: Upload platform-api integration coverage to Codecov
-        if: matrix.leg == 'gateway-latest'
+        if: matrix.leg == 'gateway-latest' && contains(matrix.suite_flags, '-coverage')
         continue-on-error: true
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:

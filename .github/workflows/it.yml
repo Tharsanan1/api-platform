@@ -107,17 +107,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # One job per mutual TLS block while those blocks are brought to green; a block that
-          # sweeps every engine runs its postgres variant only.
+          # One job per mutual TLS block, and per engine for the blocks that sweep every engine.
           - leg: gateway-latest
-            shard: gateway-mtls
+            shard: gateway-mtls-sqlite
+            suite_flags: '-blocks=gateway-mtls/sqlite'
+          - leg: gateway-latest
+            shard: gateway-mtls-postgres
             suite_flags: '-blocks=gateway-mtls/postgres'
+          - leg: gateway-latest
+            shard: gateway-mtls-sqlserver
+            suite_flags: '-blocks=gateway-mtls/sqlserver'
           - leg: gateway-latest
             shard: gateway-mtls-ha
             suite_flags: '-blocks=gateway-mtls-ha'
           - leg: gateway-latest
-            shard: gateway-mtls-outbound
+            shard: gateway-mtls-outbound-sqlite
+            suite_flags: '-blocks=gateway-mtls-outbound/sqlite'
+          - leg: gateway-latest
+            shard: gateway-mtls-outbound-postgres
             suite_flags: '-blocks=gateway-mtls-outbound/postgres'
+          - leg: gateway-latest
+            shard: gateway-mtls-outbound-sqlserver
+            suite_flags: '-blocks=gateway-mtls-outbound/sqlserver'
           - leg: gateway-latest
             shard: gateway-mtls-trust-any
             suite_flags: '-blocks=gateway-mtls-trust-any'
@@ -131,8 +142,14 @@ jobs:
             shard: gateway-mtls-default-identity-on
             suite_flags: '-blocks=gateway-mtls-default-identity-on'
           - leg: gateway-latest
-            shard: gateway-mtls-hostnames
+            shard: gateway-mtls-hostnames-sqlite
+            suite_flags: '-blocks=gateway-mtls-hostnames/sqlite'
+          - leg: gateway-latest
+            shard: gateway-mtls-hostnames-postgres
             suite_flags: '-blocks=gateway-mtls-hostnames/postgres'
+          - leg: gateway-latest
+            shard: gateway-mtls-hostnames-sqlserver
+            suite_flags: '-blocks=gateway-mtls-hostnames/sqlserver'
           - leg: gateway-latest
             shard: gateway-mtls-hostnames-required
             suite_flags: '-blocks=gateway-mtls-hostnames-required'
